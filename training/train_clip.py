@@ -24,11 +24,9 @@ from huggingface_hub import Repository
 from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
-from scalable_shampoo.distributed_shampoo import (GraftingType,
-                                                  distributed_shampoo)
+from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
-from transformers import (CLIPConfig, CLIPTokenizerFast, HfArgumentParser,
-                          set_seed)
+from transformers import CLIPConfig, CLIPTokenizerFast, HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 
 from clip_jax import FlaxCLIPModel
@@ -278,7 +276,7 @@ class TrainingArguments:
     )
 
     use_vmap_trick: bool = field(
-        default=True,
+        default=False,
         metadata={"help": "Optimization trick that should lead to faster training."},
     )
 
@@ -656,8 +654,6 @@ def main():
     model_metadata = model_args.get_metadata()
 
     # get PartitionSpec and shape for model params
-    if training_args.mp_devices > 1:
-        raise NotImplementedError("Model Parallelism not implemented yet")
     params_shape = freeze(model.params_shape_tree)
     params_spec = set_partitions(unfreeze(params_shape))
 
@@ -1259,8 +1255,7 @@ def main():
             self.offset_time = 0.0
 
         def update_state_metrics(self, state):
-            """Update internal state metrics (logged at each call to be used as x-axis)
-            """
+            """Update internal state metrics (logged at each call to be used as x-axis)"""
             self.state_dict = {
                 f'train/{k.split("_")[-1]}': state[k]
                 for k in ["step", "epoch", "train_time", "train_samples"]
