@@ -24,8 +24,6 @@ from flax.linen import combine_masks, make_causal_mask
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
-
-from .utils import PretrainedFromWandbMixin
 from transformers.modeling_flax_outputs import (
     FlaxBaseModelOutput,
     FlaxBaseModelOutputWithPooling,
@@ -37,8 +35,9 @@ from transformers.modeling_flax_utils import (
     overwrite_call_docstring,
 )
 from transformers.utils import ModelOutput, add_start_docstrings, logging
-from .configuration_clip import CLIPConfig, CLIPTextConfig, CLIPVisionConfig
 
+from .configuration_clip import CLIPConfig, CLIPTextConfig, CLIPVisionConfig
+from .utils import PretrainedFromWandbMixin
 
 logger = logging.get_logger(__name__)
 
@@ -280,8 +279,8 @@ class FlaxCLIPAttention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads})."
+                "embed_dim must be divisible by num_heads (got `embed_dim`:"
+                f" {self.embed_dim} and `num_heads`: {self.num_heads})."
             )
         self.scale = self.head_dim**-0.5
         self.dropout = self.config.attention_dropout
@@ -452,6 +451,9 @@ class FlaxCLIPEncoderLayer(nn.Module):
         if output_attentions:
             outputs += attn_outputs[1:]
 
+        if self.config.use_scan:
+            return outputs, ()
+
         return outputs
 
 
@@ -465,6 +467,7 @@ class FlaxCLIPLayerCollection(nn.Module):
             for i in range(self.config.num_hidden_layers)
         ]
 
+    @nn.compact
     def __call__(
         self,
         hidden_states,
@@ -477,20 +480,35 @@ class FlaxCLIPLayerCollection(nn.Module):
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
 
-        for layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
-            layer_outputs = layer(
-                hidden_states,
-                attention_mask,
-                deterministic=deterministic,
-                output_attentions=output_attentions,
+        if self.config.use_scan:
+            # keep it simple
+            assert (
+                not output_attentions and not output_hidden_states
+            ), "scan does not support output_attentions or output_hidden_states"
+            hidden_states, _ = nn.scan(
+                FlaxCLIPEncoderLayer,
+                variable_axes={"params": 0},
+                split_rngs={"params": True, "dropout": True},
+                in_axes=(nn.broadcast, nn.broadcast, nn.broadcast),
+                length=self.config.num_hidden_layers,
+            )(self.config, dtype=self.dtype, name="scanned")(
+                hidden_states, attention_mask, deterministic, output_attentions
             )
-            hidden_states = layer_outputs[0]
+        else:
+            for layer in self.layers:
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
 
-            if output_attentions:
-                all_attentions += (layer_outputs[1],)
+                layer_outputs = layer(
+                    hidden_states,
+                    attention_mask,
+                    deterministic=deterministic,
+                    output_attentions=output_attentions,
+                )
+                hidden_states = layer_outputs[0]
+
+                if output_attentions:
+                    all_attentions += (layer_outputs[1],)
 
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
@@ -913,6 +931,25 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
             return freeze(unflatten_dict(params))
         else:
             return random_params
+
+    def unscan(self, params):
+        if self.config.use_scan:
+            self.config.use_scan = False
+            params = flatten_dict(params)
+            scanned_keys = [k for k in params.keys() if "scanned" in k]
+            for k in scanned_keys:
+                v = params[k]
+                name_idx = k.index("scanned")
+                for i in range(len(v)):
+                    new_k = (
+                        *k[:name_idx],
+                        f"{i}",
+                        *k[name_idx + 1 :],
+                    )
+                    params[new_k] = v[i]
+                del params[k]
+            params = unflatten_dict(params)
+        return params
 
     def __call__(
         self,
