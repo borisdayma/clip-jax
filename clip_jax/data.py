@@ -123,8 +123,13 @@ class Dataset:
                 files = [f"{Path(f)}" for f in Path(folder).glob("*.tfrecord")]
                 assert len(files) > 0, f"No files found at folder: {folder}"
 
+                # shuffle files
+                random.shuffle(files)
+
                 # load dataset
-                ds = tf.data.TFRecordDataset(files)
+                ds = tf.data.TFRecordDataset(
+                    files, num_parallel_reads=tf.data.experimental.AUTOTUNE
+                )
 
                 if self.multi_hosts and dataset == "train":
                     # repeat indefinitely
