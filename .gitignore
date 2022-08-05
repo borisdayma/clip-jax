@@ -157,3 +157,4 @@ tags
 # project specific files
 cc3m/
 wandb/
+jax_cache/
