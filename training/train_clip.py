@@ -20,11 +20,13 @@ import wandb
 from flax import core, struct
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.serialization import from_bytes, to_bytes
+from flax.traverse_util import flatten_dict, unflatten_dict
 from huggingface_hub import Repository
 from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
-from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
+from scalable_shampoo.distributed_shampoo import (GraftingType,
+                                                  distributed_shampoo)
 from tqdm import tqdm
 from transformers import CLIPTokenizerFast, HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
@@ -555,6 +557,29 @@ def flat_args(model_args, data_args, training_args):
     return args
 
 
+def split_scanned_params(data):
+    """Split params between scanned and non-scanned"""
+    flat = flatten_dict(unfreeze(data))
+    split = {"standard": {}, "scanned": {}}
+    for k, v in flat.items():
+        if "scanned" in k:
+            split["scanned"][k] = v
+        else:
+            split["standard"][k] = v
+    # remove empty keys
+    split = {k: v for k, v in split.items() if v}
+    for k, v in split.items():
+        split[k] = freeze(unflatten_dict(v))
+    return split
+
+
+def unsplit_scanned_params(data):
+    flat = {}
+    for k in data.keys():
+        flat.update(flatten_dict(unfreeze(data[k])))
+    return freeze(unflatten_dict(flat))
+
+
 assert jax.local_device_count() == 8
 
 
@@ -664,7 +689,9 @@ def main():
 
     # get PartitionSpec and shape for model params
     params_shape = freeze(model.params_shape_tree)
-    params_spec = set_partitions(unfreeze(params_shape))
+    params_spec = set_partitions(
+        unfreeze(params_shape), model.config.text_config.use_scan
+    )
 
     # Initialize our training
     rng = jax.random.PRNGKey(training_args.seed_model)
@@ -807,11 +834,20 @@ def main():
         opt = _opt(learning_rate_fn)
         update_fn = opt.update
 
-        optimizer = opt.init(params_shape)
-        opt_fn = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
-            optimizer.pspec_fn, optimizer.shape_and_dtype_fn
-        )
-        optimizer = optax.GradientTransformation(optimizer.init_fn, update_fn)
+        # for main optimizer, we need to allow scanned layers
+        optimizer = {}
+        opt_fn = {}
+        for k, p in split_scanned_params(params_shape).items():
+            if "scanned" in k:
+                # extract 1 layer
+                p = jax.eval_shape(
+                    lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p
+                )
+            optimizer[k] = opt.init(p)
+            opt_fn[k] = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
+                optimizer[k].pspec_fn, optimizer[k].shape_and_dtype_fn
+            )
+            optimizer[k] = optax.GradientTransformation(optimizer[k].init_fn, update_fn)
 
     elif training_args.optim == "adam":
         _opt = partial(
@@ -821,12 +857,20 @@ def main():
             eps=training_args.adam_epsilon,
             weight_decay=training_args.weight_decay,
         )
-        optimizer = _opt(learning_rate=learning_rate_fn)
+        optimizer = {
+            k: _opt(learning_rate=learning_rate_fn)
+            for k in split_scanned_params(params_shape)
+        }
 
     # get PartitionSpec and shape of optimizer state
     def get_opt_state_spec_and_shape():
         # get opt_state shape without actual init
-        opt_state_shape = jax.eval_shape(optimizer.init, params_shape)
+        opt_state_shape = {}
+        for k, p in split_scanned_params(params_shape).items():
+            if "scanned" in k:
+                opt_state_shape[k] = jax.eval_shape(jax.vmap(optimizer[k].init), p)
+            else:
+                opt_state_shape[k] = jax.eval_shape(optimizer[k].init, p)
 
         # utility functions for Adam
         def _adam_opt_state_spec_per_leaf(x, spec):
@@ -850,6 +894,8 @@ def main():
             )
 
         # get PartitionSpec
+        split_spec = split_scanned_params(params_spec)
+        opt_state_spec = {}
 
         def _get_spec(**kwargs):
             """Get optimizer spec for a certain model portion"""
@@ -864,13 +910,21 @@ def main():
             else:
                 raise NotImplementedError
 
-        _opt_fn = opt_fn if training_args.optim == "distributed_shampoo" else None
-        opt_state_spec = _get_spec(
-            params_spec=params_spec,
-            opt_state_shape=opt_state_shape,
-            opt_fn=_opt_fn,
-            params_shape=params_shape,
-        )
+        for k, p in split_scanned_params(params_shape).items():
+            if "scanned" in k:
+                # extract 1 layer
+                p = jax.eval_shape(
+                    lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p
+                )
+            _opt_fn = (
+                opt_fn[k] if training_args.optim == "distributed_shampoo" else None
+            )
+            opt_state_spec[k] = _get_spec(
+                params_spec=split_spec[k],
+                opt_state_shape=opt_state_shape[k],
+                opt_fn=_opt_fn,
+                params_shape=p,
+            )
         return opt_state_spec, opt_state_shape
 
     opt_state_spec, opt_state_shape = get_opt_state_spec_and_shape()
@@ -891,9 +945,21 @@ def main():
         train_samples: int = 0  # number of samples seen
 
         def apply_gradients(self, *, grads, **kwargs):
-            update_fn = optimizer.update
-            updates, new_opt_state = update_fn(grads, self.opt_state, self.params)
-            new_params = optax.apply_updates(self.params, updates)
+            # apply gradients to model parameters
+            grads = split_scanned_params(grads)
+            params = split_scanned_params(self.params)
+            new_opt_state = {}
+            new_params = {}
+            for k, param in params.items():
+                update_fn = optimizer[k].update
+                if "scanned" in k:
+                    update_fn = jax.vmap(update_fn, in_axes=(0, 0, 0), out_axes=(0, 0))
+                updates, new_opt_state[k] = update_fn(
+                    grads[k], self.opt_state[k], param
+                )
+                new_params[k] = optax.apply_updates(param, updates)
+            new_params = unsplit_scanned_params(new_params)
+
             return self.replace(
                 step=self.step + 1,
                 params=new_params,
@@ -903,8 +969,12 @@ def main():
 
         @classmethod
         def create(cls, *, params, **kwargs):
-            init_fn = optimizer.init
-            opt_state = init_fn(params)
+            opt_state = {}
+            for k, p in split_scanned_params(params).items():
+                init_fn = optimizer[k].init
+                if "scanned" in k:
+                    init_fn = jax.vmap(init_fn)
+                opt_state[k] = init_fn(p)
             return cls(
                 step=0,
                 params=params,
