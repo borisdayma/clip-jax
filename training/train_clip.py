@@ -26,10 +26,10 @@ from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
-from transformers import CLIPConfig, CLIPTokenizerFast, HfArgumentParser, set_seed
+from transformers import CLIPTokenizerFast, HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 
-from clip_jax import FlaxCLIPModel
+from clip_jax import CLIPConfig, FlaxCLIPModel
 from clip_jax.data import Dataset
 from clip_jax.partitions import set_partitions
 
@@ -415,6 +415,12 @@ class ModelArguments:
             "help": "Pretrained config name or path if not the same as model_name"
         },
     )
+    tokenizer_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Pretrained tokenizer name or path if not the same as model_name"
+        },
+    )
     cache_dir: Optional[str] = field(
         default=None,
         metadata={
@@ -452,6 +458,11 @@ class ModelArguments:
     )
 
     def __post_init__(self):
+        if self.tokenizer_name is None:
+            self.tokenizer_name = self.model_name_or_path
+            assert (
+                self.tokenizer_name is not None
+            ), "Tokenizer name or model name/path needs to be specified"
         if self.restore_state is True:
             assert (
                 self.model_name_or_path is not None
@@ -642,9 +653,7 @@ def main():
 
     # Load tokenizer
     tokenizer = CLIPTokenizerFast.from_pretrained(
-        model_args.model_name_or_path
-        if model_args.model_name_or_path is not None
-        else model_args.config_name
+        model_args.tokenizer_name,
     )
 
     # overwrite certain config parameters
@@ -1327,18 +1336,23 @@ def main():
         if training_args.do_eval:
             start_eval_time = time.perf_counter()
             metrics = []
-            # number of steps required to have enough samples to log
-            n_samples_step = (
-                training_args.log_n_samples / training_args.valid_batch_size_per_node
-            )
-            images, predictions = [], []
-            for i, batch in tqdm(
-                enumerate(dataset.valid.as_numpy_iterator()),
+            for batch in tqdm(
+                dataset.valid.as_numpy_iterator(),
                 desc="Evaluating...",
                 position=2,
                 leave=False,
                 disable=jax.process_index() > 0,
             ):
+
+                # preprocess batch
+                txt_inputs = tokenizer(
+                    [caption.decode("utf-8") for caption in batch[1]],
+                    padding="max_length",
+                    truncation=True,
+                    return_tensors="np",
+                )
+                batch = {"pixel_values": batch[0], **txt_inputs}
+
                 # need to keep only items relevant to the node
                 batch = jax.tree_util.tree_map(
                     lambda x: x.reshape(
@@ -1395,6 +1409,9 @@ def main():
             params = jax.device_get(state.params)
             model.save_pretrained(output_dir, params=params)
 
+            # save tokenizer
+            tokenizer.save_pretrained(output_dir)
+
             # save state
             opt_state = jax.device_get(state.opt_state)
             with (Path(output_dir) / "opt_state.msgpack").open("wb") as f:
@@ -1429,6 +1446,13 @@ def main():
                 for filename in [
                     "config.json",
                     "flax_model.msgpack",
+                    # tokenizer
+                    "tokenizer_config.json",
+                    "special_tokens_map.json",
+                    "vocab.json",
+                    "merges.txt",
+                    "added_tokens.json",
+                    "tokenizer.json",
                 ]:
                     artifact.add_file(f"{Path(training_args.output_dir) / filename}")
                 wandb.run.log_artifact(artifact)
