@@ -20,18 +20,20 @@ import wandb
 from flax import core, struct
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.serialization import from_bytes, to_bytes
-from flax.traverse_util import flatten_dict, unflatten_dict
 from huggingface_hub import Repository
 from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
-from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
+from scalable_shampoo.distributed_shampoo import (GraftingType,
+                                                  distributed_shampoo)
 from tqdm import tqdm
-from transformers import ClipConfig, HfArgumentParser, set_seed
+from transformers import (CLIPConfig, CLIPTokenizerFast, HfArgumentParser,
+                          set_seed)
 from transformers.utils import get_full_repo_name
 
 from clip_jax import FlaxCLIPModel
 from clip_jax.data import Dataset
+from clip_jax.partitions import set_partitions
 
 logger = logging.getLogger(__name__)
 
@@ -503,7 +505,7 @@ class DataTrainingArguments:
         }
     )
     image_size: Optional[int] = field(
-        default=256, metadata={"help": " The size (resolution) of each image."}
+        default=224, metadata={"help": " The size (resolution) of each image."}
     )
     min_original_image_size: Optional[int] = field(
         default=None,
@@ -542,29 +544,6 @@ def flat_args(model_args, data_args, training_args):
     args.update(asdict(data_args))
     args.update(asdict(training_args))
     return args
-
-
-def split_scanned_params(data):
-    """Split params between scanned and non-scanned"""
-    flat = flatten_dict(unfreeze(data))
-    split = {"standard": {}, "scanned": {}}
-    for k, v in flat.items():
-        if "scanned" in k:
-            split["scanned"][k] = v
-        else:
-            split["standard"][k] = v
-    # remove empty keys
-    split = {k: v for k, v in split.items() if v}
-    for k, v in split.items():
-        split[k] = freeze(unflatten_dict(v))
-    return split
-
-
-def unsplit_scanned_params(data):
-    flat = {}
-    for k in data.keys():
-        flat.update(flatten_dict(unfreeze(data[k])))
-    return freeze(unflatten_dict(flat))
 
 
 assert jax.local_device_count() == 8
@@ -641,7 +620,7 @@ def main():
 
     # Set up model configs
     if model_args.config_name:
-        config = ClipConfig.from_pretrained(model_args.config_name)
+        config = CLIPConfig.from_pretrained(model_args.config_name)
     else:
         config = None
 
@@ -663,6 +642,13 @@ def main():
         )
         params = None
 
+    # Load tokenizer
+    tokenizer = CLIPTokenizerFast.from_pretrained(
+        model_args.model_name_or_path
+        if model_args.model_name_or_path is not None
+        else model_args.config_name
+    )
+
     # overwrite certain config parameters
     model.config.gradient_checkpointing = training_args.gradient_checkpointing
 
@@ -673,7 +659,7 @@ def main():
     if training_args.mp_devices > 1:
         raise NotImplementedError("Model Parallelism not implemented yet")
     params_shape = freeze(model.params_shape_tree)
-    params_spec = jax.tree_util.tree_map(lambda _: PartitionSpec(None), params_shape)
+    params_spec = set_partitions(unfreeze(params_shape))
 
     # Initialize our training
     rng = jax.random.PRNGKey(training_args.seed_model)
@@ -681,7 +667,6 @@ def main():
 
     # Store some constant
     num_epochs = training_args.num_train_epochs
-    num_params = model.num_params(params_shape)
 
     # log some info
     logger.info("***** Running training *****")
@@ -692,7 +677,6 @@ def main():
         f"  Gradient accumulation steps = {training_args.gradient_accumulation_steps}"
     )
     logger.info(f"  Batch size per update = {training_args.batch_size_per_step}")
-    logger.info(f"  Model parameters = {num_params:,}")
 
     if jax.process_index() == 0:
         # set default x-axis as 'train/step'
@@ -702,7 +686,6 @@ def main():
         wandb.config.update(
             {
                 "batch_size_per_step": training_args.batch_size_per_step,
-                "num_params": num_params,
                 "model_config": model.config.to_dict(),
                 "num_devices": jax.device_count(),
                 "versions": {
@@ -819,20 +802,11 @@ def main():
         opt = _opt(learning_rate_fn)
         update_fn = opt.update
 
-        # for main optimizer, we need to allow scanned layers
-        optimizer = {}
-        opt_fn = {}
-        for k, p in split_scanned_params(params_shape).items():
-            if "scanned" in k:
-                # extract 1 layer
-                p = jax.eval_shape(
-                    lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p
-                )
-            optimizer[k] = opt.init(p)
-            opt_fn[k] = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
-                optimizer[k].pspec_fn, optimizer[k].shape_and_dtype_fn
-            )
-            optimizer[k] = optax.GradientTransformation(optimizer[k].init_fn, update_fn)
+        optimizer = opt.init(params_shape)
+        opt_fn = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
+            optimizer.pspec_fn, optimizer.shape_and_dtype_fn
+        )
+        optimizer = optax.GradientTransformation(optimizer.init_fn, update_fn)
 
     elif training_args.optim == "adam":
         _opt = partial(
@@ -842,20 +816,12 @@ def main():
             eps=training_args.adam_epsilon,
             weight_decay=training_args.weight_decay,
         )
-        optimizer = {
-            k: _opt(learning_rate=learning_rate_fn)
-            for k in split_scanned_params(params_shape)
-        }
+        optimizer = _opt(learning_rate=learning_rate_fn)
 
     # get PartitionSpec and shape of optimizer state
     def get_opt_state_spec_and_shape():
         # get opt_state shape without actual init
-        opt_state_shape = {}
-        for k, p in split_scanned_params(params_shape).items():
-            if "scanned" in k:
-                opt_state_shape[k] = jax.eval_shape(jax.vmap(optimizer[k].init), p)
-            else:
-                opt_state_shape[k] = jax.eval_shape(optimizer[k].init, p)
+        opt_state_shape = jax.eval_shape(optimizer.init, params_shape)
 
         # utility functions for Adam
         def _adam_opt_state_spec_per_leaf(x, spec):
@@ -879,8 +845,6 @@ def main():
             )
 
         # get PartitionSpec
-        split_spec = split_scanned_params(params_spec)
-        opt_state_spec = {}
 
         def _get_spec(**kwargs):
             """Get optimizer spec for a certain model portion"""
@@ -895,31 +859,16 @@ def main():
             else:
                 raise NotImplementedError
 
-        # get spec for model optimizer
-        for k, p in split_scanned_params(params_shape).items():
-            if "scanned" in k:
-                # extract 1 layer
-                p = jax.eval_shape(
-                    lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p
-                )
-            _opt_fn = (
-                opt_fn[k] if training_args.optim == "distributed_shampoo" else None
-            )
-            opt_state_spec[k] = _get_spec(
-                params_spec=split_spec[k],
-                opt_state_shape=opt_state_shape[k],
-                opt_fn=_opt_fn,
-                params_shape=p,
-            )
-        return (
-            opt_state_spec,
-            opt_state_shape,
+        _opt_fn = opt_fn if training_args.optim == "distributed_shampoo" else None
+        opt_state_spec = _get_spec(
+            params_spec=params_spec,
+            opt_state_shape=opt_state_shape,
+            opt_fn=_opt_fn,
+            params_shape=params_shape,
         )
+        return opt_state_spec, opt_state_shape
 
-    (
-        opt_state_spec,
-        opt_state_shape,
-    ) = get_opt_state_spec_and_shape()
+    opt_state_spec, opt_state_shape = get_opt_state_spec_and_shape()
 
     # create a mesh
     mesh_shape = (training_args.dp_devices, training_args.mp_devices)
@@ -937,21 +886,9 @@ def main():
         train_samples: int = 0  # number of samples seen
 
         def apply_gradients(self, *, grads, **kwargs):
-            # apply gradients to model parameters
-            grads = split_scanned_params(grads)
-            params = split_scanned_params(self.params)
-            new_opt_state = {}
-            new_params = {}
-            for k, param in params.items():
-                update_fn = optimizer[k].update
-                if "scanned" in k:
-                    update_fn = jax.vmap(update_fn, in_axes=(0, 0, 0), out_axes=(0, 0))
-                updates, new_opt_state[k] = update_fn(
-                    grads[k], self.opt_state[k], param
-                )
-                new_params[k] = optax.apply_updates(param, updates)
-            new_params = unsplit_scanned_params(new_params)
-
+            update_fn = optimizer.update
+            updates, new_opt_state = update_fn(grads, self.opt_state, self.params)
+            new_params = optax.apply_updates(self.params, updates)
             return self.replace(
                 step=self.step + 1,
                 params=new_params,
@@ -961,12 +898,8 @@ def main():
 
         @classmethod
         def create(cls, *, params, **kwargs):
-            opt_state = {}
-            for k, p in split_scanned_params(params).items():
-                init_fn = optimizer[k].init
-                if "scanned" in k:
-                    init_fn = jax.vmap(init_fn)
-                opt_state[k] = init_fn(p)
+            init_fn = optimizer.init
+            opt_state = init_fn(params)
             return cls(
                 step=0,
                 params=params,
@@ -1015,11 +948,11 @@ def main():
 
             state = pjit(
                 init_state,
-                in_axis_resources=(
-                    params_spec if model_args.model_name_or_path else None,
-                ),
+                in_axis_resources=(params_spec,)
+                if model_args.model_name_or_path
+                else None,
                 out_axis_resources=state_spec,
-                donate_argnums=(0),
+                donate_argnums=(0,),
             )(params)
 
         else:
@@ -1078,7 +1011,7 @@ def main():
 
     def compute_loss(params, minibatch, dropout_rng, model_fn, train):
         logits = model_fn(
-            **minibatch, params=params, dropout_rng=dropout_rng, train=True
+            **minibatch, params=params, dropout_rng=dropout_rng, train=train
         )[0]
         loss = clip_loss(logits)
         return loss
@@ -1326,7 +1259,8 @@ def main():
             self.offset_time = 0.0
 
         def update_state_metrics(self, state):
-            """Update internal state metrics (logged at each call to be used as x-axis)"""
+            """Update internal state metrics (logged at each call to be used as x-axis)
+            """
             self.state_dict = {
                 f'train/{k.split("_")[-1]}': state[k]
                 for k in ["step", "epoch", "train_time", "train_samples"]
@@ -1488,7 +1422,6 @@ def main():
                     k: jax.device_get(getattr(state, k)).item()
                     for k in ["step", "epoch", "train_time", "train_samples"]
                 }
-                metadata["num_params"] = num_params
                 if eval_metrics is not None:
                     metadata["eval"] = eval_metrics
 
@@ -1557,6 +1490,15 @@ def main():
                         bs_shape = (
                             training_args.gradient_accumulation_steps,
                         ) + bs_shape
+
+                    # preprocess batch
+                    txt_inputs = tokenizer(
+                        [caption.decode("utf-8") for caption in batch[1]],
+                        padding="max_length",
+                        truncation=True,
+                        return_tensors="np",
+                    )
+                    batch = {"pixel_values": batch[0], **txt_inputs}
 
                     # reshape batch
                     batch = jax.tree_util.tree_map(
