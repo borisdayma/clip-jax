@@ -24,16 +24,11 @@ from flax.linen import combine_masks, make_causal_mask
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
-from transformers.modeling_flax_outputs import (
-    FlaxBaseModelOutput,
-    FlaxBaseModelOutputWithPooling,
-)
-from transformers.modeling_flax_utils import (
-    ACT2FN,
-    FlaxPreTrainedModel,
-    append_replace_return_docstrings,
-    overwrite_call_docstring,
-)
+from transformers.modeling_flax_outputs import (FlaxBaseModelOutput,
+                                                FlaxBaseModelOutputWithPooling)
+from transformers.modeling_flax_utils import (ACT2FN, FlaxPreTrainedModel,
+                                              append_replace_return_docstrings,
+                                              overwrite_call_docstring)
 from transformers.utils import ModelOutput, add_start_docstrings, logging
 
 from .configuration_clip import CLIPConfig, CLIPTextConfig, CLIPVisionConfig
