@@ -124,11 +124,15 @@ class Dataset:
                 assert len(files) > 0, f"No files found at folder: {folder}"
 
                 # shuffle files
-                random.shuffle(files)
+                if augment:
+                    random.shuffle(files)
 
                 # load dataset
                 ds = tf.data.TFRecordDataset(
-                    files, num_parallel_reads=tf.data.experimental.AUTOTUNE
+                    files,
+                    num_parallel_reads=tf.data.experimental.AUTOTUNE
+                    if dataset == "train"
+                    else None,
                 )
 
                 if self.multi_hosts and dataset == "train":
