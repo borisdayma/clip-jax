@@ -456,12 +456,6 @@ class FlaxCLIPLayerCollection(nn.Module):
     config: Union[CLIPTextConfig, CLIPVisionConfig]
     dtype: jnp.dtype = jnp.float32
 
-    def setup(self):
-        self.layers = [
-            FlaxCLIPEncoderLayer(self.config, name=str(i), dtype=self.dtype)
-            for i in range(self.config.num_hidden_layers)
-        ]
-
     @nn.compact
     def __call__(
         self,
