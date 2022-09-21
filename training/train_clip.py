@@ -25,8 +25,7 @@ from huggingface_hub import Repository
 from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
-from scalable_shampoo.distributed_shampoo import (GraftingType,
-                                                  distributed_shampoo)
+from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import CLIPTokenizerFast, HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
@@ -516,7 +515,8 @@ class DataTrainingArguments:
         }
     )
     image_size: Optional[int] = field(
-        default=224, metadata={"help": " The size (resolution) of each image."}
+        default=0,
+        metadata={"help": " The dimension images need to be resized to, if needed."},
     )
     min_original_image_size: Optional[int] = field(
         default=None,

@@ -15,7 +15,7 @@ class Dataset:
     valid_folder: str = None
     train_batch_size: int = 64
     valid_batch_size: int = 64
-    image_size: int = 228
+    image_size: int = 0  # no resizing if set to 0, (data should be at right dimensions)
     min_original_image_size: int = None
     max_original_aspect_ratio: float = None
     seed_dataset: int = None
@@ -165,11 +165,12 @@ class Dataset:
 
                 if augment:
                     ds = ds.shuffle(1000)
-                    ds = ds.map(
-                        _augment_wrapper,
-                        num_parallel_calls=tf.data.experimental.AUTOTUNE,
-                    )
-                else:
+                    if self.image_size:
+                        ds = ds.map(
+                            _augment_wrapper,
+                            num_parallel_calls=tf.data.experimental.AUTOTUNE,
+                        )
+                elif self.image_size:
                     ds = ds.map(
                         _center_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE
                     )
