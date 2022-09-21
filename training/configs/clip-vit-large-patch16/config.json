@@ -1,5 +1,5 @@
 {
-  "_name_or_path": "clip-vit-large-patch14/",
+  "_name_or_path": "clip-vit-large-patch16/",
   "architectures": [
     "CLIPModel"
   ],
@@ -116,7 +116,7 @@
       "0": "LABEL_0",
       "1": "LABEL_1"
     },
-    "image_size": 224,
+    "image_size": 256,
     "initializer_factor": 1.0,
     "initializer_range": 0.02,
     "intermediate_size": 4096,
@@ -142,7 +142,7 @@
     "output_hidden_states": false,
     "output_scores": false,
     "pad_token_id": null,
-    "patch_size": 14,
+    "patch_size": 16,
     "prefix": null,
     "problem_type": null,
     "pruned_heads": {},
@@ -171,6 +171,6 @@
     "intermediate_size": 4096,
     "num_attention_heads": 16,
     "num_hidden_layers": 24,
-    "patch_size": 14
+    "patch_size": 16
   }
 }
