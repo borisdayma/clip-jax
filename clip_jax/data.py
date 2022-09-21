@@ -20,6 +20,7 @@ class Dataset:
     max_original_aspect_ratio: float = None
     seed_dataset: int = None
     format: str = "rgb"  # rgb or lab
+    key_image: str = "webp"  # name of key containing image
     mean: list[float] = (0.0, 0.0, 0.0)  # do not apply mean
     std: list[float] = (1.0, 1.0, 1.0)  # do not apply std
     train: tf.data.Dataset = field(init=False)
@@ -41,7 +42,7 @@ class Dataset:
 
         # define parsing function
         features = {
-            "webp": tf.io.FixedLenFeature([], tf.string),
+            self.key_image: tf.io.FixedLenFeature([], tf.string),
             "original_width": tf.io.FixedLenFeature([], tf.int64),
             "original_height": tf.io.FixedLenFeature([], tf.int64),
             "caption": tf.io.FixedLenFeature([], tf.string),
@@ -50,7 +51,7 @@ class Dataset:
         def _parse_function(example_proto):
             parsed_features = tf.io.parse_single_example(example_proto, features)
             return (
-                parsed_features["webp"],
+                parsed_features[self.key_image],
                 parsed_features["original_width"],
                 parsed_features["original_height"],
                 parsed_features["caption"],
