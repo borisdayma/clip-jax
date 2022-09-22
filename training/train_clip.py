@@ -542,6 +542,9 @@ class DataTrainingArguments:
     format: Optional[str] = field(
         default="rgb", metadata={"help": "The format of the images (rgb or lab)."}
     )
+    key_image: Optional[str] = field(
+        default="webp", metadata={"help": "Name of the key containing the webp images."}
+    )
     mean: Optional[List[float]] = field(
         default=(0.5, 0.5, 0.5), metadata={"help": "The mean of the dataset."}
     )
