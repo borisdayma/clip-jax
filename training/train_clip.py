@@ -30,6 +30,11 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 
+try:
+    from dalle_mini.model.text import TextNormalizer
+except ImportError:
+    print("Text normalization not available")
+
 from clip_jax import CLIPConfig, FlaxCLIPModel
 from clip_jax.data import Dataset
 from clip_jax.partitions import set_partitions
@@ -329,6 +334,10 @@ class ModelArguments:
         default=None,
         metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"},
     )
+    normalize_text: bool = field(
+        default=False,
+        metadata={"help": "Normalize text before tokenization"},
+    )
     cache_dir: Optional[str] = field(
         default=None,
         metadata={"help": ("Where do you want to store the pretrained models downloaded from s3")},
@@ -553,6 +562,8 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name,
     )
+    if model_args.normalize_text:
+        tn = TextNormalizer()
 
     # overwrite certain config parameters
     model.config.gradient_checkpointing = training_args.gradient_checkpointing
@@ -1238,8 +1249,11 @@ def main():
             ):
 
                 # preprocess batch
+                captions = [caption.decode("utf-8") for caption in batch[1]]
+                if model_args.normalize_text:
+                    captions = [tn(c) for c in captions]
                 txt_inputs = tokenizer(
-                    [caption.decode("utf-8") for caption in batch[1]],
+                    captions,
                     padding="max_length",
                     truncation=True,
                     max_length=model.config.text_config.max_position_embeddings,
