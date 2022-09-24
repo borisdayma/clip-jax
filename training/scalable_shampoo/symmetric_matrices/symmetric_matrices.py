@@ -112,12 +112,8 @@ def sliced_transposed_product(
 
         block_rows.append(
             product_with_transpose(
-                lax.dynamic_slice(
-                    mat, start_indices=start_indices, slice_sizes=slice_sizes
-                ),
-                lax.dynamic_slice(
-                    mat, start_indices=[0] * rank, slice_sizes=slice_sizes_full
-                ),
+                lax.dynamic_slice(mat, start_indices=start_indices, slice_sizes=slice_sizes),
+                lax.dynamic_slice(mat, start_indices=[0] * rank, slice_sizes=slice_sizes_full),
                 axes=(axes, axes),
                 precision=precision,
             )
@@ -146,9 +142,7 @@ def sliced_transposed_product_concat(
       ValueError: Raised when the specified block size does not evenly divide
         the number of rows of the input mat.
     """
-    sliced_symmetric_matrix = sliced_transposed_product(
-        mat=mat, block_size=block_size, axes=axes, precision=precision
-    )
+    sliced_symmetric_matrix = sliced_transposed_product(mat=mat, block_size=block_size, axes=axes, precision=precision)
     return jnp.concatenate(sliced_symmetric_matrix.block_rows, axis=-1)
 
 
@@ -165,10 +159,7 @@ def materialize_matrix(symmetric_matrix):
 
     # Slice the lower-triangular and diagonal blocks into blocks.
     blocks = [
-        [
-            block_row[Ellipsis, i * block_size : (i + 1) * block_size]
-            for i in range(k + 1)
-        ]
+        [block_row[Ellipsis, i * block_size : (i + 1) * block_size] for i in range(k + 1)]
         for k, block_row in enumerate(block_rows)
     ]
 
@@ -184,9 +175,7 @@ def materialize_matrix(symmetric_matrix):
                 )
             )
 
-    return jnp.block(
-        [row + row_t for row, row_t in zip(blocks[:-1], off_diags)] + [blocks[-1]]
-    )
+    return jnp.block([row + row_t for row, row_t in zip(blocks[:-1], off_diags)] + [blocks[-1]])
 
 
 @functools.partial(jax.jit, static_argnames="num_blocks")
@@ -210,10 +199,7 @@ def materialize_matrix_from_concat(
     block_rows = [
         block_rows_concat[
             Ellipsis,
-            (k * (k + 1))
-            // 2
-            * block_size : (((k + 1) * (k + 2)) // 2 + 1)
-            * block_size,
+            (k * (k + 1)) // 2 * block_size : (((k + 1) * (k + 2)) // 2 + 1) * block_size,
         ]
         for k in range(num_blocks)
     ]
@@ -249,8 +235,7 @@ def update_sliced_rows(
     sym_prod = sliced_transposed_product(mat=mat, block_size=block_size, axes=axes)
     return SlicedSymmetricMatrix(
         block_rows=[
-            update * alpha + row * beta
-            for update, row in zip(sym_prod.block_rows, symmetric_matrix.block_rows)
+            update * alpha + row * beta for update, row in zip(sym_prod.block_rows, symmetric_matrix.block_rows)
         ]
     )
 
@@ -315,10 +300,7 @@ def slice_symmetric_matrix(
     if num_rows != num_cols:
         raise ValueError("mat is not square.")
     if num_rows % block_size != 0:
-        raise ValueError(
-            f"block size does not evenly divide rows. num_rows={num_rows},"
-            f" block_size={block_size}"
-        )
+        raise ValueError(f"block size does not evenly divide rows. num_rows={num_rows}," f" block_size={block_size}")
     return SlicedSymmetricMatrix(
         block_rows=[
             mat[
@@ -407,10 +389,7 @@ def row_abs_maxes(mat):
         maxes.append(
             jnp.concatenate(
                 row_maxes[(i * (i + 1) // 2) : ((i + 2) * (i + 1) // 2)]
-                + [
-                    col_maxes[((j + 1) * (j + 2)) // 2 - (j - i + 1)]
-                    for j in range(i + 1, num_blocks)
-                ],
+                + [col_maxes[((j + 1) * (j + 2)) // 2 - (j - i + 1)] for j in range(i + 1, num_blocks)],
                 axis=-1,
             )
         )
@@ -434,9 +413,7 @@ def times_vector(mat, vec):
     num_blocks = num_blocks_from_total_blocks(cols // rows)
     multiplied = []
     for i in range(num_blocks):
-        mat_block = mat[
-            Ellipsis, rows * ((i + 1) * i) // 2 : rows * ((i + 1) * (i + 2)) // 2
-        ]
+        mat_block = mat[Ellipsis, rows * ((i + 1) * i) // 2 : rows * ((i + 1) * (i + 2)) // 2]
         vec_block = vec[Ellipsis, rows * i : rows * (i + 1)]
         multiplied.append(jnp.einsum("...ij,...i->ij", mat_block, vec_block))
     return jnp.concatenate(multiplied, axis=-1)

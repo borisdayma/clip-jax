@@ -24,9 +24,7 @@ from transformers.utils import logging
 logger = logging.get_logger(__name__)
 
 CLIP_PRETRAINED_CONFIG_ARCHIVE_MAP = {
-    "openai/clip-vit-base-patch32": (
-        "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/config.json"
-    ),
+    "openai/clip-vit-base-patch32": ("https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/config.json"),
     # See all CLIP models at https://huggingface.co/models?filter=clip
 }
 
@@ -129,22 +127,14 @@ class CLIPTextConfig(PretrainedConfig):
         self.use_scan = use_scan
 
     @classmethod
-    def from_pretrained(
-        cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs
-    ) -> "PretrainedConfig":
-        config_dict, kwargs = cls.get_config_dict(
-            pretrained_model_name_or_path, **kwargs
-        )
+    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
+        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
 
         # get the text config dict if we are loading from CLIPConfig
         if config_dict.get("model_type") == "clip":
             config_dict = config_dict["text_config"]
 
-        if (
-            "model_type" in config_dict
-            and hasattr(cls, "model_type")
-            and config_dict["model_type"] != cls.model_type
-        ):
+        if "model_type" in config_dict and hasattr(cls, "model_type") and config_dict["model_type"] != cls.model_type:
             logger.warning(
                 f"You are using a model of type {config_dict['model_type']} to"
                 f" instantiate a model of type {cls.model_type}. This is not supported"
@@ -245,22 +235,14 @@ class CLIPVisionConfig(PretrainedConfig):
         self.use_scan = use_scan
 
     @classmethod
-    def from_pretrained(
-        cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs
-    ) -> "PretrainedConfig":
-        config_dict, kwargs = cls.get_config_dict(
-            pretrained_model_name_or_path, **kwargs
-        )
+    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
+        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
 
         # get the vision config dict if we are loading from CLIPConfig
         if config_dict.get("model_type") == "clip":
             config_dict = config_dict["vision_config"]
 
-        if (
-            "model_type" in config_dict
-            and hasattr(cls, "model_type")
-            and config_dict["model_type"] != cls.model_type
-        ):
+        if "model_type" in config_dict and hasattr(cls, "model_type") and config_dict["model_type"] != cls.model_type:
             logger.warning(
                 f"You are using a model of type {config_dict['model_type']} to"
                 f" instantiate a model of type {cls.model_type}. This is not supported"
@@ -311,17 +293,11 @@ class CLIPConfig(PretrainedConfig):
 
         if text_config_dict is None:
             text_config_dict = {}
-            logger.info(
-                "text_config_dict is None. Initializing the CLIPTextConfig with default"
-                " values."
-            )
+            logger.info("text_config_dict is None. Initializing the CLIPTextConfig with default" " values.")
 
         if vision_config_dict is None:
             vision_config_dict = {}
-            logger.info(
-                "vision_config_dict is None. initializing the CLIPVisionConfig with"
-                " default values."
-            )
+            logger.info("vision_config_dict is None. initializing the CLIPVisionConfig with" " default values.")
 
         self.text_config = CLIPTextConfig(**text_config_dict, use_scan=use_scan)
         self.vision_config = CLIPVisionConfig(**vision_config_dict, use_scan=use_scan)
@@ -331,9 +307,7 @@ class CLIPConfig(PretrainedConfig):
         self.initializer_factor = 1.0
 
     @classmethod
-    def from_text_vision_configs(
-        cls, text_config: CLIPTextConfig, vision_config: CLIPVisionConfig, **kwargs
-    ):
+    def from_text_vision_configs(cls, text_config: CLIPTextConfig, vision_config: CLIPVisionConfig, **kwargs):
         r"""
         Instantiate a [`CLIPConfig`] (or a derived class) from clip text model configuration and clip vision model
         configuration.

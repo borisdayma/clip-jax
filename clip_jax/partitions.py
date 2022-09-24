@@ -90,9 +90,6 @@ def set_partitions(in_dict, use_scan):
             print(f"Unmatched -> {k}")
     if use_scan:
         # add None dimension to layers
-        result = {
-            k: (P(*(None,) + v) if v is not None else None) if "scanned" in k else v
-            for k, v in result.items()
-        }
+        result = {k: (P(*(None,) + v) if v is not None else None) if "scanned" in k else v for k, v in result.items()}
     assert _unmatched not in result.values(), "Incomplete partition spec."
     return freeze(unflatten_dict(result))

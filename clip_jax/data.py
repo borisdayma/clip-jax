@@ -59,14 +59,11 @@ class Dataset:
 
         def _filter_function(image, width, height, caption):
             # filter out images that are too small
-            if self.min_original_image_size is not None and (
-                tf.minimum(width, height) < self.min_original_image_size
-            ):
+            if self.min_original_image_size is not None and (tf.minimum(width, height) < self.min_original_image_size):
                 return False
             # filter out images that have wrong aspect ratio
             if self.max_original_aspect_ratio is not None and (
-                tf.divide(tf.maximum(width, height), tf.minimum(width, height))
-                > self.max_original_aspect_ratio
+                tf.divide(tf.maximum(width, height), tf.minimum(width, height)) > self.max_original_aspect_ratio
             ):
                 return False
             return True
@@ -82,9 +79,7 @@ class Dataset:
             # create a new seed
             new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
             # apply random crop
-            return tf.image.stateless_random_crop(
-                image, size=[self.image_size, self.image_size, 3], seed=new_seed
-            )
+            return tf.image.stateless_random_crop(image, size=[self.image_size, self.image_size, 3], seed=new_seed)
 
         # augmentation wrapper
         def _augment_wrapper(image, caption):
@@ -94,9 +89,7 @@ class Dataset:
         # center crop (for validation)
         def _center_crop(image, caption):
             return (
-                tf.image.resize_with_crop_or_pad(
-                    image, self.image_size, self.image_size
-                ),
+                tf.image.resize_with_crop_or_pad(image, self.image_size, self.image_size),
                 caption,
             )
 
@@ -104,8 +97,7 @@ class Dataset:
         def _normalize(image, caption):
             if self.format == "rgb":
                 image = (
-                    tf.cast(image, tf.float32) / 255.0
-                    - tf.convert_to_tensor(self.mean, dtype=tf.float32)
+                    tf.cast(image, tf.float32) / 255.0 - tf.convert_to_tensor(self.mean, dtype=tf.float32)
                 ) / tf.convert_to_tensor(self.std, dtype=tf.float32)
                 image = rearrange(image, "b h w c -> b c h w")
 
@@ -136,9 +128,7 @@ class Dataset:
                 # load dataset
                 ds = tf.data.TFRecordDataset(
                     files,
-                    num_parallel_reads=tf.data.experimental.AUTOTUNE
-                    if dataset == "train"
-                    else None,
+                    num_parallel_reads=tf.data.experimental.AUTOTUNE if dataset == "train" else None,
                 )
 
                 # non deterministic read (faster)
@@ -152,10 +142,7 @@ class Dataset:
                     ds = ds.repeat()
 
                 # parse dataset
-                if (
-                    self.min_original_image_size is None
-                    and self.max_original_aspect_ratio is None
-                ):
+                if self.min_original_image_size is None and self.max_original_aspect_ratio is None:
                     ds = ds.map(
                         _parse_no_filter,
                         num_parallel_calls=tf.data.experimental.AUTOTUNE,
@@ -170,9 +157,7 @@ class Dataset:
                     ds = ds.filter(_filter_function)
 
                     # parse image
-                    ds = ds.map(
-                        _parse_image, num_parallel_calls=tf.data.experimental.AUTOTUNE
-                    )
+                    ds = ds.map(_parse_image, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 if augment:
                     ds = ds.shuffle(1000)
@@ -182,15 +167,11 @@ class Dataset:
                             num_parallel_calls=tf.data.experimental.AUTOTUNE,
                         )
                 elif self.image_size:
-                    ds = ds.map(
-                        _center_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE
-                    )
+                    ds = ds.map(_center_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 # batch, normalize and prefetch
                 ds = ds.batch(batch_size, drop_remainder=True)
-                ds = ds.map(
-                    _normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE
-                )
+                ds = ds.map(_normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
                 setattr(self, dataset, ds)
 
@@ -199,9 +180,7 @@ def logits_to_image(logits, mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0), format="r
     logits = np.asarray(logits, dtype=np.float32)
     logits = rearrange(logits, "c h w -> h w c")
     if format == "rgb":
-        logits = (logits * np.asarray(std, dtype=np.float32)) + np.asarray(
-            mean, dtype=np.float32
-        )
+        logits = (logits * np.asarray(std, dtype=np.float32)) + np.asarray(mean, dtype=np.float32)
         logits = logits.clip(0.0, 1.0)
     else:
         raise NotImplementedError("LAB not implemented")

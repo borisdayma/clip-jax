@@ -1,4 +1,5 @@
 import os
+
 # To use a consistent encoding
 from codecs import open
 
