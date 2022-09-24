@@ -278,29 +278,26 @@ class CLIPConfig(PretrainedConfig):
 
     def __init__(
         self,
-        text_config_dict=None,
-        vision_config_dict=None,
         projection_dim=512,
         logit_scale_init_value=2.6592,
         use_scan=False,
         **kwargs,
     ):
         super().__init__(
-            text_config_dict=text_config_dict,
-            vision_config_dict=vision_config_dict,
             **kwargs,
         )
 
-        if text_config_dict is None:
-            text_config_dict = {}
+        if "text_config" not in kwargs:
             logger.info("text_config_dict is None. Initializing the CLIPTextConfig with default" " values.")
 
-        if vision_config_dict is None:
-            vision_config_dict = {}
+        if "vision_config" not in kwargs:
             logger.info("vision_config_dict is None. initializing the CLIPVisionConfig with" " default values.")
 
-        self.text_config = CLIPTextConfig(**text_config_dict, use_scan=use_scan)
-        self.vision_config = CLIPVisionConfig(**vision_config_dict, use_scan=use_scan)
+        text_config = kwargs.pop("text_config", {})
+        vision_config = kwargs.pop("vision_config", {})
+
+        self.text_config = CLIPTextConfig(**{**text_config, "use_scan": use_scan})
+        self.vision_config = CLIPVisionConfig(**{**vision_config, "use_scan": use_scan})
 
         self.projection_dim = projection_dim
         self.logit_scale_init_value = logit_scale_init_value
@@ -317,8 +314,8 @@ class CLIPConfig(PretrainedConfig):
         """
 
         return cls(
-            text_config_dict=text_config.to_dict(),
-            vision_config_dict=vision_config.to_dict(),
+            text_config=text_config.to_dict(),
+            vision_config=vision_config.to_dict(),
             **kwargs,
         )
 
