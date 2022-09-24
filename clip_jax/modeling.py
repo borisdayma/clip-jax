@@ -471,11 +471,11 @@ class FlaxCLIPLayerCollection(nn.Module):
                 hidden_states, attention_mask, deterministic, output_attentions
             )
         else:
-            for layer in self.layers:
+            for i in range(self.config.num_hidden_layers):
                 if output_hidden_states:
                     all_hidden_states += (hidden_states,)
 
-                layer_outputs = layer(
+                layer_outputs = FlaxCLIPEncoderLayer(self.config, dtype=self.dtype, name=str(i))(
                     hidden_states,
                     attention_mask,
                     deterministic=deterministic,
