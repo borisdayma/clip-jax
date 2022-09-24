@@ -1242,8 +1242,11 @@ def main():
                     [caption.decode("utf-8") for caption in batch[1]],
                     padding="max_length",
                     truncation=True,
+                    max_length=model.config.text_config.max_position_embeddings,
                     return_tensors="np",
                 )
+                # keep only input_ids and attention_mask
+                txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
                 batch = {"pixel_values": batch[0], **txt_inputs}
 
                 # need to keep only items relevant to the node
@@ -1398,8 +1401,11 @@ def main():
                         [caption.decode("utf-8") for caption in batch[1]],
                         padding="max_length",
                         truncation=True,
+                        max_length=model.config.text_config.max_position_embeddings,
                         return_tensors="np",
                     )
+                    # keep only input_ids and attention_mask
+                    txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
                     batch = {"pixel_values": batch[0], **txt_inputs}
 
                     # reshape batch
