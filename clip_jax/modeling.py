@@ -24,11 +24,16 @@ from flax.linen import combine_masks, make_causal_mask
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
-from transformers.modeling_flax_outputs import (FlaxBaseModelOutput,
-                                                FlaxBaseModelOutputWithPooling)
-from transformers.modeling_flax_utils import (ACT2FN, FlaxPreTrainedModel,
-                                              append_replace_return_docstrings,
-                                              overwrite_call_docstring)
+from transformers.modeling_flax_outputs import (
+    FlaxBaseModelOutput,
+    FlaxBaseModelOutputWithPooling,
+)
+from transformers.modeling_flax_utils import (
+    ACT2FN,
+    FlaxPreTrainedModel,
+    append_replace_return_docstrings,
+    overwrite_call_docstring,
+)
 from transformers.utils import ModelOutput, add_start_docstrings, logging
 
 from .configuration_clip import CLIPConfig, CLIPTextConfig, CLIPVisionConfig
@@ -302,6 +307,8 @@ class FlaxCLIPAttention(nn.Module):
         )
 
         self.causal = isinstance(self.config, CLIPTextConfig)
+        # causal mask does not seem interesting so we never use it
+        self.causal = False
         if self.causal:
             self.causal_mask = make_causal_mask(
                 jnp.ones((1, self.config.max_position_embeddings), dtype="i4")
