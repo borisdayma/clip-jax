@@ -158,6 +158,13 @@ CLIP_INPUTS_DOCSTRING = r"""
 """
 
 
+def get_id_pos(mat, id):
+    """
+    Returns the position of the id in mat.
+    """
+    return jnp.where(mat == id, 1, 0).argmax(axis=-1)
+
+
 @flax.struct.dataclass
 class FlaxCLIPOutput(ModelOutput):
     """
@@ -567,8 +574,10 @@ class FlaxCLIPTextTransformer(nn.Module):
         last_hidden_state = self.final_layer_norm(last_hidden_state)
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
-        # take features from the EOS embedding (eos_token_id is the highest number in each sequence)
-        pooled_output = last_hidden_state[jnp.arange(last_hidden_state.shape[0]), input_ids.argmax(axis=-1)]
+        # take features from the EOS embedding
+        pooled_output = last_hidden_state[
+            jnp.arange(last_hidden_state.shape[0]), get_id_pos(input_ids, self.config.eos_token_id)
+        ]
 
         if not return_dict:
             return (last_hidden_state, pooled_output) + encoder_outputs[1:]
