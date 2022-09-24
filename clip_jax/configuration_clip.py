@@ -288,10 +288,10 @@ class CLIPConfig(PretrainedConfig):
         )
 
         if "text_config" not in kwargs:
-            logger.info("text_config_dict is None. Initializing the CLIPTextConfig with default" " values.")
+            logger.info("text_config is undefined. Initializing the CLIPTextConfig with default" " values.")
 
         if "vision_config" not in kwargs:
-            logger.info("vision_config_dict is None. initializing the CLIPVisionConfig with" " default values.")
+            logger.info("vision_config is undefined. initializing the CLIPVisionConfig with" " default values.")
 
         text_config = kwargs.pop("text_config", {})
         vision_config = kwargs.pop("vision_config", {})
