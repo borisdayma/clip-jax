@@ -300,7 +300,7 @@ def slice_symmetric_matrix(
     if num_rows != num_cols:
         raise ValueError("mat is not square.")
     if num_rows % block_size != 0:
-        raise ValueError(f"block size does not evenly divide rows. num_rows={num_rows}," f" block_size={block_size}")
+        raise ValueError(f"block size does not evenly divide rows. num_rows={num_rows}, block_size={block_size}")
     return SlicedSymmetricMatrix(
         block_rows=[
             mat[
