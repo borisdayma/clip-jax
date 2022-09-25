@@ -861,6 +861,12 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
         else:
             return random_params
 
+    def num_params(self, params=None):
+        if params is None:
+            params = self.params
+        num_params = jax.tree_util.tree_map(lambda param: param.size, flatten_dict(unfreeze(params))).values()
+        return sum(list(num_params))
+
     def unscan(self, params):
         if self.config.use_scan:
             self.config.use_scan = False

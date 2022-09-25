@@ -581,6 +581,7 @@ def main():
 
     # Store some constant
     num_epochs = training_args.num_train_epochs
+    num_params = model.num_params(params_shape)
 
     # log some info
     logger.info("***** Running training *****")
@@ -589,6 +590,7 @@ def main():
     logger.info(f"  Number of devices = {jax.device_count()}")
     logger.info(f"  Gradient accumulation steps = {training_args.gradient_accumulation_steps}")
     logger.info(f"  Batch size per update = {training_args.batch_size_per_step}")
+    logger.info(f"  Model parameters = {num_params:,}")
 
     if jax.process_index() == 0:
         # set default x-axis as 'train/step'
@@ -598,6 +600,7 @@ def main():
         wandb.config.update(
             {
                 "batch_size_per_step": training_args.batch_size_per_step,
+                "num_params": num_params,
                 "model_config": model.config.to_dict(),
                 "num_devices": jax.device_count(),
                 "versions": {
@@ -1338,6 +1341,7 @@ def main():
                     k: jax.device_get(getattr(state, k)).item()
                     for k in ["step", "epoch", "train_time", "train_samples"]
                 }
+                metadata["num_params"] = num_params
                 if eval_metrics is not None:
                     metadata["eval"] = eval_metrics
 
