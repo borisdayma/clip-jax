@@ -351,6 +351,10 @@ class ModelArguments:
             )
         },
     )
+    use_scan: bool = field(
+        default=False,
+        metadata={"help": "Use scan on the model layers."},
+    )
     use_auth_token: bool = field(
         default=False,
         metadata={
@@ -378,6 +382,8 @@ class ModelArguments:
             assert (
                 self.model_name_or_path is not None
             ), "If you want to restore state, you must provide a model name or path."
+        if self.use_scan:
+            assert self.model_name_or_path is None, "use_scan can only be defined when training from scratch."
 
     def get_metadata(self):
         if self.model_name_or_path is not None and ":" in self.model_name_or_path:
@@ -536,7 +542,7 @@ def main():
 
     # Set up model configs
     if model_args.config_name:
-        config = CLIPConfig.from_pretrained(model_args.config_name)
+        config = CLIPConfig.from_pretrained(model_args.config_name, use_scan=model_args.use_scan)
     else:
         config = None
 
