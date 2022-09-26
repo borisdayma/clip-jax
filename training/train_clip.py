@@ -1421,8 +1421,11 @@ def main():
                         bs_shape = (training_args.gradient_accumulation_steps,) + bs_shape
 
                     # preprocess batch
+                    captions = [caption.decode("utf-8") for caption in batch[1]]
+                    if model_args.normalize_text:
+                        captions = [tn(c) for c in captions]
                     txt_inputs = tokenizer(
-                        [caption.decode("utf-8") for caption in batch[1]],
+                        captions,
                         padding="max_length",
                         truncation=True,
                         max_length=model.config.text_config.max_position_embeddings,
