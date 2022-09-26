@@ -574,10 +574,8 @@ class FlaxCLIPTextTransformer(nn.Module):
         last_hidden_state = self.final_layer_norm(last_hidden_state)
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
-        # take features from the EOS embedding
-        pooled_output = last_hidden_state[
-            jnp.arange(last_hidden_state.shape[0]), get_id_pos(input_ids, self.config.eos_token_id)
-        ]
+        # take features from the BOS embedding instead of EOS (no causal mask anymore)
+        pooled_output = last_hidden_state[:, 0, :]
 
         if not return_dict:
             return (last_hidden_state, pooled_output) + encoder_outputs[1:]
@@ -1101,7 +1099,7 @@ FLAX_CLIP_TEXT_MODEL_DOCSTRING = """
 
     >>> outputs = model(**inputs)
     >>> last_hidden_state = outputs.last_hidden_state
-    >>> pooler_output = outputs.pooler_output  # pooled (EOS token) states
+    >>> pooler_output = outputs.pooler_output  # pooled (BOS token) states
     ```
 """
 
