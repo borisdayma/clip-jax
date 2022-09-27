@@ -210,8 +210,6 @@ class FlaxCLIPVisionEmbeddings(nn.Module):
         image_size = self.config.image_size
         patch_size = self.config.patch_size
 
-        self.class_embedding = self.param("class_embedding", jax.nn.initializers.normal(stddev=0.02), (embed_dim,))
-
         self.patch_embedding = nn.Conv(
             embed_dim,
             kernel_size=(patch_size, patch_size),
@@ -223,19 +221,14 @@ class FlaxCLIPVisionEmbeddings(nn.Module):
         )
 
         self.num_patches = (image_size // patch_size) ** 2
-        num_positions = self.num_patches + 1
-        self.position_embedding = nn.Embed(num_positions, embed_dim, embedding_init=jax.nn.initializers.normal())
-        self.position_ids = jnp.expand_dims(jnp.arange(0, num_positions, dtype="i4"), axis=0)
+        self.position_embedding = nn.Embed(self.num_patches, embed_dim, embedding_init=jax.nn.initializers.normal())
+        self.position_ids = jnp.expand_dims(jnp.arange(0, self.num_patches, dtype="i4"), axis=0)
 
     def __call__(self, pixel_values):
         patch_embeds = self.patch_embedding(pixel_values)
         batch_size, height, width, channels = patch_embeds.shape
         patch_embeds = jnp.reshape(patch_embeds, (batch_size, height * width, channels))
-
-        class_embeds = jnp.expand_dims(self.class_embedding, axis=(0, 1))
-        class_embeds = jnp.tile(class_embeds, (batch_size, 1, 1))
-        embeddings = jnp.concatenate([class_embeds, patch_embeds], axis=1)
-        embeddings = embeddings + self.position_embedding(self.position_ids)
+        embeddings = patch_embeds + self.position_embedding(self.position_ids)
         return embeddings
 
 
@@ -624,7 +617,8 @@ class FlaxCLIPVisionTransformer(nn.Module):
         )
 
         last_hidden_state = encoder_outputs[0]
-        pooled_output = last_hidden_state[:, 0, :]
+        # average pool
+        pooled_output = last_hidden_state.mean(axis=1)
         pooled_output = self.post_layernorm(pooled_output)
 
         if not return_dict:
