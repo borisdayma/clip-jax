@@ -1,3 +1,4 @@
+import pickle
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -113,7 +114,10 @@ class Dataset:
         ):
             if folder is not None:
                 # load files
-                if "gs://" in folder:
+                if folder.endswith(".pkl"):
+                    with open(folder, "rb") as f:
+                        files = pickle.load(f)
+                elif "gs://" in folder:
                     if folder[-1] != "/":
                         folder += "/"
                     files = tf.io.gfile.glob(f"{folder}*.tfrecord")
