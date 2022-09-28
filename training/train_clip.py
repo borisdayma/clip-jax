@@ -1358,6 +1358,8 @@ def main():
                     "added_tokens.json",
                     "tokenizer.json",
                 ]:
+                    if (Path(training_args.output_dir) / filename).exists():
+                        artifact.add_file(Path(training_args.output_dir) / filename)
                     artifact.add_file(f"{Path(training_args.output_dir) / filename}")
                 wandb.run.log_artifact(artifact)
 
