@@ -208,7 +208,11 @@ class Dataset:
             # we need to return only a subset of the validation set
             for i, batch in enumerate(self._valid.as_numpy_iterator()):
                 if i % self.valid_groups == self.valid_group_number:
-                    yield batch
+                    # this is the batch to yield for this host
+                    batch_group = batch
+                if i % self.valid_groups == (self.valid_groups - 1):
+                    # all nodes have a batch
+                    yield batch_group
 
 
 def logits_to_image(logits, mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0), format="rgb"):
