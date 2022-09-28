@@ -1,3 +1,4 @@
+import io
 import logging
 import os
 import sys
@@ -29,6 +30,11 @@ from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shamp
 from tqdm import tqdm
 from transformers import AutoTokenizer, HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
+
+try:
+    from google.cloud import storage
+except:
+    storage = None
 
 try:
     from dalle_mini.model.text import TextNormalizer
@@ -241,6 +247,10 @@ class TrainingArguments:
                 f"Output directory ({self.output_dir}) already exists and is not empty."
                 "Use --overwrite_output_dir to overcome."
             )
+        if self.output_dir.startswith("gs://"):
+            assert (
+                storage is not None
+            ), 'Could not find google.storage. Install with "pip install google-cloud-storage"'
         assert self.lr_decay in [
             None,
             "linear",
@@ -404,12 +414,26 @@ class ModelArguments:
                     artifact = wandb.run.use_artifact(state_artifact)
                 else:
                     artifact = wandb.Api().artifact(state_artifact)
-                artifact_dir = artifact.download(tmp_dir)
-                self.restore_state = Path(artifact_dir)
+                if artifact.metadata.get("bucket_path"):
+                    # we will read directly file contents
+                    self.restore_state = artifact.metadata["bucket_path"]
+                else:
+                    artifact_dir = artifact.download(tmp_dir)
+                    self.restore_state = Path(artifact_dir)
+
+            if self.restore_state.startswith("gs://"):
+                bucket_path = Path(self.restore_state[5:]) / "opt_state.msgpack"
+                bucket, blob_name = str(bucket_path).split("/", 1)
+                assert (
+                    storage is not None
+                ), 'Could not find google.storage. Install with "pip install google-cloud-storage"'
+                client = storage.Client()
+                bucket = client.bucket(bucket)
+                blob = bucket.blob(blob_name)
+                return blob.download_as_bytes()
 
             with (Path(self.restore_state) / "opt_state.msgpack").open("rb") as f:
-                opt_state = f.read()
-            return opt_state
+                return f.read()
 
 
 @dataclass
@@ -1307,6 +1331,12 @@ def main():
         if jax.process_index() == 0:
             start_save_time = time.perf_counter()
             output_dir = training_args.output_dir
+            use_bucket = output_dir.startswith("gs://")
+            if use_bucket:
+                bucket_path = Path(output_dir[5:]) / wandb.run.id / f"step_{state.step}"
+                bucket, dir_path = str(bucket_path).split("/", 1)
+                tmp_dir = tempfile.TemporaryDirectory()
+                output_dir = tmp_dir.name
 
             # save model
             params = jax.device_get(state.params)
@@ -1315,10 +1345,25 @@ def main():
             # save tokenizer
             tokenizer.save_pretrained(output_dir)
 
+            # copy to bucket
+            if use_bucket:
+                client = storage.Client()
+                bucket = client.bucket(bucket)
+                for filename in Path(output_dir).glob("*"):
+                    blob_name = str(Path(dir_path) / "model" / filename.name)
+                    blob = bucket.blob(blob_name)
+                    blob.upload_from_filename(str(filename))
+                tmp_dir.cleanup()
+
             # save state
             opt_state = jax.device_get(state.opt_state)
-            with (Path(output_dir) / "opt_state.msgpack").open("wb") as f:
-                f.write(to_bytes(opt_state))
+            if use_bucket:
+                blob_name = str(Path(dir_path) / "state" / "opt_state.msgpack")
+                blob = bucket.blob(blob_name)
+                blob.upload_from_file(io.BytesIO(to_bytes(opt_state)))
+            else:
+                with (Path(output_dir) / "opt_state.msgpack").open("wb") as f:
+                    f.write(to_bytes(opt_state))
 
             # save to HF hub
             if training_args.push_to_hub:
@@ -1342,34 +1387,44 @@ def main():
                     metadata["eval"] = eval_metrics
 
                 # create model artifact
+                if use_bucket:
+                    metadata["bucket_path"] = f"gs://{bucket_path}/model"
                 artifact = wandb.Artifact(
                     name=f"model-{wandb.run.id}",
                     type="CLIP",
                     metadata=metadata,
                 )
-                for filename in [
-                    "config.json",
-                    "flax_model.msgpack",
-                    # tokenizer
-                    "tokenizer_config.json",
-                    "special_tokens_map.json",
-                    "vocab.json",
-                    "merges.txt",
-                    "added_tokens.json",
-                    "tokenizer.json",
-                ]:
-                    if (Path(training_args.output_dir) / filename).exists():
-                        artifact.add_file(Path(training_args.output_dir) / filename)
-                    artifact.add_file(f"{Path(training_args.output_dir) / filename}")
+                if use_bucket:
+                    artifact.add_reference(metadata["bucket_path"])
+                else:
+                    for filename in [
+                        "config.json",
+                        "flax_model.msgpack",
+                        # tokenizer
+                        "tokenizer_config.json",
+                        "special_tokens_map.json",
+                        "vocab.json",
+                        "merges.txt",
+                        "added_tokens.json",
+                        "tokenizer.json",
+                    ]:
+                        if (Path(training_args.output_dir) / filename).exists():
+                            artifact.add_file(Path(training_args.output_dir) / filename)
+                        artifact.add_file(f"{Path(training_args.output_dir) / filename}")
                 wandb.run.log_artifact(artifact)
 
                 # create state artifact
+                if use_bucket:
+                    metadata["bucket_path"] = f"gs://{bucket_path}/state"
                 artifact_state = wandb.Artifact(
                     name=f"state-{wandb.run.id}",
                     type="state",
                     metadata=metadata,
                 )
-                artifact_state.add_file(f"{Path(training_args.output_dir) / 'opt_state.msgpack'}")
+                if use_bucket:
+                    artifact_state.add_reference(metadata["bucket_path"])
+                else:
+                    artifact_state.add_file(f"{Path(training_args.output_dir) / 'opt_state.msgpack'}")
                 wandb.run.log_artifact(artifact_state)
             metrics_logger.log_time("save_model", time.perf_counter() - start_save_time)
 
