@@ -24,10 +24,14 @@ class Dataset:
     key_image: str = "webp"  # name of key containing image
     mean: list[float] = (0.0, 0.0, 0.0)  # do not apply mean
     std: list[float] = (1.0, 1.0, 1.0)  # do not apply std
-    train: tf.data.Dataset = field(init=False)
-    valid: tf.data.Dataset = field(init=False)
+    valid_batch_size_per_step: int = None  # used in multi-host
+    node_groups: int = 1  # used in multi-host (number of nodes reading the same data when mp>local_devices)
+    _train: tf.data.Dataset = field(init=False)
+    _valid: tf.data.Dataset = field(init=False)
     rng: tf.random.Generator = field(init=False)
     multi_hosts: bool = field(init=False)
+    valid_groups: int = field(init=False)  # number of groups for validation set (multi-host)
+    valid_group_number: int = field(init=False)  # group number to use for validation set (multi-host)
 
     def __post_init__(self):
         # verify valid args
@@ -40,6 +44,19 @@ class Dataset:
 
         # check if we are on multi-hosts
         self.multi_hosts = jax.process_count() > 1
+
+        # define valid groups (useful in multi-hosts)
+        if self.multi_hosts:
+            assert self.valid_batch_size_per_step % self.valid_batch_size == 0, (
+                f"valid_batch_size_per_step ({self.valid_batch_size_per_step}) "
+                f"should be a multiple of valid_batch_size ({self.valid_batch_size})"
+            )
+            self.valid_groups = self.valid_batch_size_per_step // self.valid_batch_size
+            self.valid_group_number = jax.process_index() // self.node_groups
+            assert self.valid_groups == jax.device_count() // self.node_groups, (
+                f"valid_groups ({self.valid_groups}) should be equal to "
+                f"jax.device_count() // self.node_groups ({jax.device_count() // self.node_groups})"
+            )
 
         # define parsing function
         features = {
@@ -108,7 +125,7 @@ class Dataset:
 
         for folder, dataset, augment, batch_size in zip(
             [self.train_folder, self.valid_folder],
-            ["train", "valid"],
+            ["_train", "_valid"],
             [True, False],
             [self.train_batch_size, self.valid_batch_size],
         ):
@@ -132,7 +149,7 @@ class Dataset:
                 # load dataset
                 ds = tf.data.TFRecordDataset(
                     files,
-                    num_parallel_reads=tf.data.experimental.AUTOTUNE if dataset == "train" else None,
+                    num_parallel_reads=tf.data.experimental.AUTOTUNE if augment else None,
                 )
 
                 # non deterministic read (faster)
@@ -141,7 +158,7 @@ class Dataset:
                     ignore_order.deterministic = False
                     ds = ds.with_options(ignore_order)
 
-                if self.multi_hosts and dataset == "train":
+                if self.multi_hosts and augment:
                     # repeat indefinitely
                     ds = ds.repeat()
 
@@ -178,6 +195,20 @@ class Dataset:
                 ds = ds.map(_normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
                 setattr(self, dataset, ds)
+
+    @property
+    def train(self):
+        return self._train.as_numpy_iterator()
+
+    @property
+    def valid(self):
+        if not self.multi_hosts:
+            return self._valid.as_numpy_iterator()
+        else:
+            # we need to return only a subset of the validation set
+            for i, batch in enumerate(self._valid.as_numpy_iterator()):
+                if i % self.self.valid_groups == self.valid_group_number:
+                    yield batch
 
 
 def logits_to_image(logits, mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0), format="rgb"):

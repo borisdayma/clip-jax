@@ -223,7 +223,7 @@ class TrainingArguments:
     batch_size_per_step: int = field(init=False)
     train_batch_size: int = field(init=False)
     valid_batch_size: int = field(init=False)
-    valid_batch_size_per_node: int = field(init=False)
+    valid_batch_size_per_step: int = field(init=False)
     log_norm_steps: int = field(init=False)
 
     def __post_init__(self):
@@ -292,8 +292,8 @@ class TrainingArguments:
         self.batch_size_per_local_dp_device = self.batch_size_per_node // self.local_dp_devices
         # define batch size for data loader
         self.train_batch_size = batch_size_per_node_per_step * self.node_groups
-        self.valid_batch_size = self.batch_size_per_node * jax.process_count()
-        self.valid_batch_size_per_node = self.batch_size_per_node * self.node_groups
+        self.valid_batch_size = self.batch_size_per_node * self.node_groups
+        self.valid_batch_size_per_step = self.batch_size_per_node * jax.process_count()
 
     def to_dict(self):
         """
@@ -524,6 +524,8 @@ def main():
     dataset = Dataset(
         train_batch_size=training_args.train_batch_size,
         valid_batch_size=training_args.valid_batch_size,
+        valid_batch_size_per_step=training_args.valid_batch_size_per_step,
+        node_groups=training_args.node_groups,
         **asdict(data_args),
     )
 
@@ -1273,19 +1275,6 @@ def main():
                 txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
                 batch = {"pixel_values": batch[0], **txt_inputs}
 
-                # need to keep only items relevant to the node
-                batch = jax.tree_util.tree_map(
-                    lambda x: x.reshape(
-                        (
-                            jax.process_count() // training_args.node_groups,
-                            training_args.valid_batch_size_per_node,
-                        )
-                        + x.shape[1:]
-                    ),
-                    batch,
-                )
-                batch = jax.tree_util.tree_map(lambda x: x[jax.process_index() // training_args.node_groups], batch)
-
                 # add dp dimension when using "vmap trick"
                 if training_args.use_vmap_trick:
                     bs_shape = (
@@ -1394,7 +1383,7 @@ def main():
             # train
             if training_args.do_train:
                 for batch in tqdm(
-                    dataset.train.as_numpy_iterator(),
+                    dataset.train,
                     desc="Training...",
                     position=1,
                     leave=False,
