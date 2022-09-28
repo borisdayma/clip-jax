@@ -946,6 +946,7 @@ def main():
     def cross_entropy(logits, axis):
         logprobs = jax.nn.log_softmax(logits, axis=axis)
         nll = jnp.diag(logprobs)
+        nll = with_sharding_constraint(nll, batch_spec)
         ce = -jnp.mean(nll)
         return ce
 
