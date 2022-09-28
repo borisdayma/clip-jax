@@ -203,7 +203,7 @@ class Dataset:
     @property
     def valid(self):
         if not self.multi_hosts:
-            return self._valid.as_numpy_iterator()
+            yield from self._valid.as_numpy_iterator()
         else:
             # we need to return only a subset of the validation set
             for i, batch in enumerate(self._valid.as_numpy_iterator()):
