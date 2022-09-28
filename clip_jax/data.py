@@ -53,9 +53,9 @@ class Dataset:
             )
             self.valid_groups = self.valid_batch_size_per_step // self.valid_batch_size
             self.valid_group_number = jax.process_index() // self.node_groups
-            assert self.valid_groups == jax.device_count() // self.node_groups, (
+            assert self.valid_groups == jax.process_count() // self.node_groups, (
                 f"valid_groups ({self.valid_groups}) should be equal to "
-                f"jax.device_count() // self.node_groups ({jax.device_count() // self.node_groups})"
+                f"jax.process_count() // self.node_groups ({jax.process_count() // self.node_groups})"
             )
 
         # define parsing function

@@ -1253,7 +1253,7 @@ def main():
             start_eval_time = time.perf_counter()
             metrics = []
             for batch in tqdm(
-                dataset.valid.as_numpy_iterator(),
+                dataset.valid,
                 desc="Evaluating...",
                 position=2,
                 leave=False,
