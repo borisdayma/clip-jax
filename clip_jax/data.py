@@ -207,7 +207,7 @@ class Dataset:
         else:
             # we need to return only a subset of the validation set
             for i, batch in enumerate(self._valid.as_numpy_iterator()):
-                if i % self.self.valid_groups == self.valid_group_number:
+                if i % self.valid_groups == self.valid_group_number:
                     yield batch
 
 
