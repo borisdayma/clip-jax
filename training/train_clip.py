@@ -568,7 +568,7 @@ def main():
 
     # Set up model configs
     if model_args.config_name:
-        config = CLIPConfig.from_pretrained(model_args.config_name, use_scan=model_args.use_scan)
+        config = CLIPConfig.from_pretrained(model_args.config_name)
     else:
         config = None
 
@@ -600,6 +600,7 @@ def main():
 
     # overwrite certain config parameters
     model.config.gradient_checkpointing = training_args.gradient_checkpointing
+    model.config.use_scan = model_args.use_scan
 
     # get model metadata
     model_metadata = model_args.get_metadata()
