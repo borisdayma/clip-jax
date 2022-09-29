@@ -581,6 +581,7 @@ def main():
             dtype=getattr(jnp, model_args.dtype),
             _do_init=False,  # we overwrite them with loaded checkpoint
         )
+        params = freeze(params)
     else:
         model = FlaxCLIPModel(
             config,
@@ -983,6 +984,10 @@ def main():
     def compute_loss(params, minibatch, dropout_rng, model_fn, train):
         logits = model_fn(**minibatch, params=params, dropout_rng=dropout_rng, train=train)[0]
         loss = clip_loss(logits)
+        # DEBUG
+        print("*" * 100)
+        print("logits", train, logits.shape)
+        print("*" * 100)
         return loss
 
     # Define gradient update step fn
