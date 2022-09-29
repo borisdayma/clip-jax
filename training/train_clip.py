@@ -985,7 +985,7 @@ def main():
         logits = model_fn(**minibatch, params=params, dropout_rng=dropout_rng, train=train)[0]
         loss = clip_loss(logits)
         # DEBUG
-        logger.info(f"logits shape for train={train}:", logits.shape)
+        logger.info(f"logits shape for train={train}:", str(logits.shape))
         return loss
 
     # Define gradient update step fn
