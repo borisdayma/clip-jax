@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.linen import combine_masks, make_causal_mask
+from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
@@ -38,6 +39,8 @@ from transformers.utils import ModelOutput, add_start_docstrings, logging
 
 from .configuration_clip import CLIPConfig, CLIPTextConfig, CLIPVisionConfig
 from .utils import PretrainedFromWandbMixin
+
+remat = nn_partitioning.remat
 
 logger = logging.get_logger(__name__)
 
@@ -460,6 +463,17 @@ class FlaxCLIPLayerCollection(nn.Module):
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
 
+        # gradient checkpointing
+        layer = (
+            remat(
+                FlaxCLIPEncoderLayer,
+                static_argnums=(2, 3),
+                prevent_cse=not self.config.use_scan,
+            )
+            if self.config.gradient_checkpointing
+            else FlaxCLIPEncoderLayer
+        )
+
         if self.config.use_scan:
             # keep it simple
             assert (
@@ -467,7 +481,7 @@ class FlaxCLIPLayerCollection(nn.Module):
             ), "scan does not support output_attentions or output_hidden_states"
             # FIXME: first layer has a different dimension so should be out of scan
             hidden_states, _ = nn.scan(
-                FlaxCLIPEncoderLayer,
+                layer,
                 variable_axes={"params": 0},
                 split_rngs={"params": True, "dropout": True},
                 in_axes=(nn.broadcast, nn.broadcast, nn.broadcast),
@@ -476,12 +490,11 @@ class FlaxCLIPLayerCollection(nn.Module):
                 hidden_states, attention_mask, deterministic, output_attentions
             )
         else:
-            breakpoint()
             for i in range(self.config.num_hidden_layers):
                 if output_hidden_states:
                     all_hidden_states += (hidden_states,)
 
-                layer_outputs = FlaxCLIPEncoderLayer(self.config, dtype=self.dtype, name=str(i))(
+                layer_outputs = layer(self.config, dtype=self.dtype, name=str(i))(
                     hidden_states,
                     attention_mask,
                     deterministic=deterministic,
