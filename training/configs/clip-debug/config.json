@@ -1,0 +1,36 @@
+{
+  "_name_or_path": "clip-vit-large-patch16/",
+  "architectures": [
+    "CLIPModel"
+  ],
+  "projection_dim": 128,
+  "logit_scale_init_value": 2.6592,
+  "model_type": "clip",
+  "text_config": {
+    "vocab_size": 50000,
+    "hidden_size": 128,
+    "intermediate_size": 1024,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 4,
+    "max_position_embeddings": 80,
+    "hidden_act": "quick_gelu",
+    "layer_norm_eps": 1e-05,
+    "dropout": 0.0,
+    "attention_dropout": 0.0,
+    "initializer_range": 0.02
+  },
+  "vision_config": {
+    "hidden_size": 1024,
+    "intermediate_size": 1024,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 16,
+    "num_channels": 3,
+    "image_size": 256,
+    "patch_size": 16,
+    "hidden_act": "quick_gelu",
+    "layer_norm_eps": 1e-05,
+    "dropout": 0.0,
+    "attention_dropout": 0.0,
+    "initializer_range": 0.02
+  }
+}
