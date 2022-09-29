@@ -476,10 +476,13 @@ def flat_args(model_args, data_args, training_args):
 def split_scanned_params(data):
     """Split params between scanned and non-scanned"""
     flat = flatten_dict(unfreeze(data))
-    split = {"standard": {}, "scanned": {}}
+    split = {"standard": {}, "scanned_text": {}, "scanned_vision": {}}
     for k, v in flat.items():
         if "scanned" in k:
-            split["scanned"][k] = v
+            if "text_model" in k:
+                split["scanned_text"][k] = v
+            else:
+                split["scanned_vision"][k] = v
         else:
             split["standard"][k] = v
     # remove empty keys
@@ -569,6 +572,9 @@ def main():
     # Set up model configs
     if model_args.config_name:
         config = CLIPConfig.from_pretrained(model_args.config_name)
+        # overwrite certain config parameters
+        config.text_config.use_scan = model_args.use_scan
+        config.vision_config.use_scan = model_args.use_scan
     else:
         config = None
 
@@ -590,6 +596,9 @@ def main():
             _do_init=False,
         )
         params = None
+        # overwrite certain config parameters
+        model.config.text_config.use_scan = model_args.use_scan
+        model.config.vision_config.use_scan = model_args.use_scan
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
@@ -600,7 +609,6 @@ def main():
 
     # overwrite certain config parameters
     model.config.gradient_checkpointing = training_args.gradient_checkpointing
-    model.config.use_scan = model_args.use_scan
 
     # get model metadata
     model_metadata = model_args.get_metadata()
@@ -750,7 +758,7 @@ def main():
         optimizer = {}
         opt_fn = {}
         for k, p in split_scanned_params(params_shape).items():
-            if "scanned" in k:
+            if ("scanned_text" in k) or ("scanned_vision" in k):
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
             optimizer[k] = opt.init(p)
@@ -774,7 +782,7 @@ def main():
         # get opt_state shape without actual init
         opt_state_shape = {}
         for k, p in split_scanned_params(params_shape).items():
-            if "scanned" in k:
+            if ("scanned_text" in k) or ("scanned_vision" in k):
                 opt_state_shape[k] = jax.eval_shape(jax.vmap(optimizer[k].init), p)
             else:
                 opt_state_shape[k] = jax.eval_shape(optimizer[k].init, p)
@@ -818,7 +826,7 @@ def main():
                 raise NotImplementedError
 
         for k, p in split_scanned_params(params_shape).items():
-            if "scanned" in k:
+            if ("scanned_text" in k) or ("scanned_vision" in k):
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
             _opt_fn = opt_fn[k] if training_args.optim == "distributed_shampoo" else None
@@ -855,7 +863,7 @@ def main():
             new_params = {}
             for k, param in params.items():
                 update_fn = optimizer[k].update
-                if "scanned" in k:
+                if ("scanned_text" in k) or ("scanned_vision" in k):
                     update_fn = jax.vmap(update_fn, in_axes=(0, 0, 0), out_axes=(0, 0))
                 updates, new_opt_state[k] = update_fn(grads[k], self.opt_state[k], param)
                 new_params[k] = optax.apply_updates(param, updates)
@@ -873,7 +881,7 @@ def main():
             opt_state = {}
             for k, p in split_scanned_params(params).items():
                 init_fn = optimizer[k].init
-                if "scanned" in k:
+                if ("scanned_text" in k) or ("scanned_vision" in k):
                     init_fn = jax.vmap(init_fn)
                 opt_state[k] = init_fn(p)
             return cls(
@@ -986,7 +994,7 @@ def main():
         logits = model_fn(**minibatch, params=params, dropout_rng=dropout_rng, train=train)[0]
         loss = clip_loss(logits)
         # DEBUG
-        logger.info(f"logits shape for train={train}:", str(logits.shape))
+        logger.info(f"logits shape for train={train}: {logits.shape}")
         return loss
 
     # Define gradient update step fn

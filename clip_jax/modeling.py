@@ -386,10 +386,12 @@ class FlaxCLIPMLP(nn.Module):
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(0.01),
         )
+        self.layer_norm_mid = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
 
     def __call__(self, hidden_states):
         hidden_states = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
+        hidden_states = self.layer_norm_mid(hidden_states)
         hidden_states = self.fc2(hidden_states)
         return hidden_states
 
@@ -401,8 +403,9 @@ class FlaxCLIPEncoderLayer(nn.Module):
     def setup(self):
         self.self_attn = FlaxCLIPAttention(self.config, dtype=self.dtype)
         self.layer_norm1 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
-        self.mlp = FlaxCLIPMLP(self.config, dtype=self.dtype)
         self.layer_norm2 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
+        self.mlp = FlaxCLIPMLP(self.config, dtype=self.dtype)
+        self.layer_norm3 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
 
     def __call__(
         self,
@@ -421,20 +424,21 @@ class FlaxCLIPEncoderLayer(nn.Module):
             output_attentions=output_attentions,
         )
         hidden_states = attn_outputs[0]
+        hidden_states = self.layer_norm2(hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
-        hidden_states = self.layer_norm2(hidden_states)
+        hidden_states = self.layer_norm3(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
+
+        if self.config.use_scan:
+            return hidden_states, None
 
         outputs = (hidden_states,)
 
         if output_attentions:
             outputs += attn_outputs[1:]
-
-        if self.config.use_scan:
-            return outputs, ()
 
         return outputs
 
@@ -461,6 +465,7 @@ class FlaxCLIPLayerCollection(nn.Module):
             assert (
                 not output_attentions and not output_hidden_states
             ), "scan does not support output_attentions or output_hidden_states"
+            # FIXME: first layer has a different dimension so should be out of scan
             hidden_states, _ = nn.scan(
                 FlaxCLIPEncoderLayer,
                 variable_axes={"params": 0},
@@ -471,6 +476,7 @@ class FlaxCLIPLayerCollection(nn.Module):
                 hidden_states, attention_mask, deterministic, output_attentions
             )
         else:
+            breakpoint()
             for i in range(self.config.num_hidden_layers):
                 if output_hidden_states:
                     all_hidden_states += (hidden_states,)
