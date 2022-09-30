@@ -64,6 +64,7 @@ class TrainingArguments:
             )
         },
     )
+    no_cache: bool = field(default=False, metadata={"help": "Uses jax cache."})
     do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
     batch_size_per_node: Optional[int] = field(default=64, metadata={"help": "Batch size for training."})
@@ -516,6 +517,10 @@ def main():
         assert (
             data_args.seed_dataset is not None
         ), "Seed dataset must be provided when model is split over multiple hosts"
+
+    # Use jax cache
+    if not training_args.no_cache:
+        cc.initialize_cache("jax_cache")
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
