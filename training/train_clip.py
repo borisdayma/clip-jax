@@ -47,8 +47,6 @@ from clip_jax.partitions import set_partitions
 
 logger = logging.getLogger(__name__)
 
-cc.initialize_cache("jax_cache")
-
 
 @dataclass
 class TrainingArguments:
