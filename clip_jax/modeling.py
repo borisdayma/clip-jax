@@ -478,7 +478,7 @@ class FlaxCLIPLayerCollection(nn.Module):
             # FIXME: scan does not work:
             # - check if first layer has a different dimension and need to be out of scan
             # - potentially FlaxCLIPLayerCollection is compiled and loaded for both text and vision so may need 2 different names
-            # - maybe the issue is something else
+            # - use checkify for potential errors
             hidden_states, _ = nn.scan(
                 layer,
                 variable_axes={"params": 0},
