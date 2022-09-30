@@ -149,7 +149,7 @@ class Dataset:
                 # load dataset
                 ds = tf.data.TFRecordDataset(
                     files,
-                    num_parallel_reads=tf.data.experimental.AUTOTUNE if augment else None,
+                    num_parallel_reads=tf.data.experimental.AUTOTUNE,
                 )
 
                 # non deterministic read (faster)
