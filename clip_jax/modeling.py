@@ -389,12 +389,10 @@ class FlaxCLIPMLP(nn.Module):
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(0.01),
         )
-        self.layer_norm_mid = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
 
     def __call__(self, hidden_states):
         hidden_states = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
-        hidden_states = self.layer_norm_mid(hidden_states)
         hidden_states = self.fc2(hidden_states)
         return hidden_states
 
@@ -408,7 +406,6 @@ class FlaxCLIPEncoderLayer(nn.Module):
         self.layer_norm1 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
         self.layer_norm2 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
         self.mlp = FlaxCLIPMLP(self.config, dtype=self.dtype)
-        self.layer_norm3 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
 
     def __call__(
         self,
@@ -427,11 +424,10 @@ class FlaxCLIPEncoderLayer(nn.Module):
             output_attentions=output_attentions,
         )
         hidden_states = attn_outputs[0]
-        hidden_states = self.layer_norm2(hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
-        hidden_states = self.layer_norm3(hidden_states)
+        hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
@@ -479,7 +475,10 @@ class FlaxCLIPLayerCollection(nn.Module):
             assert (
                 not output_attentions and not output_hidden_states
             ), "scan does not support output_attentions or output_hidden_states"
-            # FIXME: first layer has a different dimension so should be out of scan
+            # FIXME: scan does not work:
+            # - check if first layer has a different dimension and need to be out of scan
+            # - potentially FlaxCLIPLayerCollection is compiled and loaded for both text and vision so may need 2 different names
+            # - maybe the issue is something else
             hidden_states, _ = nn.scan(
                 layer,
                 variable_axes={"params": 0},
@@ -1212,11 +1211,7 @@ class FlaxCLIPModule(nn.Module):
             use_bias=False,
         )
 
-        self.logit_scale = self.param(
-            "logit_scale",
-            lambda _, shape: jnp.ones(shape) * self.config.logit_scale_init_value,
-            [],
-        )
+        self.logit_scale = self.param("logit_scale", jax.nn.initializers.constant(1.0, self.dtype), [])
 
     def __call__(
         self,
