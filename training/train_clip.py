@@ -571,10 +571,11 @@ def main():
 
     # Set up model configs
     if model_args.config_name:
-        config = CLIPConfig.from_pretrained(model_args.config_name)
-        # overwrite certain config parameters
-        config.text_config.use_scan = model_args.use_scan
-        config.vision_config.use_scan = model_args.use_scan
+        config = CLIPConfig.from_pretrained(
+            model_args.config_name,
+            use_scan=model_args.use_scan,
+            gradient_checkpointing=training_args.gradient_checkpointing,
+        )
     else:
         config = None
 
@@ -585,6 +586,8 @@ def main():
             config=config,
             seed=training_args.seed_model,
             dtype=getattr(jnp, model_args.dtype),
+            use_scan=model_args.use_scan,
+            gradient_checkpointing=training_args.gradient_checkpointing,
             _do_init=False,  # we overwrite them with loaded checkpoint
         )
         params = freeze(params)
@@ -596,9 +599,6 @@ def main():
             _do_init=False,
         )
         params = None
-        # overwrite certain config parameters
-        model.config.text_config.use_scan = model_args.use_scan
-        model.config.vision_config.use_scan = model_args.use_scan
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
@@ -606,9 +606,6 @@ def main():
     )
     if model_args.normalize_text:
         tn = TextNormalizer()
-
-    # overwrite certain config parameters
-    model.config.gradient_checkpointing = training_args.gradient_checkpointing
 
     # get model metadata
     model_metadata = model_args.get_metadata()

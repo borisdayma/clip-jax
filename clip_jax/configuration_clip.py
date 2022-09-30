@@ -100,6 +100,7 @@ class CLIPTextConfig(PretrainedConfig):
         initializer_range=0.02,
         initializer_factor=1.0,
         use_scan=False,
+        gradient_checkpointing=False,
         **kwargs,
     ):
         super().__init__(
@@ -119,6 +120,7 @@ class CLIPTextConfig(PretrainedConfig):
         self.initializer_factor = initializer_factor
         self.attention_dropout = attention_dropout
         self.use_scan = use_scan
+        self.gradient_checkpointing = gradient_checkpointing
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
@@ -209,6 +211,7 @@ class CLIPVisionConfig(PretrainedConfig):
         initializer_range=0.02,
         initializer_factor=1.0,
         use_scan=False,
+        gradient_checkpointing=False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -227,6 +230,7 @@ class CLIPVisionConfig(PretrainedConfig):
         self.layer_norm_eps = layer_norm_eps
         self.hidden_act = hidden_act
         self.use_scan = use_scan
+        self.gradient_checkpointing = gradient_checkpointing
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
@@ -275,6 +279,7 @@ class CLIPConfig(PretrainedConfig):
         projection_dim=512,
         logit_scale_init_value=2.6592,
         use_scan=False,
+        gradient_checkpointing=False,
         **kwargs,
     ):
         super().__init__(
@@ -290,8 +295,12 @@ class CLIPConfig(PretrainedConfig):
         text_config = kwargs.pop("text_config", {})
         vision_config = kwargs.pop("vision_config", {})
 
-        self.text_config = CLIPTextConfig(**{**text_config, "use_scan": use_scan})
-        self.vision_config = CLIPVisionConfig(**{**vision_config, "use_scan": use_scan})
+        self.text_config = CLIPTextConfig(
+            **{**text_config, "use_scan": use_scan, "gradient_checkpointing": gradient_checkpointing}
+        )
+        self.vision_config = CLIPVisionConfig(
+            **{**vision_config, "use_scan": use_scan, "gradient_checkpointing": gradient_checkpointing}
+        )
 
         self.projection_dim = projection_dim
         self.logit_scale_init_value = logit_scale_init_value
@@ -325,3 +334,27 @@ class CLIPConfig(PretrainedConfig):
         output["vision_config"] = self.vision_config.to_dict()
         output["model_type"] = self.__class__.model_type
         return output
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: Union[str, os.PathLike],
+        use_scan=None,
+        gradient_checkpointing=None,
+        **kwargs,
+    ) -> "PretrainedConfig":
+        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
+
+        if "model_type" in config_dict and hasattr(cls, "model_type") and config_dict["model_type"] != cls.model_type:
+            logger.warning(
+                f"You are using a model of type {config_dict['model_type']} to"
+                f" instantiate a model of type {cls.model_type}. This is not supported"
+                " for all configurations of models and can yield errors."
+            )
+
+        if use_scan is not None:
+            config_dict["use_scan"] = use_scan
+        if gradient_checkpointing is not None:
+            config_dict["gradient_checkpointing"] = gradient_checkpointing
+
+        return cls.from_dict(config_dict, **kwargs)
