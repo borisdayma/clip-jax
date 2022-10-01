@@ -980,10 +980,10 @@ def main():
 
     # Define loss
     def cross_entropy(logits, axis):
-        logits = logits.astype(jnp.float32)
+        # logits = logits.astype(jnp.float32)
         logprobs = jax.nn.log_softmax(logits, axis=axis)
         nll = jnp.diag(logprobs)
-        nll = with_sharding_constraint(nll, batch_spec)
+        # nll = with_sharding_constraint(nll, batch_spec)
         ce = -jnp.mean(nll)
         return ce
 
