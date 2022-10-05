@@ -222,6 +222,11 @@ class TrainingArguments:
         },
     )
 
+    do_profile: bool = field(
+        default=False,
+        metadata={"help": "Profile performance of training loop."},
+    )
+
     dp_devices: int = field(init=False)
     local_dp_devices: int = field(init=False)
     node_groups: int = field(init=False)
@@ -1274,6 +1279,8 @@ def main():
     train_metrics = None
     evaluation_ran = False
     save_model_ran = False
+    profile_status = "not started"
+    profile_step_start, profile_step_end = 2, 32  # hardcoded for now
     metrics_logger = MetricsLogger(local_state["step"])
     epochs = tqdm(
         range(local_state["epoch"], num_epochs),
@@ -1517,6 +1524,15 @@ def main():
                     if local_state["step"] % training_args.save_steps == 0:
                         run_save_model(state, eval_metrics)
                         save_model_ran = True
+
+                    # profile
+                    if training_args.do_profile:
+                        if profile_status == "not started" and local_state["step"] % profile_step_start == 0:
+                            jax.profiler.start_trace("./profiles")
+                            profile_status = "started"
+                        elif profile_status == "started" and local_state["step"] % profile_step_end == 0:
+                            jax.profiler.stop_trace()
+                            profile_status = "stopped"
 
                 # log final train metrics
                 if train_metrics is not None:
