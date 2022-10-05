@@ -3,9 +3,21 @@ Adapted from https://github.com/LAION-AI/CLIP_benchmark
 """
 
 import os
+from functools import partial
 from subprocess import call
 
+import jax
+import jax.numpy as jnp
+import numpy as np
+import torch
+import torchvision
+from dalle_mini.data import TextNormalizer
+from flax.training.common_utils import shard
 from torchvision.datasets import ImageNet
+from tqdm import tqdm
+from transformers import AutoTokenizer
+
+from clip_jax import FlaxCLIPModel
 
 
 def load_dataset(folder="benchmark_data", transform=None, **kwargs):
@@ -1115,4 +1127,74 @@ zero_shot_classification_template = [
 ]
 
 if __name__ == "__main__":
-    load_dataset()
+    assert jax.local_device_count() == 8
+
+    # load dataset
+    mean = (0.57078838, 0.5434825, 0.51970865)
+    std = (0.32512592, 0.32178711, 0.33277565)
+    transforms = torchvision.transforms.Compose(
+        [
+            torchvision.transforms.Resize(256, interpolation=torchvision.transforms.InterpolationMode.BICUBIC),
+            torchvision.transforms.CenterCrop(256),
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize(
+                mean=mean,
+                std=std,
+            ),
+        ]
+    )
+    ds = load_dataset(transform=transforms)
+    dl = torch.utils.data.DataLoader(ds, batch_size=1000, num_workers=0, shuffle=False)
+
+    # load model and tokenizer
+    tn = TextNormalizer()
+    tokenizer = AutoTokenizer.from_pretrained("./craiyon_tokenizer")
+    clip = FlaxCLIPModel.from_pretrained("borisd13/clip/model-1yf840w3:latest")
+
+    # prepare text weights
+    get_text_features = jax.jit(clip.get_text_features)
+    txt_features = []
+    for item in tqdm(ds.classes):
+        texts = [tn(t.format(c=item)) for t in zero_shot_classification_template]
+        txt_inputs = tokenizer(texts, padding="max_length", truncation=True, max_length=80, return_tensors="np")
+        txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
+        features = get_text_features(**txt_inputs, params=clip._params)
+        features = features / jnp.linalg.norm(features, axis=-1, keepdims=True)
+        features = features.mean(axis=0)
+        features = features / jnp.linalg.norm(features, axis=-1, keepdims=True)
+        txt_features.append(features)
+    txt_features = jnp.asarray(txt_features)
+
+    # evaluate a batch
+    @partial(jax.pmap, axis_name="batch")
+    def evaluate_batch(pixel_values, labels):
+        image_features = clip.get_image_features(pixel_values)
+        image_features = image_features / jnp.linalg.norm(image_features, axis=-1, keepdims=True)
+        similarity = jnp.matmul(image_features, txt_features.T)
+        top_k = similarity.argsort(-1)[:, ::-1][:, :5]
+        acc_top_1 = (top_k[:, 0] == labels).sum() / len(labels)
+        acc_top_5 = (top_k == labels[:, None]).sum() / len(labels)
+        acc_top_1, acc_top_5 = jax.lax.pmean(acc_top_1, "batch"), jax.lax.pmean(acc_top_5, "batch")
+        return acc_top_1, acc_top_5
+
+    # calculate metrics
+    acc_top_1_all = []
+    acc_top_5_all = []
+    n_items = []
+
+    for batch in tqdm(dl):
+        images, labels = batch
+        pixel_values = jnp.asarray(images)
+        labels = jnp.asarray(labels)
+        pixel_values = shard(pixel_values)
+        labels = shard(labels)
+        acc_top_1, acc_top_5 = evaluate_batch(pixel_values, labels)
+        acc_top_1_all.append(acc_top_1[0])
+        acc_top_5_all.append(acc_top_5[0])
+        n_items.append(len(images))
+
+    # weighted average
+    acc_top_1 = np.average(acc_top_1_all, weights=n_items)
+    acc_top_5 = np.average(acc_top_5_all, weights=n_items)
+    print(f"acc_top_1: {acc_top_1:.4f}")
+    print(f"acc_top_5: {acc_top_5:.4f}")
