@@ -47,6 +47,8 @@ from clip_jax.partitions import set_partitions
 
 logger = logging.getLogger(__name__)
 
+jax.distributed.initialize()
+
 
 @dataclass
 class TrainingArguments:
