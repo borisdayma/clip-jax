@@ -115,9 +115,8 @@ class Dataset:
         def _normalize(image, caption):
             if self.format == "rgb":
                 image = (
-                    tf.cast(image, tf.float32) / 255.0 - tf.convert_to_tensor(self.mean, dtype=tf.float32)
-                ) / tf.convert_to_tensor(self.std, dtype=tf.float32)
-                image = rearrange(image, "b h w c -> b c h w")
+                    tf.cast(image, tf.float32) / 255.0 - tf.convert_to_tensor([self.mean], dtype=tf.float32)
+                ) / tf.convert_to_tensor([self.std], dtype=tf.float32)
 
                 return image, caption
             elif self.format == "lab":
@@ -221,7 +220,6 @@ class Dataset:
 
 def logits_to_image(logits, mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0), format="rgb"):
     logits = np.asarray(logits, dtype=np.float32)
-    logits = rearrange(logits, "c h w -> h w c")
     if format == "rgb":
         logits = (logits * np.asarray(std, dtype=np.float32)) + np.asarray(mean, dtype=np.float32)
         logits = logits.clip(0.0, 1.0)

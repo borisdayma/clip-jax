@@ -797,8 +797,6 @@ class FlaxCLIPVisionPreTrainedModel(FlaxPreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.config.return_dict
 
-        pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
-
         # Handle any PRNG if needed
         rngs = {}
         if dropout_rng is not None:
@@ -921,8 +919,6 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
         if attention_mask is None:
             attention_mask = jnp.ones_like(input_ids)
 
-        pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
-
         # Handle any PRNG if needed
         rngs = {}
         if dropout_rng is not None:
@@ -1042,7 +1038,6 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
 
         >>> image_features = model.get_image_features(**inputs)
         ```"""
-        pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
 
         # Handle any PRNG if needed
         rngs = {}
