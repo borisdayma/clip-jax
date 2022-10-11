@@ -1345,6 +1345,9 @@ def main():
             # log time
             metrics_logger.log_time("valid", time.perf_counter() - start_eval_time)
 
+            # defragment memory
+            jax.lib.xla_bridge.get_backend().defragment()
+
             return metrics
 
     def run_save_model(state, eval_metrics=None):
