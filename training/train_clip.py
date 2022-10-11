@@ -1294,6 +1294,10 @@ def main():
     def run_evaluation():
         # ======================== Evaluating ==============================
         if training_args.do_eval:
+
+            # defragment memory
+            jax.lib.xla_bridge.get_backend().defragment()
+
             start_eval_time = time.perf_counter()
             metrics = []
             for batch in tqdm(
@@ -1451,6 +1455,9 @@ def main():
                 wandb.run.log_artifact(artifact_state)
             metrics_logger.log_time("save_model", time.perf_counter() - start_save_time)
 
+    # defragment memory
+    jax.lib.xla_bridge.get_backend().defragment()
+            
     logger.info("  Ready to start training")
     with mesh:
         for epoch in epochs:
