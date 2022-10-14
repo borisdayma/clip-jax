@@ -28,6 +28,7 @@ from jax import lax
 from transformers.modeling_flax_outputs import (
     FlaxBaseModelOutput,
     FlaxBaseModelOutputWithPooling,
+    FlaxSequenceClassifierOutput,
 )
 from transformers.modeling_flax_utils import (
     ACT2FN,
@@ -1142,7 +1143,7 @@ class FlaxCLIPVisionModule(nn.Module):
         )
 
 
-class FlaxCLIPVisionModel(FlaxCLIPVisionPreTrainedModel):
+class FlaxCLIPVisionModel(PretrainedFromWandbMixin, FlaxCLIPVisionPreTrainedModel):
     module_class = FlaxCLIPVisionModule
 
 
@@ -1176,6 +1177,55 @@ append_replace_return_docstrings(
     output_type=FlaxBaseModelOutputWithPooling,
     config_class=CLIPVisionConfig,
 )
+
+
+class FlaxCLIPVisionModelForImageClassificationModule(nn.Module):
+    config: CLIPVisionConfig
+    dtype: jnp.dtype = jnp.float32
+
+    def setup(self):
+        self.vision_model = FlaxCLIPVisionTransformer(self.config, dtype=self.dtype)
+        self.classifier = nn.Dense(
+            self.config.num_labels,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.variance_scaling(
+                self.config.initializer_range**2, "fan_in", "truncated_normal"
+            ),
+        )
+
+    def __call__(
+        self,
+        pixel_values=None,
+        deterministic: bool = True,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.vision_model(
+            pixel_values,
+            deterministic=deterministic,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+        )
+
+        logits = self.classifier(outputs.pooler_output)
+
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return output
+
+        return FlaxSequenceClassifierOutput(
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+class FlaxCLIPVisionModelForImageClassification(PretrainedFromWandbMixin, FlaxCLIPVisionPreTrainedModel):
+    module_class = FlaxCLIPVisionModelForImageClassificationModule
 
 
 class FlaxCLIPModule(nn.Module):
