@@ -21,6 +21,8 @@ from typing import Union
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
+from .utils import PretrainedFromWandbMixin
+
 logger = logging.get_logger(__name__)
 
 CLIP_PRETRAINED_CONFIG_ARCHIVE_MAP = {
@@ -140,7 +142,7 @@ class CLIPTextConfig(PretrainedConfig):
         return cls.from_dict(config_dict, **kwargs)
 
 
-class CLIPVisionConfig(PretrainedConfig):
+class CLIPVisionConfig(PretrainedFromWandbMixin, PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`CLIPModel`]. It is used to instantiate an CLIP
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
