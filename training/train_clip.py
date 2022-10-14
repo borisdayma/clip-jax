@@ -1457,7 +1457,7 @@ def main():
 
     # defragment memory
     jax.lib.xla_bridge.get_backend().defragment()
-            
+
     logger.info("  Ready to start training")
     with mesh:
         for epoch in epochs:
