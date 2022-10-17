@@ -420,15 +420,15 @@ class FlaxCLIPMLP(nn.Module):
             )
 
     def __call__(self, hidden_states):
-        hidden_states = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
+        h1 = self.fc1(hidden_states)
+        h1 = self.activation_fn(h1)
         if self.config.use_glu:
-            hidden_states_glu = self.fc1_glu(hidden_states)
-            hidden_states = hidden_states * hidden_states_glu
+            h2 = self.fc1_glu(hidden_states)
+            h1 = h1 * h2
         if self.config.ln_type == "normformer":
-            hidden_states = self.layer_norm_mid(hidden_states)
-        hidden_states = self.fc2(hidden_states)
-        return hidden_states
+            h1 = self.layer_norm_mid(h1)
+        h1 = self.fc2(h1)
+        return h1
 
 
 class FlaxCLIPEncoderLayer(nn.Module):
