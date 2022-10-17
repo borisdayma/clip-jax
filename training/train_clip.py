@@ -471,6 +471,13 @@ class DataTrainingArguments:
     mean: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The mean of the dataset."})
     std: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The std of the dataset."})
 
+    def __post_init__(self):
+        # correctly use defaults
+        if self.mean is None:
+            self.mean = (0.5, 0.5, 0.5)
+        if self.std is None:
+            self.std = (0.5, 0.5, 0.5)
+
 
 def flat_args(model_args, data_args, training_args):
     args = asdict(model_args)
