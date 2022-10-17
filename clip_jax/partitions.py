@@ -73,6 +73,7 @@ def _get_partition_rules():
         (("out_proj", "kernel"), P("mp", None)),
         # FFN
         (("fc1", "kernel"), P("mp", None)),
+        (("fc1_glu", "kernel"), P("mp", None)),
         (("fc2", "kernel"), P(None, "mp")),
         (("(bias|scale|logit_scale)",), None),
         # Projection
