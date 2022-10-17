@@ -82,7 +82,7 @@ class QuantizedValue:
         # SM3 style which will be useful for diagonal statistics
         # We first decide the scale.
         if fvalue.ndim < 1:
-            raise ValueError(f"Input array {fvalue} must have a strictly positive number of" " dimensions.")
+            raise ValueError(f"Input array {fvalue} must have a strictly positive number of dimensions.")
 
         max_abs = jnp.max(jnp.abs(fvalue), axis=0)
         bucket_size = max_abs / num_buckets

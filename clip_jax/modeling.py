@@ -21,12 +21,14 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.linen import combine_masks, make_causal_mask
+from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 from transformers.modeling_flax_outputs import (
     FlaxBaseModelOutput,
     FlaxBaseModelOutputWithPooling,
+    FlaxSequenceClassifierOutput,
 )
 from transformers.modeling_flax_utils import (
     ACT2FN,
@@ -38,6 +40,8 @@ from transformers.utils import ModelOutput, add_start_docstrings, logging
 
 from .configuration_clip import CLIPConfig, CLIPTextConfig, CLIPVisionConfig
 from .utils import PretrainedFromWandbMixin
+
+remat = nn_partitioning.remat
 
 logger = logging.get_logger(__name__)
 
@@ -210,8 +214,6 @@ class FlaxCLIPVisionEmbeddings(nn.Module):
         image_size = self.config.image_size
         patch_size = self.config.patch_size
 
-        self.class_embedding = self.param("class_embedding", jax.nn.initializers.normal(stddev=0.02), (embed_dim,))
-
         self.patch_embedding = nn.Conv(
             embed_dim,
             kernel_size=(patch_size, patch_size),
@@ -223,19 +225,14 @@ class FlaxCLIPVisionEmbeddings(nn.Module):
         )
 
         self.num_patches = (image_size // patch_size) ** 2
-        num_positions = self.num_patches + 1
-        self.position_embedding = nn.Embed(num_positions, embed_dim, embedding_init=jax.nn.initializers.normal())
-        self.position_ids = jnp.expand_dims(jnp.arange(0, num_positions, dtype="i4"), axis=0)
+        self.position_embedding = nn.Embed(self.num_patches, embed_dim, embedding_init=jax.nn.initializers.normal())
+        self.position_ids = jnp.expand_dims(jnp.arange(0, self.num_patches, dtype="i4"), axis=0)
 
     def __call__(self, pixel_values):
         patch_embeds = self.patch_embedding(pixel_values)
         batch_size, height, width, channels = patch_embeds.shape
         patch_embeds = jnp.reshape(patch_embeds, (batch_size, height * width, channels))
-
-        class_embeds = jnp.expand_dims(self.class_embedding, axis=(0, 1))
-        class_embeds = jnp.tile(class_embeds, (batch_size, 1, 1))
-        embeddings = jnp.concatenate([class_embeds, patch_embeds], axis=1)
-        embeddings = embeddings + self.position_embedding(self.position_ids)
+        embeddings = patch_embeds + self.position_embedding(self.position_ids)
         return embeddings
 
 
@@ -288,22 +285,31 @@ class FlaxCLIPAttention(nn.Module):
             self.embed_dim,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(0.01),
+            use_bias=self.config.use_bias,
         )
         self.v_proj = nn.Dense(
             self.embed_dim,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(0.01),
+            use_bias=self.config.use_bias,
         )
         self.q_proj = nn.Dense(
             self.embed_dim,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(0.01),
+            use_bias=self.config.use_bias,
         )
         self.out_proj = nn.Dense(
             self.embed_dim,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(0.01),
+            use_bias=self.config.use_bias,
         )
+
+        if self.config.ln_type == "normformer":
+            self.layer_norm_end = nn.LayerNorm(
+                epsilon=self.config.layer_norm_eps, dtype=self.dtype, use_bias=self.config.use_bias
+            )
 
         self.causal = isinstance(self.config, CLIPTextConfig)
         # causal mask does not seem interesting so we never use it
@@ -373,6 +379,9 @@ class FlaxCLIPAttention(nn.Module):
         attn_output = self._merge_heads(attn_output)
         attn_output = self.out_proj(attn_output)
 
+        if self.config.ln_type == "normformer":
+            attn_output = self.layer_norm_end(attn_output)
+
         outputs = (attn_output, attn_weights) if output_attentions else (attn_output,)
         return outputs
 
@@ -387,18 +396,39 @@ class FlaxCLIPMLP(nn.Module):
             self.config.intermediate_size,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(0.01),
+            use_bias=self.config.use_bias,
         )
         self.fc2 = nn.Dense(
             self.config.hidden_size,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(0.01),
+            use_bias=self.config.use_bias,
         )
+        if self.config.use_glu:
+            self.fc1_glu = nn.Dense(
+                self.config.intermediate_size,
+                dtype=self.dtype,
+                kernel_init=jax.nn.initializers.normal(0.01),
+                use_bias=self.config.use_bias,
+            )
+        if self.config.ln_type == "normformer":
+            self.layer_norm_mid = nn.LayerNorm(
+                epsilon=self.config.layer_norm_eps,
+                dtype=self.dtype,
+                use_bias=self.config.use_bias,
+                use_scale=self.config.force_scale,
+            )
 
     def __call__(self, hidden_states):
-        hidden_states = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states = self.fc2(hidden_states)
-        return hidden_states
+        h1 = self.fc1(hidden_states)
+        h1 = self.activation_fn(h1)
+        if self.config.use_glu:
+            h2 = self.fc1_glu(hidden_states)
+            h1 = h1 * h2
+        if self.config.ln_type == "normformer":
+            h1 = self.layer_norm_mid(h1)
+        h1 = self.fc2(h1)
+        return h1
 
 
 class FlaxCLIPEncoderLayer(nn.Module):
@@ -407,9 +437,19 @@ class FlaxCLIPEncoderLayer(nn.Module):
 
     def setup(self):
         self.self_attn = FlaxCLIPAttention(self.config, dtype=self.dtype)
-        self.layer_norm1 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
+        self.layer_norm1 = nn.LayerNorm(
+            epsilon=self.config.layer_norm_eps,
+            dtype=self.dtype,
+            use_bias=self.config.use_bias,
+            use_scale=self.config.force_scale,
+        )
+        self.layer_norm2 = nn.LayerNorm(
+            epsilon=self.config.layer_norm_eps,
+            dtype=self.dtype,
+            use_bias=self.config.use_bias,
+            use_scale=self.config.force_scale,
+        )
         self.mlp = FlaxCLIPMLP(self.config, dtype=self.dtype)
-        self.layer_norm2 = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
 
     def __call__(
         self,
@@ -435,13 +475,13 @@ class FlaxCLIPEncoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
+        if self.config.use_scan:
+            return hidden_states, None
+
         outputs = (hidden_states,)
 
         if output_attentions:
             outputs += attn_outputs[1:]
-
-        if self.config.use_scan:
-            return outputs, ()
 
         return outputs
 
@@ -463,13 +503,28 @@ class FlaxCLIPLayerCollection(nn.Module):
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
 
+        # gradient checkpointing
+        layer = (
+            remat(
+                FlaxCLIPEncoderLayer,
+                static_argnums=(2, 3),
+                prevent_cse=not self.config.use_scan,
+            )
+            if self.config.gradient_checkpointing
+            else FlaxCLIPEncoderLayer
+        )
+
         if self.config.use_scan:
             # keep it simple
             assert (
                 not output_attentions and not output_hidden_states
             ), "scan does not support output_attentions or output_hidden_states"
+            # FIXME: scan does not work:
+            # - check if first layer has a different dimension and need to be out of scan
+            # - potentially FlaxCLIPLayerCollection is compiled and loaded for both text and vision so may need 2 different names
+            # - use checkify for potential errors
             hidden_states, _ = nn.scan(
-                FlaxCLIPEncoderLayer,
+                layer,
                 variable_axes={"params": 0},
                 split_rngs={"params": True, "dropout": True},
                 in_axes=(nn.broadcast, nn.broadcast, nn.broadcast),
@@ -482,7 +537,7 @@ class FlaxCLIPLayerCollection(nn.Module):
                 if output_hidden_states:
                     all_hidden_states += (hidden_states,)
 
-                layer_outputs = FlaxCLIPEncoderLayer(self.config, dtype=self.dtype, name=str(i))(
+                layer_outputs = layer(self.config, dtype=self.dtype, name=str(i))(
                     hidden_states,
                     attention_mask,
                     deterministic=deterministic,
@@ -541,7 +596,12 @@ class FlaxCLIPTextTransformer(nn.Module):
     def setup(self):
         self.embeddings = FlaxCLIPTextEmbeddings(self.config, dtype=self.dtype)
         self.encoder = FlaxCLIPEncoder(self.config, dtype=self.dtype)
-        self.final_layer_norm = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
+        self.final_layer_norm = nn.LayerNorm(
+            epsilon=self.config.layer_norm_eps,
+            dtype=self.dtype,
+            use_bias=self.config.use_bias,
+            use_scale=self.config.force_scale,
+        )
 
     def __call__(
         self,
@@ -574,10 +634,8 @@ class FlaxCLIPTextTransformer(nn.Module):
         last_hidden_state = self.final_layer_norm(last_hidden_state)
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
-        # take features from the EOS embedding
-        pooled_output = last_hidden_state[
-            jnp.arange(last_hidden_state.shape[0]), get_id_pos(input_ids, self.config.eos_token_id)
-        ]
+        # take features from the BOS embedding instead of EOS (no causal mask anymore)
+        pooled_output = last_hidden_state[:, 0, :]
 
         if not return_dict:
             return (last_hidden_state, pooled_output) + encoder_outputs[1:]
@@ -596,9 +654,19 @@ class FlaxCLIPVisionTransformer(nn.Module):
 
     def setup(self):
         self.embeddings = FlaxCLIPVisionEmbeddings(self.config, dtype=self.dtype)
-        self.pre_layrnorm = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
+        self.pre_layernorm = nn.LayerNorm(
+            epsilon=self.config.layer_norm_eps,
+            dtype=self.dtype,
+            use_bias=self.config.use_bias,
+            use_scale=self.config.force_scale,
+        )
         self.encoder = FlaxCLIPEncoder(self.config, dtype=self.dtype)
-        self.post_layernorm = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
+        self.post_layernorm = nn.LayerNorm(
+            epsilon=self.config.layer_norm_eps,
+            dtype=self.dtype,
+            use_bias=self.config.use_bias,
+            use_scale=self.config.force_scale,
+        )
 
     def __call__(
         self,
@@ -615,7 +683,7 @@ class FlaxCLIPVisionTransformer(nn.Module):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         hidden_states = self.embeddings(pixel_values)
-        hidden_states = self.pre_layrnorm(hidden_states)
+        hidden_states = self.pre_layernorm(hidden_states)
 
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
@@ -626,7 +694,8 @@ class FlaxCLIPVisionTransformer(nn.Module):
         )
 
         last_hidden_state = encoder_outputs[0]
-        pooled_output = last_hidden_state[:, 0, :]
+        # average pool
+        pooled_output = last_hidden_state.mean(axis=1)
         pooled_output = self.post_layernorm(pooled_output)
 
         if not return_dict:
@@ -787,8 +856,6 @@ class FlaxCLIPVisionPreTrainedModel(FlaxPreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.config.return_dict
 
-        pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
-
         # Handle any PRNG if needed
         rngs = {}
         if dropout_rng is not None:
@@ -861,6 +928,12 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
         else:
             return random_params
 
+    def num_params(self, params=None):
+        if params is None:
+            params = self.params
+        num_params = jax.tree_util.tree_map(lambda param: param.size, flatten_dict(unfreeze(params))).values()
+        return sum(list(num_params))
+
     def unscan(self, params):
         if self.config.use_scan:
             self.config.use_scan = False
@@ -904,8 +977,6 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
 
         if attention_mask is None:
             attention_mask = jnp.ones_like(input_ids)
-
-        pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
 
         # Handle any PRNG if needed
         rngs = {}
@@ -1026,7 +1097,6 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
 
         >>> image_features = model.get_image_features(**inputs)
         ```"""
-        pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
 
         # Handle any PRNG if needed
         rngs = {}
@@ -1095,7 +1165,7 @@ FLAX_CLIP_TEXT_MODEL_DOCSTRING = """
 
     >>> outputs = model(**inputs)
     >>> last_hidden_state = outputs.last_hidden_state
-    >>> pooler_output = outputs.pooler_output  # pooled (EOS token) states
+    >>> pooler_output = outputs.pooler_output  # pooled (BOS token) states
     ```
 """
 
@@ -1131,7 +1201,7 @@ class FlaxCLIPVisionModule(nn.Module):
         )
 
 
-class FlaxCLIPVisionModel(FlaxCLIPVisionPreTrainedModel):
+class FlaxCLIPVisionModel(PretrainedFromWandbMixin, FlaxCLIPVisionPreTrainedModel):
     module_class = FlaxCLIPVisionModule
 
 
@@ -1167,6 +1237,55 @@ append_replace_return_docstrings(
 )
 
 
+class FlaxCLIPVisionModelForImageClassificationModule(nn.Module):
+    config: CLIPVisionConfig
+    dtype: jnp.dtype = jnp.float32
+
+    def setup(self):
+        self.vision_model = FlaxCLIPVisionTransformer(self.config, dtype=self.dtype)
+        self.classifier = nn.Dense(
+            self.config.num_labels,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.variance_scaling(
+                self.config.initializer_range**2, "fan_in", "truncated_normal"
+            ),
+        )
+
+    def __call__(
+        self,
+        pixel_values=None,
+        deterministic: bool = True,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.vision_model(
+            pixel_values,
+            deterministic=deterministic,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+        )
+
+        logits = self.classifier(outputs.pooler_output)
+
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return output
+
+        return FlaxSequenceClassifierOutput(
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+class FlaxCLIPVisionModelForImageClassification(PretrainedFromWandbMixin, FlaxCLIPVisionPreTrainedModel):
+    module_class = FlaxCLIPVisionModelForImageClassificationModule
+
+
 class FlaxCLIPModule(nn.Module):
     config: CLIPConfig
     dtype: jnp.dtype = jnp.float32
@@ -1195,11 +1314,7 @@ class FlaxCLIPModule(nn.Module):
             use_bias=False,
         )
 
-        self.logit_scale = self.param(
-            "logit_scale",
-            lambda _, shape: jnp.ones(shape) * self.config.logit_scale_init_value,
-            [],
-        )
+        self.logit_scale = self.param("logit_scale", jax.nn.initializers.constant(1.0, self.dtype), [])
 
     def __call__(
         self,

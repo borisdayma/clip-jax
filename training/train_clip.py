@@ -1,3 +1,4 @@
+import io
 import logging
 import os
 import sys
@@ -30,13 +31,23 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, HfArgumentParser, set_seed
 from transformers.utils import get_full_repo_name
 
+try:
+    from google.cloud import storage
+except:
+    storage = None
+
+try:
+    from dalle_mini.model.text import TextNormalizer
+except ImportError:
+    print("Text normalization not available")
+
 from clip_jax import CLIPConfig, FlaxCLIPModel
 from clip_jax.data import Dataset
 from clip_jax.partitions import set_partitions
 
 logger = logging.getLogger(__name__)
 
-cc.initialize_cache("jax_cache")
+jax.distributed.initialize()
 
 
 @dataclass
@@ -53,6 +64,7 @@ class TrainingArguments:
             )
         },
     )
+    no_cache: bool = field(default=False, metadata={"help": "Uses jax cache."})
     do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
     batch_size_per_node: Optional[int] = field(default=64, metadata={"help": "Batch size for training."})
@@ -212,13 +224,18 @@ class TrainingArguments:
         },
     )
 
+    do_profile: bool = field(
+        default=False,
+        metadata={"help": "Profile performance of training loop."},
+    )
+
     dp_devices: int = field(init=False)
     local_dp_devices: int = field(init=False)
     node_groups: int = field(init=False)
     batch_size_per_step: int = field(init=False)
     train_batch_size: int = field(init=False)
     valid_batch_size: int = field(init=False)
-    valid_batch_size_per_node: int = field(init=False)
+    valid_batch_size_per_step: int = field(init=False)
     log_norm_steps: int = field(init=False)
 
     def __post_init__(self):
@@ -236,6 +253,10 @@ class TrainingArguments:
                 f"Output directory ({self.output_dir}) already exists and is not empty."
                 "Use --overwrite_output_dir to overcome."
             )
+        if self.output_dir.startswith("gs://"):
+            assert (
+                storage is not None
+            ), 'Could not find google.storage. Install with "pip install google-cloud-storage"'
         assert self.lr_decay in [
             None,
             "linear",
@@ -287,8 +308,8 @@ class TrainingArguments:
         self.batch_size_per_local_dp_device = self.batch_size_per_node // self.local_dp_devices
         # define batch size for data loader
         self.train_batch_size = batch_size_per_node_per_step * self.node_groups
-        self.valid_batch_size = self.batch_size_per_node * jax.process_count()
-        self.valid_batch_size_per_node = self.batch_size_per_node * self.node_groups
+        self.valid_batch_size = self.batch_size_per_node * self.node_groups
+        self.valid_batch_size_per_step = self.batch_size_per_node * jax.process_count()
 
     def to_dict(self):
         """
@@ -329,6 +350,10 @@ class ModelArguments:
         default=None,
         metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"},
     )
+    normalize_text: bool = field(
+        default=False,
+        metadata={"help": "Normalize text before tokenization"},
+    )
     cache_dir: Optional[str] = field(
         default=None,
         metadata={"help": ("Where do you want to store the pretrained models downloaded from s3")},
@@ -341,6 +366,10 @@ class ModelArguments:
                 " and trained. Choose one of `[float32, float16, bfloat16]`."
             )
         },
+    )
+    use_scan: bool = field(
+        default=False,
+        metadata={"help": "Use scan on the model layers."},
     )
     use_auth_token: bool = field(
         default=False,
@@ -369,6 +398,8 @@ class ModelArguments:
             assert (
                 self.model_name_or_path is not None
             ), "If you want to restore state, you must provide a model name or path."
+        if self.use_scan:
+            assert self.model_name_or_path is None, "use_scan can only be defined when training from scratch."
 
     def get_metadata(self):
         if self.model_name_or_path is not None and ":" in self.model_name_or_path:
@@ -389,12 +420,26 @@ class ModelArguments:
                     artifact = wandb.run.use_artifact(state_artifact)
                 else:
                     artifact = wandb.Api().artifact(state_artifact)
-                artifact_dir = artifact.download(tmp_dir)
-                self.restore_state = Path(artifact_dir)
+                if artifact.metadata.get("bucket_path"):
+                    # we will read directly file contents
+                    self.restore_state = artifact.metadata["bucket_path"]
+                else:
+                    artifact_dir = artifact.download(tmp_dir)
+                    self.restore_state = Path(artifact_dir)
+
+            if self.restore_state.startswith("gs://"):
+                bucket_path = Path(self.restore_state[5:]) / "opt_state.msgpack"
+                bucket, blob_name = str(bucket_path).split("/", 1)
+                assert (
+                    storage is not None
+                ), 'Could not find google.storage. Install with "pip install google-cloud-storage"'
+                client = storage.Client()
+                bucket = client.bucket(bucket)
+                blob = bucket.blob(blob_name)
+                return blob.download_as_bytes()
 
             with (Path(self.restore_state) / "opt_state.msgpack").open("rb") as f:
-                opt_state = f.read()
-            return opt_state
+                return f.read()
 
 
 @dataclass
@@ -426,6 +471,13 @@ class DataTrainingArguments:
     mean: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The mean of the dataset."})
     std: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The std of the dataset."})
 
+    def __post_init__(self):
+        # correctly use defaults
+        if self.mean is None:
+            self.mean = (0.5, 0.5, 0.5)
+        if self.std is None:
+            self.std = (0.5, 0.5, 0.5)
+
 
 def flat_args(model_args, data_args, training_args):
     args = asdict(model_args)
@@ -437,10 +489,13 @@ def flat_args(model_args, data_args, training_args):
 def split_scanned_params(data):
     """Split params between scanned and non-scanned"""
     flat = flatten_dict(unfreeze(data))
-    split = {"standard": {}, "scanned": {}}
+    split = {"standard": {}, "scanned_text": {}, "scanned_vision": {}}
     for k, v in flat.items():
         if "scanned" in k:
-            split["scanned"][k] = v
+            if "text_model" in k:
+                split["scanned_text"][k] = v
+            else:
+                split["scanned_vision"][k] = v
         else:
             split["standard"][k] = v
     # remove empty keys
@@ -474,6 +529,10 @@ def main():
         assert (
             data_args.seed_dataset is not None
         ), "Seed dataset must be provided when model is split over multiple hosts"
+
+    # Use jax cache
+    if not training_args.no_cache:
+        cc.initialize_cache("jax_cache")
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -509,6 +568,8 @@ def main():
     dataset = Dataset(
         train_batch_size=training_args.train_batch_size,
         valid_batch_size=training_args.valid_batch_size,
+        valid_batch_size_per_step=training_args.valid_batch_size_per_step,
+        node_groups=training_args.node_groups,
         **asdict(data_args),
     )
 
@@ -527,7 +588,11 @@ def main():
 
     # Set up model configs
     if model_args.config_name:
-        config = CLIPConfig.from_pretrained(model_args.config_name)
+        config = CLIPConfig.from_pretrained(
+            model_args.config_name,
+            use_scan=model_args.use_scan,
+            gradient_checkpointing=training_args.gradient_checkpointing,
+        )
     else:
         config = None
 
@@ -538,8 +603,11 @@ def main():
             config=config,
             seed=training_args.seed_model,
             dtype=getattr(jnp, model_args.dtype),
+            use_scan=model_args.use_scan,
+            gradient_checkpointing=training_args.gradient_checkpointing,
             _do_init=False,  # we overwrite them with loaded checkpoint
         )
+        params = freeze(params)
     else:
         model = FlaxCLIPModel(
             config,
@@ -553,9 +621,8 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name,
     )
-
-    # overwrite certain config parameters
-    model.config.gradient_checkpointing = training_args.gradient_checkpointing
+    if model_args.normalize_text:
+        tn = TextNormalizer()
 
     # get model metadata
     model_metadata = model_args.get_metadata()
@@ -570,6 +637,7 @@ def main():
 
     # Store some constant
     num_epochs = training_args.num_train_epochs
+    num_params = model.num_params(params_shape)
 
     # log some info
     logger.info("***** Running training *****")
@@ -578,6 +646,7 @@ def main():
     logger.info(f"  Number of devices = {jax.device_count()}")
     logger.info(f"  Gradient accumulation steps = {training_args.gradient_accumulation_steps}")
     logger.info(f"  Batch size per update = {training_args.batch_size_per_step}")
+    logger.info(f"  Model parameters = {num_params:,}")
 
     if jax.process_index() == 0:
         # set default x-axis as 'train/step'
@@ -587,6 +656,7 @@ def main():
         wandb.config.update(
             {
                 "batch_size_per_step": training_args.batch_size_per_step,
+                "num_params": num_params,
                 "model_config": model.config.to_dict(),
                 "num_devices": jax.device_count(),
                 "versions": {
@@ -702,7 +772,7 @@ def main():
         optimizer = {}
         opt_fn = {}
         for k, p in split_scanned_params(params_shape).items():
-            if "scanned" in k:
+            if ("scanned_text" in k) or ("scanned_vision" in k):
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
             optimizer[k] = opt.init(p)
@@ -726,7 +796,7 @@ def main():
         # get opt_state shape without actual init
         opt_state_shape = {}
         for k, p in split_scanned_params(params_shape).items():
-            if "scanned" in k:
+            if ("scanned_text" in k) or ("scanned_vision" in k):
                 opt_state_shape[k] = jax.eval_shape(jax.vmap(optimizer[k].init), p)
             else:
                 opt_state_shape[k] = jax.eval_shape(optimizer[k].init, p)
@@ -770,7 +840,7 @@ def main():
                 raise NotImplementedError
 
         for k, p in split_scanned_params(params_shape).items():
-            if "scanned" in k:
+            if ("scanned_text" in k) or ("scanned_vision" in k):
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
             _opt_fn = opt_fn[k] if training_args.optim == "distributed_shampoo" else None
@@ -807,7 +877,7 @@ def main():
             new_params = {}
             for k, param in params.items():
                 update_fn = optimizer[k].update
-                if "scanned" in k:
+                if ("scanned_text" in k) or ("scanned_vision" in k):
                     update_fn = jax.vmap(update_fn, in_axes=(0, 0, 0), out_axes=(0, 0))
                 updates, new_opt_state[k] = update_fn(grads[k], self.opt_state[k], param)
                 new_params[k] = optax.apply_updates(param, updates)
@@ -825,7 +895,7 @@ def main():
             opt_state = {}
             for k, p in split_scanned_params(params).items():
                 init_fn = optimizer[k].init
-                if "scanned" in k:
+                if ("scanned_text" in k) or ("scanned_vision" in k):
                     init_fn = jax.vmap(init_fn)
                 opt_state[k] = init_fn(p)
             return cls(
@@ -926,6 +996,8 @@ def main():
     def cross_entropy(logits, axis):
         logprobs = jax.nn.log_softmax(logits, axis=axis)
         nll = jnp.diag(logprobs)
+        # try to compute only necessary part of the loss per device
+        nll = with_sharding_constraint(nll, batch_spec)
         ce = -jnp.mean(nll)
         return ce
 
@@ -1216,6 +1288,8 @@ def main():
     train_metrics = None
     evaluation_ran = False
     save_model_ran = False
+    profile_status = "not started"
+    profile_step_start, profile_step_end = 2, 32  # hardcoded for now
     metrics_logger = MetricsLogger(local_state["step"])
     epochs = tqdm(
         range(local_state["epoch"], num_epochs),
@@ -1227,10 +1301,14 @@ def main():
     def run_evaluation():
         # ======================== Evaluating ==============================
         if training_args.do_eval:
+
+            # defragment memory
+            jax.lib.xla_bridge.get_backend().defragment()
+
             start_eval_time = time.perf_counter()
             metrics = []
             for batch in tqdm(
-                dataset.valid.as_numpy_iterator(),
+                dataset.valid,
                 desc="Evaluating...",
                 position=2,
                 leave=False,
@@ -1238,8 +1316,11 @@ def main():
             ):
 
                 # preprocess batch
+                captions = [caption.decode("utf-8") for caption in batch[1]]
+                if model_args.normalize_text:
+                    captions = [tn(c) for c in captions]
                 txt_inputs = tokenizer(
-                    [caption.decode("utf-8") for caption in batch[1]],
+                    captions,
                     padding="max_length",
                     truncation=True,
                     max_length=model.config.text_config.max_position_embeddings,
@@ -1248,19 +1329,6 @@ def main():
                 # keep only input_ids and attention_mask
                 txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
                 batch = {"pixel_values": batch[0], **txt_inputs}
-
-                # need to keep only items relevant to the node
-                batch = jax.tree_util.tree_map(
-                    lambda x: x.reshape(
-                        (
-                            jax.process_count() // training_args.node_groups,
-                            training_args.valid_batch_size_per_node,
-                        )
-                        + x.shape[1:]
-                    ),
-                    batch,
-                )
-                batch = jax.tree_util.tree_map(lambda x: x[jax.process_index() // training_args.node_groups], batch)
 
                 # add dp dimension when using "vmap trick"
                 if training_args.use_vmap_trick:
@@ -1288,12 +1356,21 @@ def main():
             # log time
             metrics_logger.log_time("valid", time.perf_counter() - start_eval_time)
 
+            # defragment memory
+            jax.lib.xla_bridge.get_backend().defragment()
+
             return metrics
 
     def run_save_model(state, eval_metrics=None):
         if jax.process_index() == 0:
             start_save_time = time.perf_counter()
             output_dir = training_args.output_dir
+            use_bucket = output_dir.startswith("gs://")
+            if use_bucket:
+                bucket_path = Path(output_dir[5:]) / wandb.run.id / f"step_{state.step}"
+                bucket, dir_path = str(bucket_path).split("/", 1)
+                tmp_dir = tempfile.TemporaryDirectory()
+                output_dir = tmp_dir.name
 
             # save model
             params = jax.device_get(state.params)
@@ -1302,10 +1379,25 @@ def main():
             # save tokenizer
             tokenizer.save_pretrained(output_dir)
 
+            # copy to bucket
+            if use_bucket:
+                client = storage.Client()
+                bucket = client.bucket(bucket)
+                for filename in Path(output_dir).glob("*"):
+                    blob_name = str(Path(dir_path) / "model" / filename.name)
+                    blob = bucket.blob(blob_name)
+                    blob.upload_from_filename(str(filename))
+                tmp_dir.cleanup()
+
             # save state
             opt_state = jax.device_get(state.opt_state)
-            with (Path(output_dir) / "opt_state.msgpack").open("wb") as f:
-                f.write(to_bytes(opt_state))
+            if use_bucket:
+                blob_name = str(Path(dir_path) / "state" / "opt_state.msgpack")
+                blob = bucket.blob(blob_name)
+                blob.upload_from_file(io.BytesIO(to_bytes(opt_state)))
+            else:
+                with (Path(output_dir) / "opt_state.msgpack").open("wb") as f:
+                    f.write(to_bytes(opt_state))
 
             # save to HF hub
             if training_args.push_to_hub:
@@ -1324,38 +1416,54 @@ def main():
                     k: jax.device_get(getattr(state, k)).item()
                     for k in ["step", "epoch", "train_time", "train_samples"]
                 }
+                metadata["num_params"] = num_params
                 if eval_metrics is not None:
                     metadata["eval"] = eval_metrics
 
                 # create model artifact
+                if use_bucket:
+                    metadata["bucket_path"] = f"gs://{bucket_path}/model"
                 artifact = wandb.Artifact(
                     name=f"model-{wandb.run.id}",
                     type="CLIP",
                     metadata=metadata,
                 )
-                for filename in [
-                    "config.json",
-                    "flax_model.msgpack",
-                    # tokenizer
-                    "tokenizer_config.json",
-                    "special_tokens_map.json",
-                    "vocab.json",
-                    "merges.txt",
-                    "added_tokens.json",
-                    "tokenizer.json",
-                ]:
-                    artifact.add_file(f"{Path(training_args.output_dir) / filename}")
+                if use_bucket:
+                    artifact.add_reference(metadata["bucket_path"])
+                else:
+                    for filename in [
+                        "config.json",
+                        "flax_model.msgpack",
+                        # tokenizer
+                        "tokenizer_config.json",
+                        "special_tokens_map.json",
+                        "vocab.json",
+                        "merges.txt",
+                        "added_tokens.json",
+                        "tokenizer.json",
+                    ]:
+                        if (Path(training_args.output_dir) / filename).exists():
+                            artifact.add_file(Path(training_args.output_dir) / filename)
+                        artifact.add_file(f"{Path(training_args.output_dir) / filename}")
                 wandb.run.log_artifact(artifact)
 
                 # create state artifact
+                if use_bucket:
+                    metadata["bucket_path"] = f"gs://{bucket_path}/state"
                 artifact_state = wandb.Artifact(
                     name=f"state-{wandb.run.id}",
                     type="state",
                     metadata=metadata,
                 )
-                artifact_state.add_file(f"{Path(training_args.output_dir) / 'opt_state.msgpack'}")
+                if use_bucket:
+                    artifact_state.add_reference(metadata["bucket_path"])
+                else:
+                    artifact_state.add_file(f"{Path(training_args.output_dir) / 'opt_state.msgpack'}")
                 wandb.run.log_artifact(artifact_state)
             metrics_logger.log_time("save_model", time.perf_counter() - start_save_time)
+
+    # defragment memory
+    jax.lib.xla_bridge.get_backend().defragment()
 
     logger.info("  Ready to start training")
     with mesh:
@@ -1369,7 +1477,7 @@ def main():
             # train
             if training_args.do_train:
                 for batch in tqdm(
-                    dataset.train.as_numpy_iterator(),
+                    dataset.train,
                     desc="Training...",
                     position=1,
                     leave=False,
@@ -1397,8 +1505,11 @@ def main():
                         bs_shape = (training_args.gradient_accumulation_steps,) + bs_shape
 
                     # preprocess batch
+                    captions = [caption.decode("utf-8") for caption in batch[1]]
+                    if model_args.normalize_text:
+                        captions = [tn(c) for c in captions]
                     txt_inputs = tokenizer(
-                        [caption.decode("utf-8") for caption in batch[1]],
+                        captions,
                         padding="max_length",
                         truncation=True,
                         max_length=model.config.text_config.max_position_embeddings,
@@ -1432,6 +1543,15 @@ def main():
                     if local_state["step"] % training_args.save_steps == 0:
                         run_save_model(state, eval_metrics)
                         save_model_ran = True
+
+                    # profile
+                    if training_args.do_profile:
+                        if profile_status == "not started" and local_state["step"] % profile_step_start == 0:
+                            jax.profiler.start_trace("./profiles")
+                            profile_status = "started"
+                        elif profile_status == "started" and local_state["step"] % profile_step_end == 0:
+                            jax.profiler.stop_trace()
+                            profile_status = "stopped"
 
                 # log final train metrics
                 if train_metrics is not None:
