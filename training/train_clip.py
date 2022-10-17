@@ -1289,7 +1289,8 @@ def main():
     evaluation_ran = False
     save_model_ran = False
     profile_status = "not started"
-    profile_step_start, profile_step_end = 2, 32  # hardcoded for now
+    profile_step_start = 102  # so we start seeing the preconditioner stats
+    profile_step_end = profile_step_start + 20
     metrics_logger = MetricsLogger(local_state["step"])
     epochs = tqdm(
         range(local_state["epoch"], num_epochs),
