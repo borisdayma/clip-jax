@@ -22,8 +22,8 @@ class Dataset:
     seed_dataset: int = None
     format: str = "rgb"  # rgb or lab
     key_image: str = "webp"  # name of key containing image
-    mean: list[float] = (0.0, 0.0, 0.0)  # do not apply mean
-    std: list[float] = (1.0, 1.0, 1.0)  # do not apply std
+    mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
+    std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     valid_batch_size_per_step: int = None  # used in multi-host
     node_groups: int = 1  # used in multi-host (number of nodes reading the same data when mp>local_devices)
     _train: tf.data.Dataset = field(init=False)
