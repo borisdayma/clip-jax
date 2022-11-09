@@ -1353,18 +1353,14 @@ class FlaxCLIPModule(nn.Module):
         text_embeds = text_outputs[1]
         text_embeds = self.text_projection(text_embeds)
 
-        # normalized features
-        def normalize(x, epsilon=1e-6):
-            x = jnp.asarray(x, jnp.float32)
-            mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
-            return jnp.asarray(x * lax.rsqrt(mean2 + epsilon), self.dtype)
-
-        image_embeds = normalize(image_embeds)
-        text_embeds = normalize(text_embeds)
-
         # cosine similarity as logits
+        eps = 1e-8
         logit_scale = jnp.exp(self.logit_scale)
-        logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
+        logits_per_text = (
+            jnp.matmul(text_embeds, image_embeds.T)
+            * logit_scale
+            / jnp.maximum(jnp.linalg.norm(text_embeds, axis=-1) * jnp.linalg.norm(image_embeds, axis=-1), eps)
+        )
         logits_per_image = logits_per_text.T
 
         if not return_dict:
