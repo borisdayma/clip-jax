@@ -996,8 +996,8 @@ def main():
     def cross_entropy(logits, axis):
         logprobs = jax.nn.log_softmax(logits, axis=axis)
         nll = jnp.diag(logprobs)
-        # try to compute only necessary part of the loss per device
-        nll = with_sharding_constraint(nll, batch_spec)
+        # TODO: try to compute only necessary part of the loss per device
+        # nll = with_sharding_constraint(nll, batch_spec)
         ce = -jnp.mean(nll)
         return ce
 
