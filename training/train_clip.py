@@ -998,6 +998,7 @@ def main():
         nll = jnp.diag(logprobs)
         # TODO: try to compute only necessary part of the loss per device
         # nll = with_sharding_constraint(nll, batch_spec)
+        nll = nll.astype(jnp.float64)  # more accurate computation for large batches
         ce = -jnp.mean(nll)
         return ce
 
