@@ -1290,8 +1290,10 @@ def main():
     evaluation_ran = False
     save_model_ran = False
     profile_status = "not started"
-    profile_step_start = 102  # so we start seeing the preconditioner stats
-    profile_step_end = profile_step_start + 20
+    profile_step_start = (
+        max(training_args.preconditioning_compute_steps + 1, 101) + training_args.preconditioning_compute_steps // 2
+    )  # so we start seeing the preconditioner stats
+    profile_step_end = profile_step_start + training_args.preconditioning_compute_steps
     metrics_logger = MetricsLogger(local_state["step"])
     epochs = tqdm(
         range(local_state["epoch"], num_epochs),
@@ -1549,9 +1551,13 @@ def main():
                     # profile
                     if training_args.do_profile:
                         if profile_status == "not started" and local_state["step"] % profile_step_start == 0:
+                            # blocking operation
+                            _ = train_metrics["loss"]
                             jax.profiler.start_trace("./profiles")
                             profile_status = "started"
                         elif profile_status == "started" and local_state["step"] % profile_step_end == 0:
+                            # blocking operation
+                            _ = train_metrics["loss"]
                             jax.profiler.stop_trace()
                             profile_status = "stopped"
 
