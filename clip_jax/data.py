@@ -141,6 +141,9 @@ class Dataset:
                     files = [f"{Path(f)}" for f in Path(folder).glob("*.tfrecord")]
                 assert len(files) > 0, f"No files found at folder: {folder}"
 
+                # sort files
+                files = sorted(files)
+
                 # keep only a subset of files
                 if self.multi_hosts and augment:
                     files = files[self.valid_group_number :: self.valid_groups]
