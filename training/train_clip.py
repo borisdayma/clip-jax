@@ -1552,12 +1552,12 @@ def main():
                     if training_args.do_profile:
                         if profile_status == "not started" and local_state["step"] % profile_step_start == 0:
                             # blocking operation
-                            _ = train_metrics["loss"]
+                            _ = train_metrics["loss"].block_until_ready()
                             jax.profiler.start_trace("./profiles")
                             profile_status = "started"
                         elif profile_status == "started" and local_state["step"] % profile_step_end == 0:
                             # blocking operation
-                            _ = train_metrics["loss"]
+                            _ = train_metrics["loss"].block_until_ready()
                             jax.profiler.stop_trace()
                             profile_status = "stopped"
 
