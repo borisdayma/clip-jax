@@ -994,12 +994,11 @@ def main():
 
     # Define loss
     def cross_entropy(logits, axis):
-        logits = logits.astype(jnp.float64)
         logits_max = jnp.max(logits, axis=axis, keepdims=True)
         logits -= jax.lax.stop_gradient(logits_max)
         label_logits = jnp.diag(logits)
         log_normalizers = jnp.log(jnp.sum(jnp.exp(logits), axis=axis))
-        return jnp.mean(log_normalizers - label_logits)
+        return jnp.mean((log_normalizers - label_logits).astype(jnp.float64))
 
     def clip_loss(similarity):
         loss = (cross_entropy(similarity, axis=0) + cross_entropy(similarity, axis=1)) / 2
