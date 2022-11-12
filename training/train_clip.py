@@ -994,13 +994,12 @@ def main():
 
     # Define loss
     def cross_entropy(logits, axis):
-        logprobs = jax.nn.log_softmax(logits, axis=axis)
-        nll = jnp.diag(logprobs)
-        # TODO: try to compute only necessary part of the loss per device
-        # nll = with_sharding_constraint(nll, batch_spec)
-        nll = nll.astype(jnp.float64)  # more accurate computation for large batches
-        ce = -jnp.mean(nll)
-        return ce
+        logits = logits.astype(jnp.float64)
+        logits_max = jnp.max(logits, axis=axis, keepdims=True)
+        logits -= jax.lax.stop_gradient(logits_max)
+        label_logits = jnp.diag(logits)
+        log_normalizers = jnp.log(jnp.sum(jnp.exp(logits), axis=axis))
+        return jnp.mean(log_normalizers - label_logits)
 
     def clip_loss(similarity):
         loss = (cross_entropy(similarity, axis=0) + cross_entropy(similarity, axis=1)) / 2
@@ -1552,12 +1551,12 @@ def main():
                     if training_args.do_profile:
                         if profile_status == "not started" and local_state["step"] % profile_step_start == 0:
                             # blocking operation
-                            _ = train_metrics["loss"].block_until_ready()
+                            jax.block_until_ready(state.params)
                             jax.profiler.start_trace("./profiles")
                             profile_status = "started"
                         elif profile_status == "started" and local_state["step"] % profile_step_end == 0:
                             # blocking operation
-                            _ = train_metrics["loss"].block_until_ready()
+                            jax.block_until_ready(state.params)
                             jax.profiler.stop_trace()
                             profile_status = "stopped"
 
