@@ -893,13 +893,14 @@ def main():
         @classmethod
         def create(cls, *, params, **kwargs):
             opt_state = {}
+            step = kwargs.pop("step", 0)
             for k, p in split_scanned_params(params).items():
                 init_fn = optimizer[k].init
                 if ("scanned_text" in k) or ("scanned_vision" in k):
                     init_fn = jax.vmap(init_fn)
                 opt_state[k] = init_fn(p)
             return cls(
-                step=0,
+                step=step,
                 params=params,
                 opt_state=opt_state,
                 **kwargs,
