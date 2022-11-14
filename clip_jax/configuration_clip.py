@@ -98,6 +98,11 @@ class CLIPTextConfig(PretrainedConfig):
         hidden_act="quick_gelu",
         layer_norm_eps=0.00001,
         dropout=0.0,
+        use_glu=False,
+        ln_type="preln",  # one of "normformer", "preln"
+        use_bias=True,
+        force_scale=True,
+        use_rmsnorm=False,
         attention_dropout=0.0,
         initializer_range=0.02,
         initializer_factor=1.0,
@@ -113,6 +118,12 @@ class CLIPTextConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.dropout = dropout
+        self.use_glu = use_glu
+        assert ln_type in ["normformer", "preln"], f"ln_type must be one of 'normformer', 'preln', but is {ln_type}"
+        self.ln_type = ln_type
+        self.use_bias = use_bias
+        self.force_scale = force_scale
+        self.use_rmsnorm = use_rmsnorm
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.max_position_embeddings = max_position_embeddings
@@ -213,6 +224,7 @@ class CLIPVisionConfig(PretrainedFromWandbMixin, PretrainedConfig):
         ln_type="preln",  # one of "normformer", "preln"
         use_bias=True,
         force_scale=True,
+        use_rmsnorm=False,
         attention_dropout=0.0,
         initializer_range=0.02,
         initializer_factor=1.0,
@@ -230,6 +242,7 @@ class CLIPVisionConfig(PretrainedFromWandbMixin, PretrainedConfig):
         self.ln_type = ln_type
         self.use_bias = use_bias
         self.force_scale = force_scale
+        self.use_rmsnorm = use_rmsnorm
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.num_channels = num_channels

@@ -19,7 +19,8 @@
     "use_glu": true,
     "ln_type": "normformer",
     "use_bias": false,
-    "force_scale": false
+    "force_scale": false,
+    "use_rmsnorm": true
   },
   "vision_config": {
     "hidden_size": 1024,
@@ -37,6 +38,7 @@
     "use_glu": true,
     "ln_type": "normformer",
     "use_bias": false,
-    "force_scale": false
+    "force_scale": false,
+    "use_rmsnorm": true
   }
 }
