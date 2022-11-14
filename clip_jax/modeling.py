@@ -1413,7 +1413,9 @@ class FlaxCLIPModule(nn.Module):
             use_bias=False,
         )
 
-        self.logit_scale = self.param("logit_scale", jax.nn.initializers.constant(1.0, self.dtype), [])
+        self.logit_scale = self.param(
+            "logit_scale", jax.nn.initializers.constant(self.config.logit_scale_init_value, self.dtype), []
+        )
 
     def __call__(
         self,
