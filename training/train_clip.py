@@ -441,8 +441,12 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    train_folder: str = field(metadata={"help": "Path to the root training directory which contains tfrecords."})
-    valid_folder: str = field(metadata={"help": "Path to the root validation directory which contains tfrecords."})
+    train_folder: Optional[str] = field(
+        default=None, metadata={"help": "Path to the root training directory which contains tfrecords."}
+    )
+    valid_folder: Optional[str] = field(
+        default=None, metadata={"help": "Path to the root validation directory which contains tfrecords."}
+    )
     image_size: Optional[int] = field(
         default=0,
         metadata={"help": " The dimension images need to be resized to, if needed."},
