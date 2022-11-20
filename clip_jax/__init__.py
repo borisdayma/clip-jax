@@ -1,2 +1,2 @@
 from .configuration_clip import CLIPConfig
-from .modeling import FlaxCLIPModel
+from .modeling import FlaxCLIPModel, FlaxCLIPVisionModelForImageClassification

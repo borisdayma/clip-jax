@@ -1130,8 +1130,8 @@ if __name__ == "__main__":
     assert jax.local_device_count() == 8
 
     # load dataset
-    mean = (0.57078838, 0.5434825, 0.51970865)
-    std = (0.32512592, 0.32178711, 0.33277565)
+    mean = (0.5, 0.5, 0.5)
+    std = (0.5, 0.5, 0.5)
     transforms = torchvision.transforms.Compose(
         [
             torchvision.transforms.Resize(256, interpolation=torchvision.transforms.InterpolationMode.BICUBIC),
@@ -1141,6 +1141,7 @@ if __name__ == "__main__":
                 mean=mean,
                 std=std,
             ),
+            torchvision.transforms.Lambda(lambda x: x.permute(1, 2, 0)),
         ]
     )
     ds = load_dataset(transform=transforms)
@@ -1149,7 +1150,7 @@ if __name__ == "__main__":
     # load model and tokenizer
     tn = TextNormalizer()
     tokenizer = AutoTokenizer.from_pretrained("./craiyon_tokenizer")
-    clip = FlaxCLIPModel.from_pretrained("borisd13/clip/model-1yf840w3:latest")
+    clip = FlaxCLIPModel.from_pretrained("borisd13/clip/model-1bz3971a:latest")
 
     # prepare text weights
     get_text_features = jax.jit(clip.get_text_features)

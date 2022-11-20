@@ -22,6 +22,7 @@ class Dataset:
     seed_dataset: int = None
     format: str = "rgb"  # rgb or lab
     key_image: str = "webp"  # name of key containing image
+    key_caption: str = "caption"  # name of key containing captions
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     valid_batch_size_per_step: int = None  # used in multi-host
@@ -63,7 +64,7 @@ class Dataset:
             self.key_image: tf.io.FixedLenFeature([], tf.string),
             "original_width": tf.io.FixedLenFeature([], tf.int64),
             "original_height": tf.io.FixedLenFeature([], tf.int64),
-            "caption": tf.io.FixedLenFeature([], tf.string),
+            self.key_caption: tf.io.FixedLenFeature([], tf.string),
         }
 
         def _parse_function(example_proto):
@@ -72,7 +73,7 @@ class Dataset:
                 parsed_features[self.key_image],
                 parsed_features["original_width"],
                 parsed_features["original_height"],
-                parsed_features["caption"],
+                parsed_features[self.key_caption],
             )
 
         def _filter_function(image, width, height, caption):
@@ -140,6 +141,9 @@ class Dataset:
                 else:
                     files = [f"{Path(f)}" for f in Path(folder).glob("*.tfrecord")]
                 assert len(files) > 0, f"No files found at folder: {folder}"
+
+                # sort files
+                files = sorted(files)
 
                 # keep only a subset of files
                 if self.multi_hosts and augment:

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Callable, Iterable, Optional, Tuple, Union
 
 import flax
 import flax.linen as nn
@@ -23,6 +23,9 @@ from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.linen import combine_masks, make_causal_mask
 from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import dot_product_attention_weights
+from flax.linen.dtypes import canonicalize_dtype
+from flax.linen.module import Module
+from flax.linen.normalization import _canonicalize_axes
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 from transformers.modeling_flax_outputs import (
@@ -42,6 +45,8 @@ from .configuration_clip import CLIPConfig, CLIPTextConfig, CLIPVisionConfig
 from .utils import PretrainedFromWandbMixin
 
 remat = nn_partitioning.remat
+
+Axes = Union[int, Iterable[int]]
 
 logger = logging.get_logger(__name__)
 
@@ -205,6 +210,100 @@ class FlaxCLIPOutput(ModelOutput):
         )
 
 
+# Adapted from flax.linen.normalization
+def _normalize(
+    mdl: Module,
+    x: Any,
+    mean: Any,
+    var: Any,
+    reduction_axes: Axes,
+    feature_axes: Axes,
+    dtype: jnp.dtype,
+    param_dtype: jnp.dtype,
+    epsilon: float,
+    use_bias: bool,
+    use_scale: bool,
+    bias_init: Callable,
+    scale_init: Callable,
+):
+
+    reduction_axes = _canonicalize_axes(x.ndim, reduction_axes)
+    feature_axes = _canonicalize_axes(x.ndim, feature_axes)
+    stats_shape = list(x.shape)
+    for axis in reduction_axes:
+        stats_shape[axis] = 1
+    if mean is not None:
+        mean = mean.reshape(stats_shape)
+    var = var.reshape(stats_shape)
+    feature_shape = [1] * x.ndim
+    reduced_feature_shape = []
+    for ax in feature_axes:
+        feature_shape[ax] = x.shape[ax]
+        reduced_feature_shape.append(x.shape[ax])
+    y = x - mean if mean is not None else x
+    mul = lax.rsqrt(var + epsilon)
+    args = [x]
+    if use_scale:
+        scale = mdl.param("scale", scale_init, reduced_feature_shape, param_dtype).reshape(feature_shape)
+        mul *= scale
+        args.append(scale)
+    y *= mul
+    if use_bias:
+        bias = mdl.param("bias", bias_init, reduced_feature_shape, param_dtype).reshape(feature_shape)
+        y += bias
+        args.append(bias)
+    dtype = canonicalize_dtype(*args, dtype=dtype)
+    return jnp.asarray(y, dtype)
+
+
+class RMSNorm(nn.Module):
+    """RMSNorm, adapted from flax LayerNorm"""
+
+    epsilon: float = 1e-6
+    dtype: Optional[jnp.dtype] = None
+    param_dtype: jnp.dtype = jnp.float32
+    use_bias: bool = True
+    use_scale: bool = True
+    bias_init: Callable = jax.nn.initializers.zeros
+    scale_init: Callable = jax.nn.initializers.ones
+    reduction_axes: Axes = -1
+    feature_axes: Axes = -1
+
+    @nn.compact
+    def __call__(self, x):
+        dtype = self.dtype or jnp.result_type(x)
+        # promote x to at least float32, this avoids half precision computation
+        # but preserves double or complex floating points
+        dtype = jnp.promote_types(dtype, jnp.float32)
+        x = jnp.asarray(x, dtype)
+        # use mean2 instead of variance (not centered)
+        var = jnp.mean(lax.square(x), self.reduction_axes)
+        mean = None
+
+        return _normalize(
+            self,
+            x,
+            mean,
+            var,
+            self.reduction_axes,
+            self.feature_axes,
+            self.dtype,
+            self.param_dtype,
+            self.epsilon,
+            self.use_bias,
+            self.use_scale,
+            self.bias_init,
+            self.scale_init,
+        )
+
+
+def norm(use_rmsnorm):
+    if use_rmsnorm:
+        return RMSNorm
+    else:
+        return nn.LayerNorm
+
+
 class FlaxCLIPVisionEmbeddings(nn.Module):
     config: CLIPVisionConfig
     dtype: jnp.dtype = jnp.float32
@@ -307,7 +406,7 @@ class FlaxCLIPAttention(nn.Module):
         )
 
         if self.config.ln_type == "normformer":
-            self.layer_norm_end = nn.LayerNorm(
+            self.layer_norm_end = norm(self.config.use_rmsnorm)(
                 epsilon=self.config.layer_norm_eps, dtype=self.dtype, use_bias=self.config.use_bias
             )
 
@@ -412,7 +511,7 @@ class FlaxCLIPMLP(nn.Module):
                 use_bias=self.config.use_bias,
             )
         if self.config.ln_type == "normformer":
-            self.layer_norm_mid = nn.LayerNorm(
+            self.layer_norm_mid = norm(self.config.use_rmsnorm)(
                 epsilon=self.config.layer_norm_eps,
                 dtype=self.dtype,
                 use_bias=self.config.use_bias,
@@ -437,13 +536,13 @@ class FlaxCLIPEncoderLayer(nn.Module):
 
     def setup(self):
         self.self_attn = FlaxCLIPAttention(self.config, dtype=self.dtype)
-        self.layer_norm1 = nn.LayerNorm(
+        self.layer_norm1 = norm(self.config.use_rmsnorm)(
             epsilon=self.config.layer_norm_eps,
             dtype=self.dtype,
             use_bias=self.config.use_bias,
             use_scale=self.config.force_scale,
         )
-        self.layer_norm2 = nn.LayerNorm(
+        self.layer_norm2 = norm(self.config.use_rmsnorm)(
             epsilon=self.config.layer_norm_eps,
             dtype=self.dtype,
             use_bias=self.config.use_bias,
@@ -596,7 +695,7 @@ class FlaxCLIPTextTransformer(nn.Module):
     def setup(self):
         self.embeddings = FlaxCLIPTextEmbeddings(self.config, dtype=self.dtype)
         self.encoder = FlaxCLIPEncoder(self.config, dtype=self.dtype)
-        self.final_layer_norm = nn.LayerNorm(
+        self.final_layer_norm = norm(self.config.use_rmsnorm)(
             epsilon=self.config.layer_norm_eps,
             dtype=self.dtype,
             use_bias=self.config.use_bias,
@@ -654,14 +753,14 @@ class FlaxCLIPVisionTransformer(nn.Module):
 
     def setup(self):
         self.embeddings = FlaxCLIPVisionEmbeddings(self.config, dtype=self.dtype)
-        self.pre_layernorm = nn.LayerNorm(
+        self.pre_layernorm = norm(self.config.use_rmsnorm)(
             epsilon=self.config.layer_norm_eps,
             dtype=self.dtype,
             use_bias=self.config.use_bias,
             use_scale=self.config.force_scale,
         )
         self.encoder = FlaxCLIPEncoder(self.config, dtype=self.dtype)
-        self.post_layernorm = nn.LayerNorm(
+        self.post_layernorm = norm(self.config.use_rmsnorm)(
             epsilon=self.config.layer_norm_eps,
             dtype=self.dtype,
             use_bias=self.config.use_bias,
@@ -1314,7 +1413,9 @@ class FlaxCLIPModule(nn.Module):
             use_bias=False,
         )
 
-        self.logit_scale = self.param("logit_scale", jax.nn.initializers.constant(1.0, self.dtype), [])
+        self.logit_scale = self.param(
+            "logit_scale", jax.nn.initializers.constant(self.config.logit_scale_init_value, self.dtype), []
+        )
 
     def __call__(
         self,
@@ -1353,9 +1454,13 @@ class FlaxCLIPModule(nn.Module):
         text_embeds = text_outputs[1]
         text_embeds = self.text_projection(text_embeds)
 
-        # normalized features
-        image_embeds = image_embeds / jnp.linalg.norm(image_embeds, axis=-1, keepdims=True)
-        text_embeds = text_embeds / jnp.linalg.norm(text_embeds, axis=-1, keepdims=True)
+        # normalize features
+        def normalize(x, epsilon=1e-6):
+            mean2 = jnp.sum(jnp.square(x), axis=-1, keepdims=True)
+            return x * lax.rsqrt(mean2 + epsilon)
+
+        image_embeds = normalize(image_embeds)
+        text_embeds = normalize(text_embeds)
 
         # cosine similarity as logits
         logit_scale = jnp.exp(self.logit_scale)

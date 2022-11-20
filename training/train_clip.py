@@ -36,10 +36,6 @@ try:
 except:
     storage = None
 
-try:
-    from dalle_mini.model.text import TextNormalizer
-except ImportError:
-    print("Text normalization not available")
 
 from clip_jax import CLIPConfig, FlaxCLIPModel
 from clip_jax.data import Dataset
@@ -350,10 +346,6 @@ class ModelArguments:
         default=None,
         metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"},
     )
-    normalize_text: bool = field(
-        default=False,
-        metadata={"help": "Normalize text before tokenization"},
-    )
     cache_dir: Optional[str] = field(
         default=None,
         metadata={"help": ("Where do you want to store the pretrained models downloaded from s3")},
@@ -468,6 +460,9 @@ class DataTrainingArguments:
     )
     format: Optional[str] = field(default="rgb", metadata={"help": "The format of the images (rgb or lab)."})
     key_image: Optional[str] = field(default="webp", metadata={"help": "Name of the key containing the webp images."})
+    key_caption: Optional[str] = field(
+        default="caption", metadata={"help": "Name of the key containing the captions."}
+    )
     mean: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The mean of the dataset."})
     std: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The std of the dataset."})
 
@@ -621,8 +616,6 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name,
     )
-    if model_args.normalize_text:
-        tn = TextNormalizer()
 
     # get model metadata
     model_metadata = model_args.get_metadata()
@@ -893,13 +886,14 @@ def main():
         @classmethod
         def create(cls, *, params, **kwargs):
             opt_state = {}
+            step = kwargs.pop("step", 0)
             for k, p in split_scanned_params(params).items():
                 init_fn = optimizer[k].init
                 if ("scanned_text" in k) or ("scanned_vision" in k):
                     init_fn = jax.vmap(init_fn)
                 opt_state[k] = init_fn(p)
             return cls(
-                step=0,
+                step=step,
                 params=params,
                 opt_state=opt_state,
                 **kwargs,
@@ -930,9 +924,7 @@ def main():
 
         # restore metadata
         attr_state = {}
-        keys = ["train_time", "train_samples"]
-        if model_args.restore_state:
-            keys += ["step", "epoch"]
+        keys = ["train_time", "train_samples", "step", "epoch"]
         attr_state = {k: v for k, v in model_metadata.items() if k in keys}
 
         if not model_args.restore_state:
@@ -994,12 +986,11 @@ def main():
 
     # Define loss
     def cross_entropy(logits, axis):
-        logprobs = jax.nn.log_softmax(logits, axis=axis)
-        nll = jnp.diag(logprobs)
-        # try to compute only necessary part of the loss per device
-        nll = with_sharding_constraint(nll, batch_spec)
-        ce = -jnp.mean(nll)
-        return ce
+        logits_max = jnp.max(logits, axis=axis, keepdims=True)
+        logits -= jax.lax.stop_gradient(logits_max)
+        label_logits = jnp.diag(logits)
+        log_normalizers = jnp.log(jnp.sum(jnp.exp(logits), axis=axis))
+        return jnp.mean(log_normalizers - label_logits, dtype=jnp.float64)
 
     def clip_loss(similarity):
         loss = (cross_entropy(similarity, axis=0) + cross_entropy(similarity, axis=1)) / 2
@@ -1289,7 +1280,8 @@ def main():
     evaluation_ran = False
     save_model_ran = False
     profile_status = "not started"
-    profile_step_start, profile_step_end = 2, 32  # hardcoded for now
+    profile_step_start = 3
+    profile_step_end = profile_step_start + 2
     metrics_logger = MetricsLogger(local_state["step"])
     epochs = tqdm(
         range(local_state["epoch"], num_epochs),
@@ -1317,8 +1309,6 @@ def main():
 
                 # preprocess batch
                 captions = [caption.decode("utf-8") for caption in batch[1]]
-                if model_args.normalize_text:
-                    captions = [tn(c) for c in captions]
                 txt_inputs = tokenizer(
                     captions,
                     padding="max_length",
@@ -1506,8 +1496,6 @@ def main():
 
                     # preprocess batch
                     captions = [caption.decode("utf-8") for caption in batch[1]]
-                    if model_args.normalize_text:
-                        captions = [tn(c) for c in captions]
                     txt_inputs = tokenizer(
                         captions,
                         padding="max_length",
@@ -1547,9 +1535,13 @@ def main():
                     # profile
                     if training_args.do_profile:
                         if profile_status == "not started" and local_state["step"] % profile_step_start == 0:
+                            # blocking operation
+                            jax.block_until_ready(state.params)
                             jax.profiler.start_trace("./profiles")
                             profile_status = "started"
                         elif profile_status == "started" and local_state["step"] % profile_step_end == 0:
+                            # blocking operation
+                            jax.block_until_ready(state.params)
                             jax.profiler.stop_trace()
                             profile_status = "stopped"
 
