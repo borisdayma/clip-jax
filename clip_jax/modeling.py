@@ -28,6 +28,7 @@ from flax.linen.module import Module
 from flax.linen.normalization import _canonicalize_axes
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
+from transformers import AutoTokenizer
 from transformers.modeling_flax_outputs import (
     FlaxBaseModelOutput,
     FlaxBaseModelOutputWithPooling,
@@ -1521,3 +1522,7 @@ FLAX_CLIP_MODEL_DOCSTRING = """
 
 overwrite_call_docstring(FlaxCLIPModel, CLIP_INPUTS_DOCSTRING + FLAX_CLIP_MODEL_DOCSTRING)
 append_replace_return_docstrings(FlaxCLIPModel, output_type=FlaxCLIPOutput, config_class=CLIPConfig)
+
+
+class AutoTokenizer(PretrainedFromWandbMixin, AutoTokenizer):
+    pass
