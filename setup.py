@@ -21,7 +21,7 @@ setuptools.setup(
         "jax>=0.2.6",
         "flax",
         "transformers",
-        "tensorflow",
+        "tensorflow-cpu",
         "tensorflow_io",
         "einops",
     ],
