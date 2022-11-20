@@ -23,7 +23,7 @@ setuptools.setup(
         "flax",
         "transformers",
         "tensorflow-cpu",
-        "tensorflow_io",
+        "tensorflow-io",
         "einops",
         "numpy",
     ],
