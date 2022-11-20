@@ -1288,7 +1288,7 @@ def main():
     save_model_ran = False
     profile_status = "not started"
     profile_step_start = 3
-    profile_step_end = profile_step_start + 3
+    profile_step_end = profile_step_start + 2
     metrics_logger = MetricsLogger(local_state["step"])
     epochs = tqdm(
         range(local_state["epoch"], num_epochs),
