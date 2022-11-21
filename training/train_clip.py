@@ -1284,7 +1284,7 @@ def main():
     train_metrics = None
     evaluation_ran = False
     save_model_ran = False
-    profile_step = 3
+    profile_step = local_state["step"] + 3
     metrics_logger = MetricsLogger(local_state["step"])
     epochs = tqdm(
         range(local_state["epoch"], num_epochs),
