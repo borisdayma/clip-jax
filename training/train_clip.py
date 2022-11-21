@@ -1284,9 +1284,7 @@ def main():
     train_metrics = None
     evaluation_ran = False
     save_model_ran = False
-    profile_status = "not started"
-    profile_step_start = 3
-    profile_step_end = profile_step_start + 2
+    profile_step = 3
     metrics_logger = MetricsLogger(local_state["step"])
     epochs = tqdm(
         range(local_state["epoch"], num_epochs),
@@ -1518,8 +1516,22 @@ def main():
                         batch,
                     )
 
+                    # optional profile
+                    if training_args.do_profile and local_state["step"] == profile_step:
+                        # blocking operation
+                        jax.block_until_ready(state.params)
+                        jax.profiler.start_trace("./profiles")
+
                     # train step
                     state, train_metrics = p_train_step(state, batch, train_time)
+
+                    # end profile
+                    if training_args.do_profile and local_state["step"] == profile_step:
+                        # blocking operation
+                        jax.block_until_ready(state.params)
+                        jax.profiler.stop_trace()
+
+                    # update local state
                     local_state["step"] += 1
                     local_state["train_time"] = train_time
                     local_state["train_samples"] += training_args.batch_size_per_step
@@ -1536,19 +1548,6 @@ def main():
                     if local_state["step"] % training_args.save_steps == 0:
                         run_save_model(state, eval_metrics)
                         save_model_ran = True
-
-                    # profile
-                    if training_args.do_profile:
-                        if profile_status == "not started" and local_state["step"] % profile_step_start == 0:
-                            # blocking operation
-                            jax.block_until_ready(state.params)
-                            jax.profiler.start_trace("./profiles")
-                            profile_status = "started"
-                        elif profile_status == "started" and local_state["step"] % profile_step_end == 0:
-                            # blocking operation
-                            jax.block_until_ready(state.params)
-                            jax.profiler.stop_trace()
-                            profile_status = "stopped"
 
                 # log final train metrics
                 if train_metrics is not None:
