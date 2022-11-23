@@ -28,7 +28,7 @@ from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
-from transformers import HfArgumentParser, set_seed
+from transformers import HfArgumentParser
 from transformers.utils import get_full_repo_name
 
 try:
