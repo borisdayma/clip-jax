@@ -90,7 +90,9 @@ def _get_partition_rules():
         ),
         (
             ("(bias|scale|logit_scale)",),
-            "embed",
+            P(
+                "embed",
+            ),
         ),
         # Projection
         (
@@ -265,6 +267,12 @@ def set_partitions(in_dict, use_scan, activation_partitioning_dims=1, parameter_
     for k, v in result.items():
         if v == _unmatched:
             print(f"Unmatched -> {k}")
+    if use_scan:
+        # add None dimension to layers
+        result = {k: (P(*(None,) + v) if v is not None else None) if "scanned" in k else v for k, v in result.items()}
+    assert _unmatched not in result.values(), "Incomplete partition spec."
+
+    result = freeze(unflatten_dict(result))
     result = jax.tree_map(
         lambda x: logical_to_mesh_axes(
             x,
@@ -275,9 +283,4 @@ def set_partitions(in_dict, use_scan, activation_partitioning_dims=1, parameter_
         ),
         result,
     )
-    if use_scan:
-        # add None dimension to layers
-        result = {k: (P(*(None,) + v) if v is not None else None) if "scanned" in k else v for k, v in result.items()}
-    assert _unmatched not in result.values(), "Incomplete partition spec."
-
-    return freeze(unflatten_dict(result))
+    return result
