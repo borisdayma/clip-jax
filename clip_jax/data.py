@@ -64,7 +64,7 @@ class Dataset:
             self.key_image: tf.io.FixedLenFeature([], tf.string),
             "original_width": tf.io.FixedLenFeature([], tf.int64),
             "original_height": tf.io.FixedLenFeature([], tf.int64),
-            self.key_caption: tf.io.FixedLenFeature([], tf.string),
+            self.key_caption: tf.io.FixedLenFeature([], tf.string, default_value=""),
         }
 
         def _parse_function(example_proto):
