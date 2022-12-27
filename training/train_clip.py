@@ -115,9 +115,11 @@ class TrainingArguments:
         metadata={"help": ("Whether to quantize optimizer (only supported with Distributed" " Shampoo).")},
     )
     shard_shampoo_across: str = field(
-        default="dp",
+        default="data",
         metadata={
-            "help": ("Whether to shard the optimizer across data devices (dp), model devices" " (mp) or both (2d).")
+            "help": (
+                "Whether to shard the optimizer across data devices (data), model devices" " (model) or both (2d)."
+            )
         },
     )
     num_train_epochs: int = field(default=3, metadata={"help": "Total number of training epochs to perform."})
@@ -281,8 +283,8 @@ class TrainingArguments:
             "sqrt_n",
         ], f"Selected graft type not supported: {self.graft_type}"
         assert self.shard_shampoo_across in [
-            "dp",
-            "mp",
+            "data",
+            "model",
             "2d",
         ], f"Shard shampoo across {self.shard_shampoo_across} not supported."
         assert self.mp_devices > 0, f"Number of devices for model parallelism must be > 0"
@@ -291,9 +293,9 @@ class TrainingArguments:
             f" number of devices used for model parallelism ({self.mp_devices})."
         )
         self.dp_devices = jax.device_count() // self.mp_devices
-        # consider batch distributed across nodes (mp > local devices)
+        # consider batch distributed across nodes (model > local devices)
         self.node_groups = max(1, self.mp_devices // jax.local_device_count())
-        # local dp devices (1 when mp > local devices)
+        # local data devices (1 when model > local devices)
         self.local_dp_devices = jax.local_device_count() * self.node_groups // self.mp_devices
         # batch sizes
         assert self.batch_size_per_node % self.local_dp_devices == 0, (
@@ -725,7 +727,7 @@ def main():
         statistics_partition_spec = (
             PartitionSpec(None, training_args.shard_shampoo_across, None)
             if training_args.shard_shampoo_across != "2d"
-            else PartitionSpec(None, "dp", "mp")
+            else PartitionSpec(None, "data", "model")
         )
         _opt = partial(
             distributed_shampoo,
@@ -746,7 +748,7 @@ def main():
             preconditioner_partition_spec=PartitionSpec(training_args.shard_shampoo_across, None, None)
             if training_args.shard_shampoo_across != "2d"
             else PartitionSpec(
-                "mp" if training_args.mp_devices > training_args.dp_devices else "dp",
+                "model" if training_args.mp_devices > training_args.dp_devices else "data",
                 None,
                 None,
             ),
@@ -852,7 +854,7 @@ def main():
     # create a mesh
     mesh_shape = (training_args.dp_devices, training_args.mp_devices)
     devices = np.asarray(jax.devices()).reshape(*mesh_shape)
-    mesh = maps.Mesh(devices, ("dp", "mp"))
+    mesh = maps.Mesh(devices, ("data", "model"))
     logger.info(f"  Mesh shape: {mesh_shape}")
 
     class TrainState(struct.PyTreeNode):
@@ -975,14 +977,14 @@ def main():
     del params, opt_state_spec, opt_state_shape
 
     # define batch spec
-    batch_spec = PartitionSpec("dp")
-    grad_batch_spec = PartitionSpec(None, "dp")
+    batch_spec = PartitionSpec("data")
+    grad_batch_spec = PartitionSpec(None, "data")
 
     # "vmap trick" avoids a crash when mp_devices > 1 (not sure why it happens)
     # lead to better perf: see https://wandb.ai/dalle-mini/dalle-mini/reports/JAX-pmap-vs-pjit--VmlldzoxNDg1ODA2
     if training_args.use_vmap_trick:
         grad_params_spec = jax.tree_util.tree_map(
-            lambda x: PartitionSpec(*("dp",) + (x if x is not None else (None,))),
+            lambda x: PartitionSpec(*("data",) + (x if x is not None else (None,))),
             params_spec,
         )
 
@@ -1320,7 +1322,7 @@ def main():
                 txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
                 batch = {"pixel_values": batch[0], **txt_inputs}
 
-                # add dp dimension when using "vmap trick"
+                # add data dimension when using "vmap trick"
                 if training_args.use_vmap_trick:
                     bs_shape = (
                         training_args.local_dp_devices,
