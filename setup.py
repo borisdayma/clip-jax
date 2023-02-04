@@ -1,9 +1,9 @@
 import os
-
-# To use a consistent encoding
 from codecs import open
 
 import setuptools
+
+from clip_jax import __version__
 
 here = os.path.abspath(os.path.dirname(__file__))
 
@@ -12,7 +12,7 @@ with open(os.path.join(here, "README.md"), encoding="utf-8") as f:
 
 setuptools.setup(
     name="clip-jax",
-    version="0.0.1",
+    version=__version__,
     description="Training of CLIP in JAX",
     long_description=long_description,
     long_description_content_type="text/markdown",
