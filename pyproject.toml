@@ -1,3 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "clip-jax"
+dynamic = ["version"]
+description = "Training of CLIP in JAX"
+readme = "README.md"
+license = "Apache-2.0"
+dependencies = [
+    "einops",
+    "flax",
+    "jax>=0.2.6",
+    "jaxlib",
+    "numpy",
+    "tensorflow-io[tensorflow-cpu]",
+    "transformers",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black[jupyter]",
+    "isort",
+    "optax",
+    "tqdm",
+]
+
+[tool.hatch.version]
+path = "clip_jax/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/clip_jax",
+]
+
 [tool.black]
 line-length = 119
 
