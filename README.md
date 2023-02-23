@@ -1,6 +1,6 @@
 # CLIP-JAX
 
-This repository is used to CLIP models from 🤗 transformers using JAX.
+This repository is used to train CLIP models from 🤗 transformers using JAX.
 
 ## Installation
 
