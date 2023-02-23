@@ -14,18 +14,20 @@ import flax
 import jax
 import jax.numpy as jnp
 import jaxlib
-import numpy as np
 import optax
 import transformers
 import wandb
 from flax import core, struct
+from flax.core import freeze, unfreeze
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.serialization import from_bytes, to_bytes
 from flax.traverse_util import flatten_dict, unflatten_dict
 from huggingface_hub import Repository
-from jax.experimental import PartitionSpec, maps
+from jax import numpy as jnp
+from jax.experimental import PartitionSpec, mesh_utils
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
+from jax.sharding import Mesh, PartitionSpec
 from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser
@@ -853,8 +855,8 @@ def main():
 
     # create a mesh
     mesh_shape = (training_args.dp_devices, training_args.mp_devices)
-    devices = np.asarray(jax.devices()).reshape(*mesh_shape)
-    mesh = maps.Mesh(devices, ("data", "model"))
+    device_mesh = mesh_utils.create_device_mesh(mesh_shape, contiguous_submeshes=True)
+    mesh = Mesh(devices=device_mesh, axis_names=("data", "model"))
     logger.info(f"  Mesh shape: {mesh_shape}")
 
     class TrainState(struct.PyTreeNode):
