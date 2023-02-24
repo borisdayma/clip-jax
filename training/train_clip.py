@@ -1264,7 +1264,8 @@ def main():
         def update_state_metrics(self, state):
             """Update internal state metrics (logged at each call to be used as x-axis)"""
             self.state_dict = {
-                f'train/{k.split("_")[-1]}': state[k] for k in ["step", "epoch", "train_time", "train_samples", "opt_state_step""]
+                f'train/{k.split("_")[-1]}': state[k]
+                for k in ["step", "epoch", "train_time", "train_samples", "opt_state_step"]
             }
             # timing metrics
             new_step = int(state["step"])
