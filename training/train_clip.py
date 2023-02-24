@@ -939,6 +939,7 @@ def main():
         opt_state=opt_state_spec,
         dropout_rng=None,
         step=None,
+        opt_state_step=None,
         epoch=None,
         train_time=None,
         train_samples=None,
