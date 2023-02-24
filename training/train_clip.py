@@ -892,7 +892,6 @@ def main():
         opt_state: optax.OptState
         dropout_rng: jnp.ndarray = None
         epoch: int = 0
-        opt_state_step: int = 0
         train_time: float = 0.0  # total time the model trained
         train_samples: int = 0  # number of samples seen
 
@@ -939,7 +938,6 @@ def main():
         opt_state=opt_state_spec,
         dropout_rng=None,
         step=None,
-        opt_state_step=None,
         epoch=None,
         train_time=None,
         train_samples=None,
@@ -959,7 +957,7 @@ def main():
 
         # restore metadata
         attr_state = {}
-        keys = ["train_time", "train_samples", "step", "epoch", "opt_state_step"]
+        keys = ["train_time", "train_samples", "step", "epoch"]
         attr_state = {k: v for k, v in model_metadata.items() if k in keys}
 
         if not model_args.restore_state:
@@ -1145,12 +1143,12 @@ def main():
             dropout_rng=dropout_rng,
             train_time=train_time,
             train_samples=state.train_samples + training_args.batch_size_per_step,
-            opt_state_step=opt_state_step + 1,
         )
 
         metrics = {
             "loss": loss,
             "learning_rate": learning_rate_fn(opt_state_step),
+            "opt_state_step": opt_state_step,
         }
 
         # extract norms and histograms
@@ -1265,8 +1263,7 @@ def main():
         def update_state_metrics(self, state):
             """Update internal state metrics (logged at each call to be used as x-axis)"""
             self.state_dict = {
-                f'train/{k.split("_")[-1]}': state[k]
-                for k in ["step", "epoch", "train_time", "train_samples", "opt_state_step"]
+                f'train/{k.split("_")[-1]}': state[k] for k in ["step", "epoch", "train_time", "train_samples"]
             }
             # timing metrics
             new_step = int(state["step"])
