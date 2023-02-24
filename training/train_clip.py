@@ -24,7 +24,8 @@ from flax.serialization import from_bytes, to_bytes
 from flax.traverse_util import flatten_dict, unflatten_dict
 from huggingface_hub import Repository
 from jax import numpy as jnp
-from jax.experimental import PartitionSpec, mesh_utils
+import numpy as np
+from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from jax.sharding import Mesh, PartitionSpec
@@ -850,8 +851,8 @@ def main():
 
     # create a mesh
     mesh_shape = (training_args.dp_devices, training_args.mp_devices)
-    device_mesh = mesh_utils.create_device_mesh(mesh_shape)
-    mesh = Mesh(devices=device_mesh, axis_names=("data", "model"))
+    devices = np.asarray(jax.devices()).reshape(*mesh_shape)
+    mesh = maps.Mesh(devices, ("data", "model"))
     logger.info(f"  Mesh shape: {mesh_shape}")
 
     class TrainState(struct.PyTreeNode):
