@@ -1,6 +1,11 @@
+import os
+
+# TODO: required before importing jax, until we can figure out how to be compatible with new API
+os.environ["JAX_JIT_PJIT_API_MERGE"] = "0"
+
+
 import io
 import logging
-import os
 import sys
 import tempfile
 import time
@@ -45,6 +50,15 @@ from clip_jax.modeling import AutoTokenizer
 from clip_jax.partitions import set_partitions
 
 logger = logging.getLogger(__name__)
+
+# jax flags
+use_jax_arrays = False
+if use_jax_arrays:
+    jax.config.update("jax_threefry_partitionable", True)
+    jax.config.update("jax_array", True)
+    # jax.config.update("jax_distributed_debug", True)
+else:
+    jax.config.update("jax_array", False)
 
 
 @dataclass
