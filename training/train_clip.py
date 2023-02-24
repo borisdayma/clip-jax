@@ -1135,7 +1135,7 @@ def main():
         grads = with_sharding_constraint(grads, params_spec)
 
         # get opt_state_step - TODO: only shampoo is supported at the moment
-        opt_state_step = state.opt_state[0]
+        opt_state_step = state.opt_state["standard"][0]
 
         # update state
         state = state.apply_gradients(
