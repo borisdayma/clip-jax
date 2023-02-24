@@ -514,9 +514,6 @@ def unsplit_scanned_params(data):
     return freeze(unflatten_dict(flat))
 
 
-assert jax.local_device_count() == 8
-
-
 def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
