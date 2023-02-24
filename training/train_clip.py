@@ -680,50 +680,68 @@ def main():
         )
 
     # Create learning rate schedule
-    def create_learning_rate_fn(learning_rate) -> Callable[[int], jnp.array]:
+    # Create learning rate schedule
+    def create_learning_rate_fn() -> Callable[[int], jnp.array]:
         """Create the learning rate function."""
-        warmup_fn = optax.linear_schedule(
-            init_value=0.0,
-            end_value=learning_rate,
-            transition_steps=training_args.warmup_steps + 1,  # ensure not 0
-        )
-        last_boundary = training_args.warmup_steps
-        # offset step when resuming
-        if training_args.lr_offset:
-            warmup_fn = optax.join_schedules(
-                schedules=[optax.constant_schedule(0.0), warmup_fn],
-                boundaries=[training_args.lr_offset],
+
+        def _add_schedule(schedule, new_schedule, boundary):
+            if schedule is None:
+                return new_schedule
+            else:
+                return optax.join_schedules(
+                    schedules=[schedule, new_schedule],
+                    boundaries=[boundary],
+                )
+
+        # build schedule
+        schedule_fn = None
+        last_boundary = 0
+
+        # offset
+        lr_offset = training_args.lr_offset + state.opt_state_step
+        if lr_offset:
+            schedule_fn = _add_schedule(schedule_fn, optax.constant_schedule(0.0), last_boundary)
+            last_boundary += lr_offset
+
+        # warmup
+        if training_args.warmup_steps > 0:
+            new_schedule = optax.linear_schedule(
+                init_value=0.0,
+                end_value=training_args.learning_rate,
+                transition_steps=training_args.warmup_steps,
             )
-            last_boundary += training_args.lr_offset
-        if training_args.lr_decay is None:
-            return warmup_fn
-        elif training_args.lr_decay == "linear":
-            assert (
-                training_args.num_train_steps is not None
-            ), "linear decay requires specifying explicitly num_train_steps"
-            assert training_args.num_train_steps > training_args.warmup_steps, (
-                "linear decay requires number of training steps > warmup steps, got"
-                f" {training_args.num_train_steps} < {training_args.warmup_steps}"
-            )
-            decay_fn = optax.linear_schedule(
-                init_value=learning_rate,
+            schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
+            last_boundary += training_args.warmup_steps
+
+        # decay
+        if training_args.lr_decay == "linear":
+            new_schedule = optax.linear_schedule(
+                init_value=training_args.learning_rate,
                 end_value=0,
-                transition_steps=training_args.num_train_steps - training_args.warmup_steps,
+                transition_steps=training_args.lr_transition_steps,
             )
+            schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
         elif training_args.lr_decay == "exponential":
-            decay_fn = optax.exponential_decay(
-                init_value=learning_rate,
+            new_schedule = optax.exponential_decay(
+                init_value=training_args.learning_rate,
                 transition_steps=training_args.lr_transition_steps,
                 decay_rate=training_args.lr_decay_rate,
                 staircase=training_args.lr_staircase,
             )
-        schedule_fn = optax.join_schedules(
-            schedules=[warmup_fn, decay_fn],
-            boundaries=[last_boundary],
-        )
+            schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
+        elif training_args.lr_decay == "cosine":
+            new_schedule = optax.cosine_decay_schedule(
+                init_value=training_args.learning_rate, decay_steps=training_args.lr_transition_steps
+            )
+            schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
+        else:
+            # constant
+            new_schedule = optax.constant_schedule(training_args.learning_rate)
+            schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
+
         return schedule_fn
 
-    learning_rate_fn = create_learning_rate_fn(training_args.learning_rate)
+    learning_rate_fn = create_learning_rate_fn()
 
     # create optimizer
     if training_args.optim == "distributed_shampoo":
@@ -875,6 +893,7 @@ def main():
         opt_state: optax.OptState
         dropout_rng: jnp.ndarray = None
         epoch: int = 0
+        opt_state_step: int = 0
         train_time: float = 0.0  # total time the model trained
         train_samples: int = 0  # number of samples seen
 
@@ -940,7 +959,7 @@ def main():
 
         # restore metadata
         attr_state = {}
-        keys = ["train_time", "train_samples", "step", "epoch"]
+        keys = ["train_time", "train_samples", "step", "epoch", "opt_state_step"]
         attr_state = {k: v for k, v in model_metadata.items() if k in keys}
 
         if not model_args.restore_state:
@@ -1117,17 +1136,21 @@ def main():
 
         grads = with_sharding_constraint(grads, params_spec)
 
+        # get opt_state_step - TODO: only shampoo is supported at the moment
+        opt_state_step = state.opt_state["encoder"][0]
+
         # update state
         state = state.apply_gradients(
             grads=grads,
             dropout_rng=dropout_rng,
             train_time=train_time,
             train_samples=state.train_samples + training_args.batch_size_per_step,
+            opt_state_step=opt_state_step + 1,
         )
 
         metrics = {
             "loss": loss,
-            "learning_rate": learning_rate_fn(state.step),
+            "learning_rate": learning_rate_fn(opt_state_step),
         }
 
         # extract norms and histograms
