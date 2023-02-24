@@ -680,7 +680,6 @@ def main():
         )
 
     # Create learning rate schedule
-    # Create learning rate schedule
     def create_learning_rate_fn() -> Callable[[int], jnp.array]:
         """Create the learning rate function."""
 
@@ -698,7 +697,7 @@ def main():
         last_boundary = 0
 
         # offset
-        lr_offset = training_args.lr_offset + state.opt_state_step
+        lr_offset = training_args.lr_offset
         if lr_offset:
             schedule_fn = _add_schedule(schedule_fn, optax.constant_schedule(0.0), last_boundary)
             last_boundary += lr_offset
@@ -1265,7 +1264,7 @@ def main():
         def update_state_metrics(self, state):
             """Update internal state metrics (logged at each call to be used as x-axis)"""
             self.state_dict = {
-                f'train/{k.split("_")[-1]}': state[k] for k in ["step", "epoch", "train_time", "train_samples"]
+                f'train/{k.split("_")[-1]}': state[k] for k in ["step", "epoch", "train_time", "train_samples", "opt_state_step""]
             }
             # timing metrics
             new_step = int(state["step"])
