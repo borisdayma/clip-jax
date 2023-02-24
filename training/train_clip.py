@@ -239,7 +239,7 @@ class TrainingArguments:
 
     def __post_init__(self):
         if self.assert_TPU_available:
-            assert jax.local_device_count() == 8, "TPUs in use, please check running processes"
+            assert jax.local_device_count() > 1, "TPUs in use, please check running processes"
         if self.output_dir is not None:
             self.output_dir = os.path.expanduser(self.output_dir)
         if (
