@@ -850,7 +850,7 @@ def main():
 
     # create a mesh
     mesh_shape = (training_args.dp_devices, training_args.mp_devices)
-    device_mesh = mesh_utils.create_device_mesh(mesh_shape, contiguous_submeshes=True)
+    device_mesh = mesh_utils.create_device_mesh(mesh_shape)
     mesh = Mesh(devices=device_mesh, axis_names=("data", "model"))
     logger.info(f"  Mesh shape: {mesh_shape}")
 
