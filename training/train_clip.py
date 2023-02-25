@@ -789,6 +789,7 @@ def main():
             clip_by_scaled_gradient_norm=None,
             precision=jax.lax.Precision.HIGHEST,
             best_effort_memory_usage_reduction=training_args.optim_quantized,
+            generate_training_metrics=False,
         )
         # get the real optimizer and helper functions
         opt = _opt(learning_rate_fn)
