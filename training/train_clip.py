@@ -137,6 +137,12 @@ class TrainingArguments:
             )
         },
     )
+    activation_partitioning_dims: int = field(
+        default=1, metadata={"help": "Number of dimensions to partition activations, 1 or 2."}
+    )
+    parameter_partitioning_dims: int = field(
+        default=1, metadata={"help": "Number of dimensions to partition parameters, 1 or 2."}
+    )
     num_train_epochs: int = field(default=3, metadata={"help": "Total number of training epochs to perform."})
     warmup_steps: int = field(default=500, metadata={"help": "Linear warmup over warmup_steps."})
     lr_decay: str = field(
@@ -302,6 +308,8 @@ class TrainingArguments:
             "model",
             "2d",
         ], f"Shard shampoo across {self.shard_shampoo_across} not supported."
+        assert self.activation_partitioning_dims in [1, 2], f"Only 1D and 2D activation partitioning supported."
+        assert self.parameter_partitioning_dims in [1, 2], f"Only 1D and 2D parameter partitioning supported."
         assert self.mp_devices > 0, f"Number of devices for model parallelism must be > 0"
         assert jax.device_count() % self.mp_devices == 0, (
             f"Number of available devices ({jax.device_count()} must be divisible by"
@@ -638,7 +646,12 @@ def main():
 
     # get PartitionSpec and shape for model params
     params_shape = freeze(model.params_shape_tree)
-    params_spec = set_partitions(unfreeze(params_shape), model.config.text_config.use_scan)
+    params_spec = set_partitions(
+        unfreeze(params_shape),
+        use_scan=model.config.text_config.use_scan,
+        activation_partitioning_dims=training_args.activation_partitioning_dims,
+        parameter_partitioning_dims=training_args.parameter_partitioning_dims,
+    )
 
     # Initialize our training
     rng = jax.random.PRNGKey(training_args.seed_model)
