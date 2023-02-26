@@ -54,10 +54,13 @@ class Dataset:
             )
             self.valid_groups = self.valid_batch_size_per_step // self.valid_batch_size
             self.valid_group_number = jax.process_index() // self.node_groups
-            assert self.valid_groups == jax.process_count() // self.node_groups, (
-                f"valid_groups ({self.valid_groups}) should be equal to "
-                f"jax.process_count() // self.node_groups ({jax.process_count() // self.node_groups})"
-            )
+        else:
+            self.valid_groups = 1
+            self.valid_group_number = 0
+        assert self.valid_groups == jax.process_count() // self.node_groups, (
+            f"valid_groups ({self.valid_groups}) should be equal to "
+            f"jax.process_count() // self.node_groups ({jax.process_count() // self.node_groups})"
+        )
 
         # define parsing function
         features = {
@@ -168,6 +171,8 @@ class Dataset:
                 if self.multi_hosts and augment:
                     # repeat indefinitely
                     ds = ds.repeat()
+                    # shuffle files
+                    ds = ds.shuffle(len(files))
 
                 # parse dataset
                 if self.min_original_image_size is None and self.max_original_aspect_ratio is None:
