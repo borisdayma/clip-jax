@@ -19,6 +19,7 @@ import flax
 import jax
 import jax.numpy as jnp
 import jaxlib
+import numpy as np
 import optax
 import transformers
 import wandb
@@ -29,7 +30,6 @@ from flax.serialization import from_bytes, to_bytes
 from flax.traverse_util import flatten_dict, unflatten_dict
 from huggingface_hub import Repository
 from jax import numpy as jnp
-import numpy as np
 from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.pjit import pjit, with_sharding_constraint
@@ -281,6 +281,7 @@ class TrainingArguments:
             None,
             "linear",
             "exponential",
+            "cosine",
         ], f"Selected learning rate decay not supported: {self.lr_decay}"
         if self.log_norm is True:
             self.log_norm_steps = self.logging_steps
@@ -1082,7 +1083,10 @@ def main():
 
                 # average across all devices
                 # Note: we could average per device only after gradient accumulation, right before params update
-                (loss, grads,) = jax.tree_util.tree_map(
+                (
+                    loss,
+                    grads,
+                ) = jax.tree_util.tree_map(
                     lambda x: jnp.mean(x, axis=0),
                     (
                         loss,
@@ -1120,7 +1124,10 @@ def main():
                     dropout_rng,
                 ) = cumul_loss_grad_dropout
                 loss, grads, dropout_rng = loss_and_grad(grad_idx, dropout_rng)
-                (cumul_loss, cumul_grads,) = jax.tree_util.tree_map(
+                (
+                    cumul_loss,
+                    cumul_grads,
+                ) = jax.tree_util.tree_map(
                     jnp.add,
                     (cumul_loss, cumul_grads),
                     (loss, grads),
@@ -1342,7 +1349,6 @@ def main():
     def run_evaluation():
         # ======================== Evaluating ==============================
         if training_args.do_eval:
-
             # defragment memory
             jax.lib.xla_bridge.get_backend().defragment()
 
@@ -1355,7 +1361,6 @@ def main():
                 leave=False,
                 disable=jax.process_index() > 0,
             ):
-
                 # preprocess batch
                 captions = [caption.decode("utf-8") for caption in batch[1]]
                 txt_inputs = tokenizer(
