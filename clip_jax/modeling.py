@@ -1398,6 +1398,9 @@ class FlaxCLIPTextModelForFineTuningModule(nn.Module):
         attention_mask=None,
         position_ids=None,
         deterministic: bool = True,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
     ):
         text_outputs = self.text_model(
             input_ids=input_ids,
@@ -1409,7 +1412,6 @@ class FlaxCLIPTextModelForFineTuningModule(nn.Module):
             return_dict=True,
         )
 
-        print("Hidden states", len(text_outputs.hidden_states))
         # return penuultimate layer
         return text_outputs.hidden_states[-2]
 
