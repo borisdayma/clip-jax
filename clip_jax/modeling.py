@@ -1385,6 +1385,39 @@ class FlaxCLIPVisionModelForImageClassification(PretrainedFromWandbMixin, FlaxCL
     module_class = FlaxCLIPVisionModelForImageClassificationModule
 
 
+class FlaxCLIPTextModelForFineTuningModule(nn.Module):
+    config: CLIPVisionConfig
+    dtype: jnp.dtype = jnp.float32
+
+    def setup(self):
+        self.text_model = FlaxCLIPTextTransformer(self.config, dtype=self.dtype)
+
+    def __call__(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        deterministic: bool = True,
+    ):
+        text_outputs = self.text_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            deterministic=deterministic,
+            output_attentions=False,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+
+        print("Hidden states", len(text_outputs.hidden_states))
+        # return penuultimate layer
+        return text_outputs.hidden_states[-2]
+
+
+class FlaxCLIPTextModelForFineTuning(PretrainedFromWandbMixin, FlaxCLIPTextPreTrainedModel):
+    module_class = FlaxCLIPTextModelForFineTuningModule
+
+
 class FlaxCLIPModule(nn.Module):
     config: CLIPConfig
     dtype: jnp.dtype = jnp.float32
