@@ -227,7 +227,6 @@ def _normalize(
     bias_init: Callable,
     scale_init: Callable,
 ):
-
     reduction_axes = _canonicalize_axes(x.ndim, reduction_axes)
     feature_axes = _canonicalize_axes(x.ndim, feature_axes)
     stats_shape = list(x.shape)
@@ -1456,9 +1455,12 @@ class FlaxCLIPModule(nn.Module):
         text_embeds = self.text_projection(text_embeds)
 
         # normalize features
-        def normalize(x, epsilon=1e-6):
-            mean2 = jnp.sum(jnp.square(x), axis=-1, keepdims=True)
-            return x * lax.rsqrt(mean2 + epsilon)
+        def normalize(x, epsilon=1e-6, legacy=False):
+            if legacy:
+                mean2 = jnp.sum(jnp.square(x), axis=-1, keepdims=True)
+                return x * lax.rsqrt(mean2 + epsilon)
+            else:
+                return x / jnp.linalg.norm(x, axis=-1, keepdims=True)
 
         image_embeds = normalize(image_embeds)
         text_embeds = normalize(text_embeds)
