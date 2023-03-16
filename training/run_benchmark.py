@@ -6,12 +6,13 @@ import os
 from functools import partial
 from subprocess import call
 
+import cv2
+import google.cloud.storage
 import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
 import torchvision
-from dalle_mini.data import TextNormalizer
 from flax.training.common_utils import shard
 from torchvision.datasets import ImageNet
 from tqdm import tqdm
@@ -1126,6 +1127,38 @@ zero_shot_classification_template = [
     "a tattoo of the {c}.",
 ]
 
+
+def resize_and_center_crop(image, image_size):
+    # image is a numpy array with shape (channels, height, width), reverse to (height, width, channels)
+    image = image.numpy().transpose(1, 2, 0)
+
+    if len(image.shape) == 3 and image.shape[-1] == 4:
+        # alpha matting with white background
+        image = (image * 255).astype(np.uint8)
+        alpha = image[:, :, 3, np.newaxis]
+        image = alpha / 255.0 * image[:, :, :3] + 255 - alpha
+        image = np.rint(image.clip(min=0, max=255)).astype(np.uint8)
+        image = (image / 255.0).astype(np.float32)
+
+    h, w, _ = image.shape
+    if not (h == image_size and w == image_size):
+        # Resize keeping the aspect ratio, shortest side resized to image_size
+        if h > w:
+            oh, ow = image_size * h // w, image_size
+        else:
+            oh, ow = image_size, image_size * w // h
+        image = cv2.resize(image, (ow, oh), interpolation=cv2.INTER_AREA)
+
+        # Center crop to final image size
+        i = (oh - image_size) // 2
+        j = (ow - image_size) // 2
+        image = image[i : i + image_size, j : j + image_size]
+
+    # normalize
+    image = (image - 0.5) / 0.5
+    return image
+
+
 if __name__ == "__main__":
     assert jax.local_device_count() == 8
 
@@ -1134,29 +1167,22 @@ if __name__ == "__main__":
     std = (0.5, 0.5, 0.5)
     transforms = torchvision.transforms.Compose(
         [
-            torchvision.transforms.Resize(256, interpolation=torchvision.transforms.InterpolationMode.BICUBIC),
-            torchvision.transforms.CenterCrop(256),
             torchvision.transforms.ToTensor(),
-            torchvision.transforms.Normalize(
-                mean=mean,
-                std=std,
-            ),
-            torchvision.transforms.Lambda(lambda x: x.permute(1, 2, 0)),
+            torchvision.transforms.Lambda(lambda x: resize_and_center_crop(x, 256)),
         ]
     )
     ds = load_dataset(transform=transforms)
     dl = torch.utils.data.DataLoader(ds, batch_size=1000, num_workers=0, shuffle=False)
 
     # load model and tokenizer
-    tn = TextNormalizer()
-    tokenizer = AutoTokenizer.from_pretrained("./craiyon_tokenizer")
-    clip = FlaxCLIPModel.from_pretrained("borisd13/clip/model-1bz3971a:latest")
+    tokenizer = AutoTokenizer.from_pretrained("my_tokenizer")
+    clip = FlaxCLIPModel.from_pretrained("borisd13/clip/model_artifact:latest")
 
     # prepare text weights
     get_text_features = jax.jit(clip.get_text_features)
     txt_features = []
     for item in tqdm(ds.classes):
-        texts = [tn(t.format(c=item)) for t in zero_shot_classification_template]
+        texts = [(t.format(c=item)) for t in zero_shot_classification_template]
         txt_inputs = tokenizer(texts, padding="max_length", truncation=True, max_length=80, return_tensors="np")
         txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
         features = get_text_features(**txt_inputs, params=clip._params)
