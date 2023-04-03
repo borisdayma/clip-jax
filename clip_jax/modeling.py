@@ -513,7 +513,6 @@ class FlaxCLIPAttention(nn.Module):
                 "embed_dim must be divisible by num_heads (got `embed_dim`:"
                 f" {self.embed_dim} and `num_heads`: {self.num_heads})."
             )
-        self.scale = self.head_dim**-0.5
         self.dropout = self.config.attention_dropout
 
         self.k_proj = nn.Dense(
@@ -626,44 +625,36 @@ class FlaxCLIPMLP(nn.Module):
     config: Union[CLIPTextConfig, CLIPVisionConfig]
     dtype: Dtype = jnp.float32
 
-    def setup(self):
-        self.activation_fn = ACT2FN[self.config.hidden_act]
-        self.fc1 = nn.Dense(
+    @nn.compact
+    def __call__(self, hidden_states):
+        h1 = nn.Dense(
             self.config.intermediate_size,
             dtype=self.dtype,
             kernel_init=jax.nn.initializers.normal(0.01),
             use_bias=self.config.use_bias,
-        )
-        self.fc2 = nn.Dense(
-            self.config.hidden_size,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-            use_bias=self.config.use_bias,
-        )
+        )(hidden_states)
+        h1 = ACT2FN[self.config.hidden_act](h1)
         if self.config.use_glu:
-            self.fc1_glu = nn.Dense(
+            h2 = nn.Dense(
                 self.config.intermediate_size,
                 dtype=self.dtype,
                 kernel_init=jax.nn.initializers.normal(0.01),
                 use_bias=self.config.use_bias,
-            )
+            )(hidden_states)
+            h1 = h1 * h2
         if self.config.ln_type == "normformer":
-            self.layer_norm_mid = norm(self.config.use_rmsnorm)(
+            h1 = norm(self.config.use_rmsnorm)(
                 epsilon=self.config.layer_norm_eps,
                 dtype=self.dtype,
                 use_bias=self.config.use_bias,
                 use_scale=self.config.force_scale,
-            )
-
-    def __call__(self, hidden_states):
-        h1 = self.fc1(hidden_states)
-        h1 = self.activation_fn(h1)
-        if self.config.use_glu:
-            h2 = self.fc1_glu(hidden_states)
-            h1 = h1 * h2
-        if self.config.ln_type == "normformer":
-            h1 = self.layer_norm_mid(h1)
-        h1 = self.fc2(h1)
+            )(h1)
+        h1 = nn.Dense(
+            self.config.hidden_size,
+            dtype=self.dtype,
+            kernel_init=jax.nn.initializers.normal(0.01),
+            use_bias=self.config.use_bias,
+        )(h1)
         return h1
 
 
@@ -671,22 +662,7 @@ class FlaxCLIPEncoderLayer(nn.Module):
     config: Union[CLIPTextConfig, CLIPVisionConfig]
     dtype: Dtype = jnp.float32
 
-    def setup(self):
-        self.self_attn = FlaxCLIPAttention(self.config, dtype=self.dtype)
-        self.layer_norm1 = norm(self.config.use_rmsnorm)(
-            epsilon=self.config.layer_norm_eps,
-            dtype=self.dtype,
-            use_bias=self.config.use_bias,
-            use_scale=self.config.force_scale,
-        )
-        self.layer_norm2 = norm(self.config.use_rmsnorm)(
-            epsilon=self.config.layer_norm_eps,
-            dtype=self.dtype,
-            use_bias=self.config.use_bias,
-            use_scale=self.config.force_scale,
-        )
-        self.mlp = FlaxCLIPMLP(self.config, dtype=self.dtype)
-
+    @nn.compact
     def __call__(
         self,
         hidden_states,
@@ -696,8 +672,13 @@ class FlaxCLIPEncoderLayer(nn.Module):
     ):
         residual = hidden_states
 
-        hidden_states = self.layer_norm1(hidden_states)
-        attn_outputs = self.self_attn(
+        hidden_states = norm(self.config.use_rmsnorm)(
+            epsilon=self.config.layer_norm_eps,
+            dtype=self.dtype,
+            use_bias=self.config.use_bias,
+            use_scale=self.config.force_scale,
+        )(hidden_states)
+        attn_outputs = FlaxCLIPAttention(self.config, dtype=self.dtype)(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             deterministic=deterministic,
@@ -707,8 +688,13 @@ class FlaxCLIPEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         residual = hidden_states
-        hidden_states = self.layer_norm2(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = norm(self.config.use_rmsnorm)(
+            epsilon=self.config.layer_norm_eps,
+            dtype=self.dtype,
+            use_bias=self.config.use_bias,
+            use_scale=self.config.force_scale,
+        )(hidden_states)
+        hidden_states = FlaxCLIPMLP(self.config, dtype=self.dtype)(hidden_states)
         hidden_states = residual + hidden_states
 
         if self.config.use_scan:
