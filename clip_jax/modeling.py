@@ -500,127 +500,6 @@ class MultiHeadDotProductAttention(Module):
         return out
 
 
-class FlaxCLIPAttention(nn.Module):
-    config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: Dtype = jnp.float32
-
-    def setup(self):
-        self.embed_dim = self.config.hidden_size
-        self.num_heads = self.config.num_attention_heads
-        self.head_dim = self.embed_dim // self.num_heads
-        if self.head_dim * self.num_heads != self.embed_dim:
-            raise ValueError(
-                "embed_dim must be divisible by num_heads (got `embed_dim`:"
-                f" {self.embed_dim} and `num_heads`: {self.num_heads})."
-            )
-        self.dropout = self.config.attention_dropout
-
-        self.k_proj = nn.Dense(
-            self.embed_dim,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-            use_bias=self.config.use_bias,
-        )
-        self.v_proj = nn.Dense(
-            self.embed_dim,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-            use_bias=self.config.use_bias,
-        )
-        self.q_proj = nn.Dense(
-            self.embed_dim,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-            use_bias=self.config.use_bias,
-        )
-        self.out_proj = nn.Dense(
-            self.embed_dim,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-            use_bias=self.config.use_bias,
-        )
-
-        if self.config.ln_type == "normformer":
-            self.layer_norm_end = norm(self.config.use_rmsnorm)(
-                epsilon=self.config.layer_norm_eps, dtype=self.dtype, use_bias=self.config.use_bias
-            )
-
-        # causal mask does not seem interesting so we don't use it at the moment
-        self.causal = False
-        if self.causal:
-            self.causal_mask = make_causal_mask(jnp.ones((1, self.config.max_position_embeddings), dtype="i4"))
-
-    def _split_heads(self, hidden_states):
-        return hidden_states.reshape(hidden_states.shape[:2] + (self.num_heads, self.head_dim))
-
-    def _merge_heads(self, hidden_states):
-        return hidden_states.reshape(hidden_states.shape[:2] + (self.embed_dim,))
-
-    @nn.compact
-    def __call__(
-        self,
-        hidden_states,
-        attention_mask=None,
-        deterministic: bool = True,
-        output_attentions: bool = False,
-    ):
-        query = self.q_proj(hidden_states)
-        key = self.k_proj(hidden_states)
-        value = self.v_proj(hidden_states)
-
-        query = self._split_heads(query)
-        key = self._split_heads(key)
-        value = self._split_heads(value)
-
-        causal_attention_mask = None
-        nn.MultiHeadDotProductAttention
-        if self.causal:
-            query_length, key_length = query.shape[1], key.shape[1]
-            causal_attention_mask = self.causal_mask[:, :, key_length - query_length : key_length, :key_length]
-
-        if attention_mask is not None and causal_attention_mask is not None:
-            attention_mask = jnp.expand_dims(attention_mask, axis=(-3, -2))
-            attention_mask = combine_masks(attention_mask, causal_attention_mask, dtype="i4")
-        elif causal_attention_mask is not None:
-            attention_mask = causal_attention_mask
-        elif attention_mask is not None:
-            attention_mask = jnp.expand_dims(attention_mask, axis=(-3, -2))
-
-        if attention_mask is not None:
-            attention_bias = jax.lax.select(
-                attention_mask > 0,
-                jnp.full(attention_mask.shape, 0.0).astype(self.dtype),
-                jnp.full(attention_mask.shape, -1e4).astype(self.dtype),
-            )
-        else:
-            attention_bias = None
-
-        dropout_rng = None
-        if not deterministic and self.dropout > 0.0:
-            dropout_rng = self.make_rng("dropout")
-
-        attn_weights = dot_product_attention_weights(
-            query,
-            key,
-            bias=attention_bias,
-            dropout_rng=dropout_rng,
-            dropout_rate=self.dropout,
-            deterministic=deterministic,
-            dtype=self.dtype,
-            precision=None,
-        )
-
-        attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
-        attn_output = self._merge_heads(attn_output)
-        attn_output = self.out_proj(attn_output)
-
-        if self.config.ln_type == "normformer":
-            attn_output = self.layer_norm_end(attn_output)
-
-        outputs = (attn_output, attn_weights) if output_attentions else (attn_output,)
-        return outputs
-
-
 class FlaxCLIPMLP(nn.Module):
     config: Union[CLIPTextConfig, CLIPVisionConfig]
     dtype: Dtype = jnp.float32
@@ -668,25 +547,39 @@ class FlaxCLIPEncoderLayer(nn.Module):
         hidden_states,
         attention_mask,
         deterministic: bool = True,
-        output_attentions: bool = False,
     ):
+        # Self attention
         residual = hidden_states
-
-        hidden_states = norm(self.config.use_rmsnorm)(
-            epsilon=self.config.layer_norm_eps,
+        if self.config.ln_type in ["preln", "normformer"]:
+            hidden_states = norm(self.config.use_rmsnorm)(
+                epsilon=self.config.layer_norm_eps,
+                dtype=self.dtype,
+                use_bias=self.config.use_bias,
+                use_scale=self.config.force_scale,
+                name="pre_attention_layer_norm",
+            )(hidden_states)
+        hidden_states = MultiHeadDotProductAttention(
+            num_heads=self.config.num_attention_heads,
             dtype=self.dtype,
-            use_bias=self.config.use_bias,
-            use_scale=self.config.force_scale,
-        )(hidden_states)
-        attn_outputs = FlaxCLIPAttention(self.config, dtype=self.dtype)(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
             deterministic=deterministic,
-            output_attentions=output_attentions,
-        )
-        hidden_states = attn_outputs[0]
+            use_bias=self.config.use_bias,
+            use_rotary=(self.config.position_embedding_type == "rotary"),
+            max_length=self.config.max_position_embeddings,
+            dropout_rate=self.config.attention_dropout,
+            use_bias=self.config.use_bias,
+            name="attention",
+        )(inputs_q=hidden_states, inputs_kv=hidden_states, mask=attention_mask, deterministic=deterministic)
+        if self.config.ln_type == "normformer":
+            hidden_states = norm(self.config.use_rmsnorm)(
+                epsilon=self.config.layer_norm_eps,
+                dtype=self.dtype,
+                use_bias=self.config.use_bias,
+                use_scale=True,
+                name="post_attention_layer_norm",
+            )(hidden_states)
         hidden_states = residual + hidden_states
 
+        # MLP
         residual = hidden_states
         hidden_states = norm(self.config.use_rmsnorm)(
             epsilon=self.config.layer_norm_eps,
@@ -697,18 +590,12 @@ class FlaxCLIPEncoderLayer(nn.Module):
         hidden_states = FlaxCLIPMLP(self.config, dtype=self.dtype)(hidden_states)
         hidden_states = residual + hidden_states
 
-        if self.config.use_scan:
+        if self.config.scan_layers:
             return hidden_states, None
-
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += attn_outputs[1:]
-
-        return outputs
+        return hidden_states
 
 
-class FlaxCLIPLayerCollection(nn.Module):
+class FlaxCLIPEncoder(nn.Module):
     config: Union[CLIPTextConfig, CLIPVisionConfig]
     dtype: Dtype = jnp.float32
 
@@ -718,57 +605,31 @@ class FlaxCLIPLayerCollection(nn.Module):
         hidden_states,
         attention_mask=None,
         deterministic: bool = True,
-        output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
     ):
-        all_attentions = () if output_attentions else None
-        all_hidden_states = () if output_hidden_states else None
-
         # gradient checkpointing
+        use_scan = True
         layer = (
             remat(
                 FlaxCLIPEncoderLayer,
-                static_argnums=(2, 3),
-                prevent_cse=not self.config.use_scan,
+                static_argnums=(2,),
+                prevent_cse=not use_scan,
             )
             if self.config.gradient_checkpointing
             else FlaxCLIPEncoderLayer
         )
 
-        if self.config.use_scan:
-            # keep it simple
-            assert (
-                not output_attentions and not output_hidden_states
-            ), "scan does not support output_attentions or output_hidden_states"
-            # FIXME: scan does not work:
-            # - check if first layer has a different dimension and need to be out of scan
-            # - potentially FlaxCLIPLayerCollection is compiled and loaded for both text and vision so may need 2 different names
-            # - use checkify for potential errors
-            hidden_states, _ = nn.scan(
-                layer,
-                variable_axes={"params": 0},
-                split_rngs={"params": True, "dropout": True},
-                in_axes=(nn.broadcast, nn.broadcast, nn.broadcast),
-                length=self.config.num_hidden_layers,
-            )(self.config, dtype=self.dtype, name="scanned")(
-                hidden_states, attention_mask, deterministic, output_attentions
-            )
-        else:
-            for i in range(self.config.num_hidden_layers):
-                if output_hidden_states:
-                    all_hidden_states += (hidden_states,)
-
-                layer_outputs = layer(self.config, dtype=self.dtype, name=str(i))(
-                    hidden_states,
-                    attention_mask,
-                    deterministic=deterministic,
-                    output_attentions=output_attentions,
-                )
-                hidden_states = layer_outputs[0]
-
-                if output_attentions:
-                    all_attentions += (layer_outputs[1],)
+        # TODO: stack outputs of hidden states when output_hidden_states=True
+        assert not output_hidden_states, "scan does not support output_hidden_states"
+        hidden_states, _ = nn.scan(
+            layer,
+            variable_axes={"params": 0},
+            split_rngs={"params": True, "dropout": True},
+            in_axes=(nn.broadcast, nn.broadcast),
+            length=self.config.num_hidden_layers,
+            unroll=self.config.unroll_scan,
+        )(self.config, dtype=self.dtype, name="scanned")(hidden_states, attention_mask, deterministic)
 
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
@@ -781,33 +642,6 @@ class FlaxCLIPLayerCollection(nn.Module):
         return FlaxBaseModelOutput(
             last_hidden_state=hidden_states,
             hidden_states=all_hidden_states,
-            attentions=all_attentions,
-        )
-
-
-class FlaxCLIPEncoder(nn.Module):
-    config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: Dtype = jnp.float32
-
-    def setup(self):
-        self.layers = FlaxCLIPLayerCollection(self.config, dtype=self.dtype)
-
-    def __call__(
-        self,
-        inputs_embeds,
-        attention_mask=None,
-        deterministic: bool = True,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
-    ):
-        return self.layers(
-            hidden_states=inputs_embeds,
-            attention_mask=attention_mask,
-            deterministic=deterministic,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
         )
 
 
@@ -815,45 +649,40 @@ class FlaxCLIPTextTransformer(nn.Module):
     config: CLIPTextConfig
     dtype: Dtype = jnp.float32
 
-    def setup(self):
-        self.embeddings = FlaxCLIPTextEmbeddings(self.config, dtype=self.dtype)
-        self.encoder = FlaxCLIPEncoder(self.config, dtype=self.dtype)
-        self.final_layer_norm = norm(self.config.use_rmsnorm)(
-            epsilon=self.config.layer_norm_eps,
-            dtype=self.dtype,
-            use_bias=self.config.use_bias,
-            use_scale=self.config.force_scale,
-        )
-
+    @nn.compact
     def __call__(
         self,
         input_ids,
         attention_mask,
         position_ids,
         deterministic: bool = True,
-        output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        hidden_states = self.embeddings(input_ids=input_ids, position_ids=position_ids)
+        hidden_states = FlaxCLIPTextEmbeddings(self.config, dtype=self.dtype)(
+            input_ids=input_ids, position_ids=position_ids
+        )
 
-        encoder_outputs = self.encoder(
-            inputs_embeds=hidden_states,
+        encoder_outputs = FlaxCLIPEncoder(self.config, dtype=self.dtype)(
+            hidden_states=hidden_states,
             attention_mask=attention_mask,
             deterministic=deterministic,
-            output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
 
         last_hidden_state = encoder_outputs[0]
-        last_hidden_state = self.final_layer_norm(last_hidden_state)
+        last_hidden_state = norm(self.config.use_rmsnorm)(
+            epsilon=self.config.layer_norm_eps,
+            dtype=self.dtype,
+            use_bias=self.config.use_bias,
+            use_scale=self.config.force_scale,
+        )(last_hidden_state)
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
         # take features from the BOS embedding instead of EOS (no causal mask anymore)
@@ -894,11 +723,9 @@ class FlaxCLIPVisionTransformer(nn.Module):
         self,
         pixel_values=None,
         deterministic: bool = True,
-        output_attentions=None,
         output_hidden_states=None,
         return_dict: bool = True,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -910,7 +737,6 @@ class FlaxCLIPVisionTransformer(nn.Module):
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
             deterministic=deterministic,
-            output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
@@ -983,11 +809,9 @@ class FlaxCLIPTextPreTrainedModel(FlaxPreTrainedModel):
         params: dict = None,
         dropout_rng: jax.random.PRNGKey = None,
         train: bool = False,
-        output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -1010,7 +834,6 @@ class FlaxCLIPTextPreTrainedModel(FlaxPreTrainedModel):
             jnp.array(attention_mask, dtype="i4"),
             jnp.array(position_ids, dtype="i4"),
             not train,
-            output_attentions,
             output_hidden_states,
             return_dict,
             rngs=rngs,
@@ -1068,11 +891,9 @@ class FlaxCLIPVisionPreTrainedModel(FlaxPreTrainedModel):
         params: dict = None,
         dropout_rng: jax.random.PRNGKey = None,
         train: bool = False,
-        output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -1087,7 +908,6 @@ class FlaxCLIPVisionPreTrainedModel(FlaxPreTrainedModel):
             {"params": params or self.params},
             jnp.array(pixel_values, dtype=jnp.float32),
             not train,
-            output_attentions,
             output_hidden_states,
             return_dict,
             rngs=rngs,
@@ -1184,11 +1004,9 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
         params: dict = None,
         dropout_rng: jax.random.PRNGKey = None,
         train: bool = False,
-        output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -1212,7 +1030,6 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
             jnp.array(attention_mask, dtype="i4"),
             jnp.array(position_ids, dtype="i4"),
             not train,
-            output_attentions,
             output_hidden_states,
             return_dict,
             rngs=rngs,
@@ -1353,7 +1170,6 @@ class FlaxCLIPTextModule(nn.Module):
         attention_mask,
         position_ids,
         deterministic: bool = True,
-        output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
     ):
@@ -1362,7 +1178,6 @@ class FlaxCLIPTextModule(nn.Module):
             attention_mask=attention_mask,
             position_ids=position_ids,
             deterministic=deterministic,
-            output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
@@ -1403,14 +1218,12 @@ class FlaxCLIPVisionModule(nn.Module):
         self,
         pixel_values,
         deterministic: bool = True,
-        output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
     ):
         return self.vision_model(
             pixel_values=pixel_values,
             deterministic=deterministic,
-            output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
@@ -1463,7 +1276,6 @@ class FlaxCLIPVisionModelForImageClassificationModule(nn.Module):
         self,
         pixel_values=None,
         deterministic: bool = True,
-        output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
     ):
@@ -1472,7 +1284,6 @@ class FlaxCLIPVisionModelForImageClassificationModule(nn.Module):
         outputs = self.vision_model(
             pixel_values,
             deterministic=deterministic,
-            output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=True,
         )
@@ -1507,7 +1318,6 @@ class FlaxCLIPTextModelForFineTuningModule(nn.Module):
         attention_mask=None,
         position_ids=None,
         deterministic: bool = True,
-        output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
     ):
@@ -1516,7 +1326,6 @@ class FlaxCLIPTextModelForFineTuningModule(nn.Module):
             attention_mask=attention_mask,
             position_ids=position_ids,
             deterministic=deterministic,
-            output_attentions=False,
             output_hidden_states=True,
             return_dict=True,
         )
@@ -1568,7 +1377,6 @@ class FlaxCLIPModule(nn.Module):
         attention_mask=None,
         position_ids=None,
         deterministic: bool = True,
-        output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
     ):
@@ -1577,7 +1385,6 @@ class FlaxCLIPModule(nn.Module):
         vision_outputs = self.vision_model(
             pixel_values=pixel_values,
             deterministic=deterministic,
-            output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
@@ -1587,7 +1394,6 @@ class FlaxCLIPModule(nn.Module):
             attention_mask=attention_mask,
             position_ids=position_ids,
             deterministic=deterministic,
-            output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )

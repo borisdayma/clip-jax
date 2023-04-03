@@ -36,7 +36,7 @@ class CLIPTextConfig(PretrainedConfig):
         intermediate_size=2048,
         num_hidden_layers=12,
         num_attention_heads=8,
-        position_embedding_type="absolute",
+        position_embedding_type="absolute",  # one of "absolute", "rotary"
         max_position_embeddings=80,
         hidden_act="quick_gelu",
         layer_norm_eps=0.00001,
@@ -49,7 +49,7 @@ class CLIPTextConfig(PretrainedConfig):
         attention_dropout=0.0,
         initializer_range=0.02,
         initializer_factor=1.0,
-        use_scan=False,
+        unroll_scan=1,
         gradient_checkpointing=False,
         **kwargs,
     ):
@@ -70,8 +70,9 @@ class CLIPTextConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         assert position_embedding_type in [
-            "absolute"
-        ], f"position_embedding_type must be 'absolute', but is {position_embedding_type}"
+            "absolute",
+            "rotary",
+        ], f"position_embedding_type must be 'absolute' or 'rotary', but is {position_embedding_type}"
         self.position_embedding_type = position_embedding_type
         self.max_position_embeddings = max_position_embeddings
         self.layer_norm_eps = layer_norm_eps
@@ -79,7 +80,7 @@ class CLIPTextConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.initializer_factor = initializer_factor
         self.attention_dropout = attention_dropout
-        self.use_scan = use_scan
+        self.unroll_scan = unroll_scan
         self.gradient_checkpointing = gradient_checkpointing
 
     @classmethod
@@ -123,7 +124,7 @@ class CLIPVisionConfig(PretrainedFromWandbMixin, PretrainedConfig):
         attention_dropout=0.0,
         initializer_range=0.02,
         initializer_factor=1.0,
-        use_scan=False,
+        unroll_scan=1,
         gradient_checkpointing=False,
         **kwargs,
     ):
@@ -148,7 +149,7 @@ class CLIPVisionConfig(PretrainedFromWandbMixin, PretrainedConfig):
         self.attention_dropout = attention_dropout
         self.layer_norm_eps = layer_norm_eps
         self.hidden_act = hidden_act
-        self.use_scan = use_scan
+        self.unroll_scan = unroll_scan
         self.gradient_checkpointing = gradient_checkpointing
 
     @classmethod
@@ -177,7 +178,7 @@ class CLIPConfig(PretrainedConfig):
         self,
         projection_dim=512,
         logit_scale_init_value=2.6592,
-        use_scan=False,
+        unroll_scan=1,
         gradient_checkpointing=False,
         **kwargs,
     ):
@@ -195,10 +196,10 @@ class CLIPConfig(PretrainedConfig):
         vision_config = kwargs.pop("vision_config", {})
 
         self.text_config = CLIPTextConfig(
-            **{**text_config, "use_scan": use_scan, "gradient_checkpointing": gradient_checkpointing}
+            **{**text_config, "unroll_scan": unroll_scan, "gradient_checkpointing": gradient_checkpointing}
         )
         self.vision_config = CLIPVisionConfig(
-            **{**vision_config, "use_scan": use_scan, "gradient_checkpointing": gradient_checkpointing}
+            **{**vision_config, "unroll_scan": unroll_scan, "gradient_checkpointing": gradient_checkpointing}
         )
 
         self.projection_dim = projection_dim
@@ -224,7 +225,7 @@ class CLIPConfig(PretrainedConfig):
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: Union[str, os.PathLike],
-        use_scan=None,
+        unroll_scan=1,
         gradient_checkpointing=None,
         **kwargs,
     ) -> "PretrainedConfig":
@@ -237,8 +238,8 @@ class CLIPConfig(PretrainedConfig):
                 " for all configurations of models and can yield errors."
             )
 
-        if use_scan is not None:
-            config_dict["use_scan"] = use_scan
+        if unroll_scan is not None:
+            config_dict["unroll_scan"] = unroll_scan
         if gradient_checkpointing is not None:
             config_dict["gradient_checkpointing"] = gradient_checkpointing
 
