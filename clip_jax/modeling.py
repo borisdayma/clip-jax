@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Callable, Iterable, Optional, Tuple, Union
+import functools
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple, Union
 
 import flax
 import flax.linen as nn
@@ -21,14 +22,19 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
-from flax.linen import combine_masks, make_causal_mask
+from flax.linen import combine_masks, dot_product_attention, make_causal_mask
 from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import dot_product_attention_weights
 from flax.linen.dtypes import canonicalize_dtype
-from flax.linen.module import Module
+from flax.linen.linear import (
+    DenseGeneral,
+    DotGeneralT,
+    PrecisionLike,
+)
+from flax.linen.module import Module, compact, merge_param
 from flax.linen.normalization import _canonicalize_axes
+from flax.linen.partitioning import remat
 from flax.traverse_util import flatten_dict, unflatten_dict
-from jax import lax
 from transformers import AutoTokenizer
 from transformers.modeling_flax_outputs import (
     FlaxBaseModelOutput,
@@ -48,6 +54,20 @@ Axes = Union[int, Iterable[int]]
 logger = logging.get_logger(__name__)
 
 
+# Type annotations
+Array = jnp.ndarray
+Dtype = jnp.dtype
+PRNGKey = jnp.ndarray
+Shape = Iterable[int]
+Activation = Callable[..., Array]
+PaddingLike = Union[str, int, Sequence[Union[int, Tuple[int, int]]]]
+LaxPadding = Union[str, Sequence[Tuple[int, int]]]
+Axes = Union[int, Iterable[int]]
+
+# default initializers
+default_kernel_init = jax.nn.initializers.lecun_normal()
+
+
 @flax.struct.dataclass
 class FlaxCLIPOutput(ModelOutput):
     logits_per_image: jnp.ndarray = None
@@ -64,6 +84,120 @@ class FlaxCLIPOutput(ModelOutput):
         )
 
 
+# Rotary Embeddings
+
+
+# source: https://github.com/google/flaxformer/blob/main/flaxformer/architectures/perceiver_ar/rotary_embedding.py
+def rotate_half(x: Array) -> Array:
+    """Helper that splits a tensor at last dim into half and rotate it."""
+    x1, x2 = jnp.split(x, 2, axis=-1)
+    x = jnp.concatenate([-x2, x1], axis=-1)
+    return x
+
+
+# source: https://github.com/google/flaxformer/blob/main/flaxformer/architectures/perceiver_ar/rotary_embedding.py
+@functools.partial(jax.jit, static_argnums=(4,))
+def apply_rotary_embedding(
+    q: Array,
+    k: Array,
+    cos: Array,
+    sin: Array,
+    decode: bool = False,
+    q_position_offset: Optional[Array] = None,
+    rotary_index: Optional[Array] = None,
+) -> Tuple[Array, Array]:
+    """Helper function to apply Rotary Embeddings, supports Q position offset."""
+    if len(k.shape) == 3:
+        # for multi query attention
+        k = jnp.expand_dims(k, 2)
+        multiquery = True
+    else:
+        multiquery = False
+
+    batch, qlen, qheads, d = q.shape
+    kbatch, klen, kheads, kd = k.shape
+    assert batch == kbatch, f"{batch} != {kbatch}"
+    assert d == kd, f"{d} != {kd}"
+
+    # cos: [len, d]
+    # sin: [len, d]
+    # rotary_index: [batch]
+    # q_position_offset: [batch]
+
+    if decode and qlen == 1 and rotary_index is not None:
+        # we check qlen == 1 so that we don't do this when initializing cache.
+        qcos = cos[rotary_index, :]
+        qsin = sin[rotary_index, :]
+        # qcos, qsin: [batch, d]
+        qcos = jax.lax.broadcast_in_dim(qcos, (batch, qlen, qheads, d), (0, 3))
+        qsin = jax.lax.broadcast_in_dim(qsin, (batch, qlen, qheads, d), (0, 3))
+        # qcos, qsin: [batch, qlen, qheads, d]
+    else:
+        if q_position_offset is None:
+            qcos, qsin = cos[:qlen, :], sin[:qlen, :]
+        else:
+            # If q_position_offset is specified, we'll slice per-example after
+            # broadcasting to batch size.
+            qcos, qsin = cos, sin
+
+        # qcos, qsin: [qlen, d]
+        qcos = jax.lax.broadcast_in_dim(qcos, (batch, qcos.shape[0], qheads, d), (1, 3))
+        qsin = jax.lax.broadcast_in_dim(qsin, (batch, qsin.shape[0], qheads, d), (1, 3))
+        # qcos, qsin: [batch, qlen, qheads, d]
+        if q_position_offset is not None:
+            qcos = jax.vmap(functools.partial(jax.lax.dynamic_slice_in_dim, slice_size=qlen, axis=0))(
+                qcos, q_position_offset
+            )
+            qsin = jax.vmap(functools.partial(jax.lax.dynamic_slice_in_dim, slice_size=qlen, axis=0))(
+                qsin, q_position_offset
+            )
+
+    kcos, ksin = cos[:klen, :], sin[:klen, :]
+    # kcos, ksin: [klen, d]
+    kcos = jax.lax.broadcast_in_dim(kcos, (batch, klen, kheads, d), (1, 3))
+    ksin = jax.lax.broadcast_in_dim(ksin, (batch, klen, kheads, d), (1, 3))
+    # kcos, ksin: [batch, klen, kheads, d]
+
+    out_q = (q * qcos) + (rotate_half(q) * qsin)
+    out_k = (k * kcos) + (rotate_half(k) * ksin)
+    if multiquery:
+        out_k = jnp.squeeze(out_k, 2)
+    return out_q, out_k
+
+
+# source: https://github.com/google/flaxformer/blob/main/flaxformer/components/embedding.py
+def generate_fixed_pos_embedding(features, length, min_timescale=1.0, max_timescale=10000.0):
+    """Generate Sin/Cos for Rotary Embeddings.
+    Generates sinusoids at (features//2) different timescales, where the
+    timescales form a gemetric series from min_timescale to max_timescale
+    (max_timescale is not included, but would be the next element in the series).
+    Sinusoids are evaluated at integer positions i in [0, length).
+    The outputs are computed as:
+      output_sin[i, j] = sin(i / timescale[j])
+      output_cos[i, j] = cos(i / timescale[j])
+    Finally, the outputs are tiled twice in the features dimension.
+    Args:
+      features: an integer
+      length: an integer
+      min_timescale: an optional float
+      max_timescale: an optional float
+    Returns:
+      output_sin: a float32 Tensor with shape [length, features]
+      output_cos: a float32 Tensor with shape [length, features]
+    """
+    fraction = jnp.arange(0, features, 2, dtype=jnp.float32) / features
+    timescale = min_timescale * (max_timescale / min_timescale) ** fraction
+    rotational_frequency = 1.0 / timescale
+    # Must use high precision einsum here, since rounding off to a bfloat16 is
+    # catastrophic. bfloat16 rounds 257 to 256, but sin(257) is very different
+    # from sin(256).
+    sinusoid_inp = jnp.einsum(
+        "i , j -> i j", jnp.arange(length), rotational_frequency, precision=jax.lax.Precision.HIGHEST
+    )
+    sinusoid_inp = jnp.concatenate([sinusoid_inp, sinusoid_inp], axis=-1)
+    return jnp.sin(sinusoid_inp), jnp.cos(sinusoid_inp)
+
+
 # Adapted from flax.linen.normalization
 def _normalize(
     mdl: Module,
@@ -72,8 +206,8 @@ def _normalize(
     var: Any,
     reduction_axes: Axes,
     feature_axes: Axes,
-    dtype: jnp.dtype,
-    param_dtype: jnp.dtype,
+    dtype: Dtype,
+    param_dtype: Dtype,
     epsilon: float,
     use_bias: bool,
     use_scale: bool,
@@ -94,7 +228,7 @@ def _normalize(
         feature_shape[ax] = x.shape[ax]
         reduced_feature_shape.append(x.shape[ax])
     y = x - mean if mean is not None else x
-    mul = lax.rsqrt(var + epsilon)
+    mul = jax.lax.rsqrt(var + epsilon)
     args = [x]
     if use_scale:
         scale = mdl.param("scale", scale_init, reduced_feature_shape, param_dtype).reshape(feature_shape)
@@ -113,8 +247,8 @@ class RMSNorm(nn.Module):
     """RMSNorm, adapted from flax LayerNorm"""
 
     epsilon: float = 1e-6
-    dtype: Optional[jnp.dtype] = None
-    param_dtype: jnp.dtype = jnp.float32
+    dtype: Optional[Dtype] = None
+    param_dtype: Dtype = jnp.float32
     use_bias: bool = True
     use_scale: bool = True
     bias_init: Callable = jax.nn.initializers.zeros
@@ -133,7 +267,7 @@ class RMSNorm(nn.Module):
         dtype = jnp.promote_types(dtype, jnp.float32)
         x = jnp.asarray(x, dtype)
         # use mean2 instead of variance (not centered)
-        var = jnp.mean(lax.square(x), self.reduction_axes)
+        var = jnp.mean(jax.lax.square(x), self.reduction_axes)
         mean = None
 
         if self.axis_name is not None:
@@ -165,7 +299,7 @@ def norm(use_rmsnorm):
 
 class FlaxCLIPVisionEmbeddings(nn.Module):
     config: CLIPVisionConfig
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     @nn.compact
     def __call__(self, pixel_values):
@@ -194,7 +328,7 @@ class FlaxCLIPVisionEmbeddings(nn.Module):
 
 class FlaxCLIPTextEmbeddings(nn.Module):
     config: CLIPTextConfig
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     @nn.compact
     def __call__(self, input_ids):
@@ -215,9 +349,160 @@ class FlaxCLIPTextEmbeddings(nn.Module):
         return embeddings
 
 
+class MultiHeadDotProductAttention(Module):
+    """
+    Adapted from nn.MultiHeadDotProductAttention:
+    * - support use_rotary
+    """
+
+    num_heads: int
+    dtype: Optional[Dtype] = None
+    param_dtype: Dtype = jnp.float32
+    qkv_features: Optional[int] = None
+    out_features: Optional[int] = None
+    broadcast_dropout: bool = True
+    dropout_rate: float = 0.0
+    deterministic: Optional[bool] = None
+    precision: PrecisionLike = None
+    kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_kernel_init
+    bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = jax.nn.initializers.zeros_init()
+    use_bias: bool = True
+    attention_fn: Callable[..., Array] = dot_product_attention
+    decode: bool = False
+    qkv_dot_general: DotGeneralT = jax.lax.dot_general
+    out_dot_general: DotGeneralT = jax.lax.dot_general
+    use_rotary: bool = False
+    max_length: Optional[int] = None  # required if use_rotary
+
+    @compact
+    def __call__(
+        self, inputs_q: Array, inputs_kv: Array, mask: Optional[Array] = None, deterministic: Optional[bool] = None
+    ):
+        """Applies multi-head dot product attention on the input data.
+
+        Projects the inputs into multi-headed query, key, and value vectors,
+        applies dot-product attention and project the results to an output vector.
+
+        Args:
+          inputs_q: input queries of shape
+            `[batch_sizes..., length, features]`.
+          inputs_kv: key/values of shape
+            `[batch_sizes..., length, features]`.
+          mask: attention mask of shape
+            `[batch_sizes..., num_heads, query_length, key/value_length]`.
+            Attention weights are masked out if their corresponding mask value
+            is `False`.
+          deterministic: if false, the attention weight is masked randomly
+            using dropout, whereas if true, the attention weights
+            are deterministic.
+
+        Returns:
+          output of shape `[batch_sizes..., length, features]`.
+        """
+        features = self.out_features or inputs_q.shape[-1]
+        qkv_features = self.qkv_features or inputs_q.shape[-1]
+        assert qkv_features % self.num_heads == 0, "Memory dimension must be divisible by number of heads."
+        head_dim = qkv_features // self.num_heads
+
+        dense = functools.partial(
+            DenseGeneral,
+            axis=-1,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            features=(self.num_heads, head_dim),
+            kernel_init=self.kernel_init,
+            bias_init=self.bias_init,
+            use_bias=self.use_bias,
+            precision=self.precision,
+            dot_general=self.qkv_dot_general,
+        )
+        # project inputs_q to multi-headed q/k/v
+        # dimensions are then [batch..., length, n_heads, n_features_per_head]
+        query, key, value = (
+            dense(name="query")(inputs_q),
+            dense(name="key")(inputs_kv),
+            dense(name="value")(inputs_kv),
+        )
+
+        if self.use_rotary:
+            assert self.max_length is not None, "max_length must be specified for rotary embeddings."
+            # source: https://github.com/google-research/jestimator/blob/main/jestimator/models/rope/modeling.py
+            sin, cos = generate_fixed_pos_embedding(head_dim, self.max_length)
+            query, key = apply_rotary_embedding(query, key, cos, sin)
+
+        # During fast autoregressive decoding, we feed one position at a time,
+        # and cache the keys and values step by step.
+        if self.decode:
+            # detect if we're initializing by absence of existing cache data.
+            is_initialized = self.has_variable("cache", "cached_key")
+            cached_key = self.variable("cache", "cached_key", jnp.zeros, key.shape, key.dtype)
+            cached_value = self.variable("cache", "cached_value", jnp.zeros, value.shape, value.dtype)
+            cache_index = self.variable("cache", "cache_index", lambda: jnp.array(0, dtype=jnp.int32))
+            if is_initialized:
+                *batch_dims, max_length, num_heads, depth_per_head = cached_key.value.shape
+                # shape check of cached keys against query input
+                expected_shape = tuple(batch_dims) + (1, num_heads, depth_per_head)
+                if expected_shape != query.shape:
+                    raise ValueError(
+                        "Autoregressive cache shape error, "
+                        "expected query shape %s instead got %s." % (expected_shape, query.shape)
+                    )
+                # update key, value caches with our new 1d spatial slices
+                cur_index = cache_index.value
+                indices = (0,) * len(batch_dims) + (cur_index, 0, 0)
+                key = jax.lax.dynamic_update_slice(cached_key.value, key, indices)
+                value = jax.lax.dynamic_update_slice(cached_value.value, value, indices)
+                cached_key.value = key
+                cached_value.value = value
+                cache_index.value = cache_index.value + 1
+                # causal mask for cached decoder self-attention:
+                # our single query position should only attend to those key
+                # positions that have already been generated and cached,
+                # not the remaining zero elements.
+                mask = combine_masks(
+                    mask, jnp.broadcast_to(jnp.arange(max_length) <= cur_index, tuple(batch_dims) + (1, 1, max_length))
+                )
+
+        dropout_rng = None
+        if self.dropout_rate > 0.0:  # Require `deterministic` only if using dropout.
+            m_deterministic = merge_param("deterministic", self.deterministic, deterministic)
+            if not m_deterministic:
+                dropout_rng = self.make_rng("dropout")
+        else:
+            m_deterministic = True
+
+        # apply attention
+        x = self.attention_fn(
+            query,
+            key,
+            value,
+            mask=mask,
+            dropout_rng=dropout_rng,
+            dropout_rate=self.dropout_rate,
+            broadcast_dropout=self.broadcast_dropout,
+            deterministic=m_deterministic,
+            dtype=self.dtype,
+            precision=self.precision,
+        )  # pytype: disable=wrong-keyword-args
+        # back to the original inputs dimensions
+        out = DenseGeneral(
+            features=features,
+            axis=(-2, -1),
+            kernel_init=self.kernel_init,
+            bias_init=self.bias_init,
+            use_bias=self.use_bias,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            precision=self.precision,
+            dot_general=self.out_dot_general,
+            name="out",  # type: ignore[call-arg]
+        )(x)
+        return out
+
+
 class FlaxCLIPAttention(nn.Module):
     config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     def setup(self):
         self.embed_dim = self.config.hidden_size
@@ -272,6 +557,7 @@ class FlaxCLIPAttention(nn.Module):
     def _merge_heads(self, hidden_states):
         return hidden_states.reshape(hidden_states.shape[:2] + (self.embed_dim,))
 
+    @nn.compact
     def __call__(
         self,
         hidden_states,
@@ -288,6 +574,7 @@ class FlaxCLIPAttention(nn.Module):
         value = self._split_heads(value)
 
         causal_attention_mask = None
+        nn.MultiHeadDotProductAttention
         if self.causal:
             query_length, key_length = query.shape[1], key.shape[1]
             causal_attention_mask = self.causal_mask[:, :, key_length - query_length : key_length, :key_length]
@@ -301,7 +588,7 @@ class FlaxCLIPAttention(nn.Module):
             attention_mask = jnp.expand_dims(attention_mask, axis=(-3, -2))
 
         if attention_mask is not None:
-            attention_bias = lax.select(
+            attention_bias = jax.lax.select(
                 attention_mask > 0,
                 jnp.full(attention_mask.shape, 0.0).astype(self.dtype),
                 jnp.full(attention_mask.shape, -1e4).astype(self.dtype),
@@ -337,7 +624,7 @@ class FlaxCLIPAttention(nn.Module):
 
 class FlaxCLIPMLP(nn.Module):
     config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     def setup(self):
         self.activation_fn = ACT2FN[self.config.hidden_act]
@@ -382,7 +669,7 @@ class FlaxCLIPMLP(nn.Module):
 
 class FlaxCLIPEncoderLayer(nn.Module):
     config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     def setup(self):
         self.self_attn = FlaxCLIPAttention(self.config, dtype=self.dtype)
@@ -437,7 +724,7 @@ class FlaxCLIPEncoderLayer(nn.Module):
 
 class FlaxCLIPLayerCollection(nn.Module):
     config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     @nn.compact
     def __call__(
@@ -514,7 +801,7 @@ class FlaxCLIPLayerCollection(nn.Module):
 
 class FlaxCLIPEncoder(nn.Module):
     config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     def setup(self):
         self.layers = FlaxCLIPLayerCollection(self.config, dtype=self.dtype)
@@ -540,7 +827,7 @@ class FlaxCLIPEncoder(nn.Module):
 
 class FlaxCLIPTextTransformer(nn.Module):
     config: CLIPTextConfig
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     def setup(self):
         self.embeddings = FlaxCLIPTextEmbeddings(self.config, dtype=self.dtype)
@@ -599,7 +886,7 @@ class FlaxCLIPTextTransformer(nn.Module):
 
 class FlaxCLIPVisionTransformer(nn.Module):
     config: CLIPVisionConfig
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     def setup(self):
         self.embeddings = FlaxCLIPVisionEmbeddings(self.config, dtype=self.dtype)
@@ -667,7 +954,7 @@ class FlaxCLIPTextPreTrainedModel(FlaxPreTrainedModel):
         config: CLIPTextConfig,
         input_shape=(1, 1),
         seed: int = 0,
-        dtype: jnp.dtype = jnp.float32,
+        dtype: Dtype = jnp.float32,
         _do_init: bool = True,
         **kwargs,
     ):
@@ -754,7 +1041,7 @@ class FlaxCLIPVisionPreTrainedModel(FlaxPreTrainedModel):
         config: CLIPVisionConfig,
         input_shape: Optional[Tuple] = None,
         seed: int = 0,
-        dtype: jnp.dtype = jnp.float32,
+        dtype: Dtype = jnp.float32,
         _do_init: bool = True,
         **kwargs,
     ):
@@ -830,7 +1117,7 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
         config: CLIPConfig,
         input_shape: Optional[Tuple] = None,
         seed: int = 0,
-        dtype: jnp.dtype = jnp.float32,
+        dtype: Dtype = jnp.float32,
         _do_init: bool = True,
         **kwargs,
     ):
@@ -1069,7 +1356,7 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
 
 class FlaxCLIPTextModule(nn.Module):
     config: CLIPTextConfig
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     def setup(self):
         self.text_model = FlaxCLIPTextTransformer(self.config, dtype=self.dtype)
@@ -1121,7 +1408,7 @@ FLAX_CLIP_TEXT_MODEL_DOCSTRING = """
 
 class FlaxCLIPVisionModule(nn.Module):
     config: CLIPVisionConfig
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     def setup(self):
         self.vision_model = FlaxCLIPVisionTransformer(self.config, dtype=self.dtype)
@@ -1174,7 +1461,7 @@ FLAX_CLIP_VISION_MODEL_DOCSTRING = """
 
 class FlaxCLIPVisionModelForImageClassificationModule(nn.Module):
     config: CLIPVisionConfig
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     def setup(self):
         self.vision_model = FlaxCLIPVisionTransformer(self.config, dtype=self.dtype)
@@ -1223,7 +1510,7 @@ class FlaxCLIPVisionModelForImageClassification(PretrainedFromWandbMixin, FlaxCL
 
 class FlaxCLIPTextModelForFineTuningModule(nn.Module):
     config: CLIPVisionConfig
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     def setup(self):
         self.text_model = FlaxCLIPTextTransformer(self.config, dtype=self.dtype)
@@ -1258,7 +1545,7 @@ class FlaxCLIPTextModelForFineTuning(PretrainedFromWandbMixin, FlaxCLIPTextPreTr
 
 class FlaxCLIPModule(nn.Module):
     config: CLIPConfig
-    dtype: jnp.dtype = jnp.float32
+    dtype: Dtype = jnp.float32
 
     def setup(self):
         text_config = self.config.text_config
@@ -1326,12 +1613,8 @@ class FlaxCLIPModule(nn.Module):
         text_embeds = self.text_projection(text_embeds)
 
         # normalize features
-        def normalize(x, epsilon=1e-6, legacy=False):
-            if legacy:
-                mean2 = jnp.sum(jnp.square(x), axis=-1, keepdims=True)
-                return x * lax.rsqrt(mean2 + epsilon)
-            else:
-                return x / jnp.linalg.norm(x, axis=-1, keepdims=True)
+        def normalize(x):
+            return x / jnp.linalg.norm(x, axis=-1, keepdims=True)
 
         image_embeds = normalize(image_embeds)
         text_embeds = normalize(text_embeds)
