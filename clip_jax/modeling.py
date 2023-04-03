@@ -19,6 +19,7 @@ import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.linen import combine_masks, make_causal_mask
 from flax.linen import partitioning as nn_partitioning
@@ -34,12 +35,7 @@ from transformers.modeling_flax_outputs import (
     FlaxBaseModelOutputWithPooling,
     FlaxSequenceClassifierOutput,
 )
-from transformers.modeling_flax_utils import (
-    ACT2FN,
-    FlaxPreTrainedModel,
-    append_replace_return_docstrings,
-    overwrite_call_docstring,
-)
+from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
 from transformers.utils import ModelOutput, add_start_docstrings, logging
 
 from .configuration_clip import CLIPConfig, CLIPTextConfig, CLIPVisionConfig
@@ -51,152 +47,9 @@ Axes = Union[int, Iterable[int]]
 
 logger = logging.get_logger(__name__)
 
-CLIP_START_DOCSTRING = r"""
-
-    This model inherits from [`FlaxPreTrainedModel`]. Check the superclass documentation for the generic methods the
-    library implements for all its model (such as downloading, saving and converting weights from PyTorch models)
-
-    This model is also a Flax Linen [flax.linen.Module](https://flax.readthedocs.io/en/latest/flax.linen.html#module)
-    subclass. Use it as a regular Flax linen Module and refer to the Flax documentation for all matter related to
-    general usage and behavior.
-
-    Finally, this model supports inherent JAX features such as:
-
-    - [Just-In-Time (JIT) compilation](https://jax.readthedocs.io/en/latest/jax.html#just-in-time-compilation-jit)
-    - [Automatic Differentiation](https://jax.readthedocs.io/en/latest/jax.html#automatic-differentiation)
-    - [Vectorization](https://jax.readthedocs.io/en/latest/jax.html#vectorization-vmap)
-    - [Parallelization](https://jax.readthedocs.io/en/latest/jax.html#parallelization-pmap)
-
-    Parameters:
-        config ([`CLIPConfig`]): Model configuration class with all the parameters of the model.
-            Initializing with a config file does not load the weights associated with the model, only the
-            configuration. Check out the [`~FlaxPreTrainedModel.from_pretrained`] method to load the model weights.
-        dtype (`jax.numpy.dtype`, *optional*, defaults to `jax.numpy.float32`):
-            The data type of the computation. Can be one of `jax.numpy.float32`, `jax.numpy.float16` (on GPUs) and
-            `jax.numpy.bfloat16` (on TPUs).
-
-            This can be used to enable mixed-precision training or half-precision inference on GPUs or TPUs. If
-            specified all the computation will be performed with the given `dtype`.
-
-            **Note that this only specifies the dtype of the computation and does not influence the dtype of model
-            parameters.**
-
-            If you wish to change the dtype of the model parameters, see [`~FlaxPreTrainedModel.to_fp16`] and
-            [`~FlaxPreTrainedModel.to_bf16`].
-"""
-
-CLIP_TEXT_INPUTS_DOCSTRING = r"""
-    Args:
-        input_ids (`numpy.ndarray` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
-            it.
-
-            Indices can be obtained using [`CLIPTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            [What are input IDs?](../glossary#input-ids)
-        attention_mask (`numpy.ndarray` of shape `(batch_size, sequence_length)`, *optional*):
-            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-            - 1 for tokens that are **not masked**,
-            - 0 for tokens that are **masked**.
-
-            [What are attention masks?](../glossary#attention-mask)
-        position_ids (`numpy.ndarray` of shape `(batch_size, sequence_length)`, *optional*):
-            Indices of positions of each input sequence tokens in the position embeddings. Selected in the range `[0,
-            config.max_position_embeddings - 1]`.
-
-            [What are position IDs?](../glossary#position-ids)
-        output_attentions (`bool`, *optional*):
-            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
-            tensors for more detail.
-        output_hidden_states (`bool`, *optional*):
-            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
-            more detail.
-        return_dict (`bool`, *optional*):
-            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-"""
-
-CLIP_VISION_INPUTS_DOCSTRING = r"""
-    Args:
-        pixel_values (`numpy.ndarray` of shape `(batch_size, num_channels, height, width)`):
-            Pixel values. Padding will be ignored by default should you provide it. Pixel values can be obtained using
-            [`CLIPFeatureExtractor`]. See [`CLIPFeatureExtractor.__call__`] for details.
-        output_attentions (`bool`, *optional*):
-            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
-            tensors for more detail.
-        output_hidden_states (`bool`, *optional*):
-            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
-            more detail.
-        return_dict (`bool`, *optional*):
-            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-"""
-
-CLIP_INPUTS_DOCSTRING = r"""
-    Args:
-        input_ids (`numpy.ndarray` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
-            it.
-
-            Indices can be obtained using [`CLIPTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            [What are input IDs?](../glossary#input-ids)
-        attention_mask (`numpy.ndarray` of shape `(batch_size, sequence_length)`, *optional*):
-            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-            - 1 for tokens that are **not masked**,
-            - 0 for tokens that are **masked**.
-
-            [What are attention masks?](../glossary#attention-mask)
-        position_ids (`numpy.ndarray` of shape `(batch_size, sequence_length)`, *optional*):
-            Indices of positions of each input sequence tokens in the position embeddings. Selected in the range `[0,
-            config.max_position_embeddings - 1]`.
-
-            [What are position IDs?](../glossary#position-ids)
-        pixel_values (`numpy.ndarray` of shape `(batch_size, num_channels, height, width)`):
-            Pixel values. Padding will be ignored by default should you provide it. Pixel values can be obtained using
-            [`CLIPFeatureExtractor`]. See [`CLIPFeatureExtractor.__call__`] for details.
-        output_attentions (`bool`, *optional*):
-            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
-            tensors for more detail.
-        output_hidden_states (`bool`, *optional*):
-            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
-            more detail.
-        return_dict (`bool`, *optional*):
-            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-"""
-
-
-def get_id_pos(mat, id):
-    """
-    Returns the position of the id in mat.
-    """
-    return jnp.where(mat == id, 1, 0).argmax(axis=-1)
-
 
 @flax.struct.dataclass
 class FlaxCLIPOutput(ModelOutput):
-    """
-    Args:
-        logits_per_image:(`jnp.ndarray` of shape `(image_batch_size, text_batch_size)`):
-            The scaled dot product scores between `image_embeds` and `text_embeds`. This represents the image-text
-            similarity scores.
-        logits_per_text:(`jnp.ndarray` of shape `(text_batch_size, image_batch_size)`):
-            The scaled dot product scores between `text_embeds` and `image_embeds`. This represents the text-image
-            similarity scores.
-        text_embeds(`jnp.ndarray` of shape `(batch_size, output_dim`):
-            The text embeddings obtained by applying the projection layer to the pooled output of
-            [`FlaxCLIPTextModel`].
-        image_embeds(`jnp.ndarray` of shape `(batch_size, output_dim`):
-            The image embeddings obtained by applying the projection layer to the pooled output of
-            [`FlaxCLIPVisionModel`].
-        text_model_output(`FlaxBaseModelOutputWithPooling`):
-            The output of the [`FlaxCLIPTextModel`].
-        vision_model_output(`FlaxBaseModelOutputWithPooling`):
-            The output of the [`FlaxCLIPVisionModel`].
-    """
-
     logits_per_image: jnp.ndarray = None
     logits_per_text: jnp.ndarray = None
     text_embeds: jnp.ndarray = None
@@ -268,10 +121,13 @@ class RMSNorm(nn.Module):
     scale_init: Callable = jax.nn.initializers.ones
     reduction_axes: Axes = -1
     feature_axes: Axes = -1
+    axis_name: Optional[str] = None
+    axis_index_groups: Any = None
 
     @nn.compact
     def __call__(self, x):
-        dtype = self.dtype or jnp.result_type(x)
+        if dtype is None:
+            dtype = self.dtype or jnp.result_type(x)
         # promote x to at least float32, this avoids half precision computation
         # but preserves double or complex floating points
         dtype = jnp.promote_types(dtype, jnp.float32)
@@ -279,6 +135,9 @@ class RMSNorm(nn.Module):
         # use mean2 instead of variance (not centered)
         var = jnp.mean(lax.square(x), self.reduction_axes)
         mean = None
+
+        if self.axis_name is not None:
+            var = jax.lax.pmean(var, axis_name=self.axis_name, axis_index_groups=self.axis_index_groups)
 
         return _normalize(
             self,
@@ -308,30 +167,28 @@ class FlaxCLIPVisionEmbeddings(nn.Module):
     config: CLIPVisionConfig
     dtype: jnp.dtype = jnp.float32
 
-    def setup(self):
+    @nn.compact
+    def __call__(self, pixel_values):
         embed_dim = self.config.hidden_size
-        image_size = self.config.image_size
         patch_size = self.config.patch_size
-
-        self.patch_embedding = nn.Conv(
+        patch_embeds = nn.Conv(
             embed_dim,
             kernel_size=(patch_size, patch_size),
             strides=(patch_size, patch_size),
             padding="VALID",
-            use_bias=False,
+            use_bias=self.config.use_bias,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(),
-        )
-
-        self.num_patches = (image_size // patch_size) ** 2
-        self.position_embedding = nn.Embed(self.num_patches, embed_dim, embedding_init=jax.nn.initializers.normal())
-        self.position_ids = jnp.expand_dims(jnp.arange(0, self.num_patches, dtype="i4"), axis=0)
-
-    def __call__(self, pixel_values):
-        patch_embeds = self.patch_embedding(pixel_values)
+            kernel_init=jax.nn.initializers.lecun_normal(),
+            bias_init=jax.nn.initializers.zeros_init(),
+        )(pixel_values)
         batch_size, height, width, channels = patch_embeds.shape
-        patch_embeds = jnp.reshape(patch_embeds, (batch_size, height * width, channels))
-        embeddings = patch_embeds + self.position_embedding(self.position_ids)
+        num_patches = height * width
+        patch_embeds = jnp.reshape(patch_embeds, (batch_size, num_patches, channels))
+        # learnt position embeddings
+        pos_embeds = self.param(
+            "pos_embeds", jax.nn.initializers.normal(1 / np.sqrt(embed_dim)), (1, num_patches, embed_dim)
+        )
+        embeddings = patch_embeds + pos_embeds
         return embeddings
 
 
@@ -1268,13 +1125,6 @@ FLAX_CLIP_TEXT_MODEL_DOCSTRING = """
     ```
 """
 
-overwrite_call_docstring(FlaxCLIPTextModel, CLIP_TEXT_INPUTS_DOCSTRING + FLAX_CLIP_TEXT_MODEL_DOCSTRING)
-append_replace_return_docstrings(
-    FlaxCLIPTextModel,
-    output_type=FlaxBaseModelOutputWithPooling,
-    config_class=CLIPTextConfig,
-)
-
 
 class FlaxCLIPVisionModule(nn.Module):
     config: CLIPVisionConfig
@@ -1327,13 +1177,6 @@ FLAX_CLIP_VISION_MODEL_DOCSTRING = """
     >>> pooler_output = outputs.pooler_output  # pooled CLS states
     ```
 """
-
-overwrite_call_docstring(FlaxCLIPVisionModel, CLIP_VISION_INPUTS_DOCSTRING + FLAX_CLIP_VISION_MODEL_DOCSTRING)
-append_replace_return_docstrings(
-    FlaxCLIPVisionModel,
-    output_type=FlaxBaseModelOutputWithPooling,
-    config_class=CLIPVisionConfig,
-)
 
 
 class FlaxCLIPVisionModelForImageClassificationModule(nn.Module):
@@ -1556,9 +1399,6 @@ FLAX_CLIP_MODEL_DOCSTRING = """
     >>> probs = jax.nn.softmax(logits_per_image, axis=1)  # we can take the softmax to get the label probabilities
     ```
 """
-
-overwrite_call_docstring(FlaxCLIPModel, CLIP_INPUTS_DOCSTRING + FLAX_CLIP_MODEL_DOCSTRING)
-append_replace_return_docstrings(FlaxCLIPModel, output_type=FlaxCLIPOutput, config_class=CLIPConfig)
 
 
 class AutoTokenizer(PretrainedFromWandbMixin, AutoTokenizer):
