@@ -185,10 +185,10 @@ class FlaxCLIPVisionEmbeddings(nn.Module):
         num_patches = height * width
         patch_embeds = jnp.reshape(patch_embeds, (batch_size, num_patches, channels))
         # learnt position embeddings
-        pos_embeds = self.param(
-            "pos_embeds", jax.nn.initializers.normal(1 / np.sqrt(embed_dim)), (1, num_patches, embed_dim)
+        position_embeds = self.param(
+            "position_embeds", jax.nn.initializers.normal(1 / np.sqrt(embed_dim)), (1, num_patches, embed_dim)
         )
-        embeddings = patch_embeds + pos_embeds
+        embeddings = patch_embeds + position_embeds
         return embeddings
 
 
@@ -196,27 +196,21 @@ class FlaxCLIPTextEmbeddings(nn.Module):
     config: CLIPTextConfig
     dtype: jnp.dtype = jnp.float32
 
-    def setup(self):
+    @nn.compact
+    def __call__(self, input_ids):
         embed_dim = self.config.hidden_size
-
-        self.token_embedding = nn.Embed(
+        _initializer = jax.nn.initializers.normal(1 / np.sqrt(embed_dim))
+        input_embeds = nn.Embed(
             self.config.vocab_size,
             embed_dim,
-            embedding_init=jax.nn.initializers.normal(),
-        )
-        self.position_embedding = nn.Embed(
-            self.config.max_position_embeddings,
-            embed_dim,
-            embedding_init=jax.nn.initializers.normal(),
-        )
-        self.position_ids = jnp.expand_dims(
-            jnp.arange(0, self.config.max_position_embeddings, dtype="i4"), axis=(0, 1)
-        )
-
-    def __call__(self, input_ids, position_ids):
-        input_embeds = self.token_embedding(input_ids.astype("i4"))
-        position_embeds = self.position_embedding(position_ids.astype("i4"))
-
+            embedding_init=_initializer,
+        )(input_ids.astype("i4"))
+        if self.config.position_embedding_type == "absolute":
+            position_embeds = self.param(
+                "position_embeds",
+                jax.nn.initializers.normal(1 / np.sqrt(embed_dim)),
+                (1, self.config.max_position_embeddings, embed_dim),
+            )
         embeddings = input_embeds + position_embeds
         return embeddings
 
@@ -267,8 +261,7 @@ class FlaxCLIPAttention(nn.Module):
                 epsilon=self.config.layer_norm_eps, dtype=self.dtype, use_bias=self.config.use_bias
             )
 
-        self.causal = isinstance(self.config, CLIPTextConfig)
-        # causal mask does not seem interesting so we never use it
+        # causal mask does not seem interesting so we don't use it at the moment
         self.causal = False
         if self.causal:
             self.causal_mask = make_causal_mask(jnp.ones((1, self.config.max_position_embeddings), dtype="i4"))

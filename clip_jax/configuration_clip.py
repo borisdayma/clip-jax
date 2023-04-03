@@ -36,7 +36,8 @@ class CLIPTextConfig(PretrainedConfig):
         intermediate_size=2048,
         num_hidden_layers=12,
         num_attention_heads=8,
-        max_position_embeddings=77,
+        position_embedding_type="absolute",
+        max_position_embeddings=80,
         hidden_act="quick_gelu",
         layer_norm_eps=0.00001,
         dropout=0.0,
@@ -68,6 +69,10 @@ class CLIPTextConfig(PretrainedConfig):
         self.use_rmsnorm = use_rmsnorm
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
+        assert position_embedding_type in [
+            "absolute"
+        ], f"position_embedding_type must be 'absolute', but is {position_embedding_type}"
+        self.position_embedding_type = position_embedding_type
         self.max_position_embeddings = max_position_embeddings
         self.layer_norm_eps = layer_norm_eps
         self.hidden_act = hidden_act
