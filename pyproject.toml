@@ -11,8 +11,7 @@ license = "Apache-2.0"
 dependencies = [
     "einops",
     "flax",
-    "jax>=0.2.6",
-    "jaxlib",
+    "jax",
     "numpy",
     "tensorflow-io[tensorflow-cpu]",
     "transformers",
