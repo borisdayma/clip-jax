@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import functools
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import flax
 import flax.linen as nn
@@ -22,9 +22,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
-from flax.linen import combine_masks, dot_product_attention, make_causal_mask
+from flax.linen import combine_masks, dot_product_attention
 from flax.linen import partitioning as nn_partitioning
-from flax.linen.attention import dot_product_attention_weights
 from flax.linen.dtypes import canonicalize_dtype
 from flax.linen.linear import (
     DenseGeneral,
@@ -42,7 +41,7 @@ from transformers.modeling_flax_outputs import (
     FlaxSequenceClassifierOutput,
 )
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel
-from transformers.utils import ModelOutput, add_start_docstrings, logging
+from transformers.utils import ModelOutput, logging
 
 from .configuration_clip import CLIPConfig, CLIPTextConfig, CLIPVisionConfig
 from .utils import PretrainedFromWandbMixin
@@ -312,17 +311,26 @@ class FlaxCLIPVisionEmbeddings(nn.Module):
             padding="VALID",
             use_bias=self.config.use_bias,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.lecun_normal(),
-            bias_init=jax.nn.initializers.zeros_init(),
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.lecun_normal(), ("conv_height", "conv_width", "input_channels", "embed")
+            ),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
         )(pixel_values)
+        patch_embeds = nn.with_logical_constraint(patch_embeds, ("batch", "height", "width", "embed"))
         batch_size, height, width, channels = patch_embeds.shape
         num_patches = height * width
         patch_embeds = jnp.reshape(patch_embeds, (batch_size, num_patches, channels))
+        patch_embeds = nn.with_logical_constraint(patch_embeds, ("batch", "length", "embed"))
         # learnt position embeddings
         position_embeds = self.param(
-            "position_embeds", jax.nn.initializers.normal(1 / np.sqrt(embed_dim)), (1, num_patches, embed_dim)
+            "position_embeds",
+            nn.with_logical_partitioning(
+                nn.initializers.normal(1 / np.sqrt(embed_dim)), ("broadcast", "vocab", "embed")
+            ),
+            (1, num_patches, embed_dim),
         )
         embeddings = patch_embeds + position_embeds
+        embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
         return embeddings
 
 
@@ -333,19 +341,24 @@ class FlaxCLIPTextEmbeddings(nn.Module):
     @nn.compact
     def __call__(self, input_ids):
         embed_dim = self.config.hidden_size
-        _initializer = jax.nn.initializers.normal(1 / np.sqrt(embed_dim))
-        input_embeds = nn.Embed(
+        embeddings = nn.Embed(
             self.config.vocab_size,
             embed_dim,
-            embedding_init=_initializer,
+            embedding_init=nn.with_logical_partitioning(
+                jax.nn.initializers.normal(1 / np.sqrt(embed_dim)), ("vocab", "embed")
+            ),
         )(input_ids.astype("i4"))
+        embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
         if self.config.position_embedding_type == "absolute":
             position_embeds = self.param(
                 "position_embeds",
-                jax.nn.initializers.normal(1 / np.sqrt(embed_dim)),
+                nn.with_logical_partitioning(
+                    jax.nn.initializers.normal(1 / np.sqrt(embed_dim)), ("broadcast", "vocab", "embed")
+                ),
                 (1, self.config.max_position_embeddings, embed_dim),
             )
-        embeddings = input_embeds + position_embeds
+            embeddings += position_embeds
+            embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
         return embeddings
 
 
