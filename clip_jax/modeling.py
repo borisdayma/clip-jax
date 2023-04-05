@@ -324,9 +324,7 @@ class FlaxCLIPVisionEmbeddings(nn.Module):
         # learnt position embeddings
         position_embeds = self.param(
             "position_embeds",
-            nn.with_logical_partitioning(
-                nn.initializers.normal(1 / np.sqrt(embed_dim)), ("broadcast", "vocab", "embed")
-            ),
+            nn.with_logical_partitioning(nn.initializers.normal(1 / np.sqrt(embed_dim)), (None, "vocab", "embed")),
             (1, num_patches, embed_dim),
         )
         embeddings = patch_embeds + position_embeds
@@ -738,6 +736,7 @@ class FlaxCLIPTextTransformer(nn.Module):
             pooled_output = last_hidden_state[
                 jnp.arange(last_hidden_state.shape[0]), _get_id_pos(input_ids, self.config.eos_token_id)
             ]
+        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         if not return_dict:
             return (last_hidden_state, pooled_output) + encoder_outputs[1:]
@@ -776,6 +775,7 @@ class FlaxCLIPVisionTransformer(nn.Module):
             scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
         )(hidden_states)
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
 
         encoder_outputs = FlaxCLIPEncoder(self.config, dtype=self.dtype)(
             inputs_embeds=hidden_states,
@@ -785,8 +785,12 @@ class FlaxCLIPVisionTransformer(nn.Module):
         )
 
         last_hidden_state = encoder_outputs[0]
+        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+
         # average pool
         pooled_output = last_hidden_state.mean(axis=1)
+        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+
         pooled_output = norm(self.config.use_rmsnorm)(
             epsilon=self.config.layer_norm_eps,
             dtype=self.dtype,
@@ -795,6 +799,7 @@ class FlaxCLIPVisionTransformer(nn.Module):
             scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
         )(pooled_output)
+        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         if not return_dict:
             return (last_hidden_state, pooled_output) + encoder_outputs[1:]
@@ -1026,25 +1031,6 @@ class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
         num_params = jax.tree_util.tree_map(lambda param: param.size, flatten_dict(unfreeze(params))).values()
         return sum(list(num_params))
 
-    def unscan(self, params):
-        if self.config.use_scan:
-            self.config.use_scan = False
-            params = flatten_dict(params)
-            scanned_keys = [k for k in params.keys() if "scanned" in k]
-            for k in scanned_keys:
-                v = params[k]
-                name_idx = k.index("scanned")
-                for i in range(len(v)):
-                    new_k = (
-                        *k[:name_idx],
-                        f"{i}",
-                        *k[name_idx + 1 :],
-                    )
-                    params[new_k] = v[i]
-                del params[k]
-            params = unflatten_dict(params)
-        return params
-
     def __call__(
         self,
         input_ids,
@@ -1229,9 +1215,8 @@ class FlaxCLIPVisionModelForImageClassificationModule(nn.Module):
         logits = nn.Dense(
             self.config.num_labels,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.variance_scaling(
-                self.config.initializer_range**2, "fan_in", "truncated_normal"
-            ),
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "classifier")),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros, ("classifier",)),
         )(outputs.pooler_output)
 
         if not return_dict:
