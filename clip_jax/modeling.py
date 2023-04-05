@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The OpenAI Team Authors, The Google Flax Team Authors and The HuggingFace Inc. team.
+# Copyright 2023 The OpenAI Team Authors, The Google Flax Team Authors, The HuggingFace Inc. team, The Craiyon team
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -353,7 +353,7 @@ class FlaxCLIPTextEmbeddings(nn.Module):
             position_embeds = self.param(
                 "position_embeds",
                 nn.with_logical_partitioning(
-                    jax.nn.initializers.normal(1 / np.sqrt(embed_dim)), ("broadcast", "vocab", "embed")
+                    jax.nn.initializers.normal(1 / np.sqrt(embed_dim)), (None, "vocab", "embed")
                 ),
                 (1, self.config.max_position_embeddings, embed_dim),
             )
@@ -423,8 +423,8 @@ class MultiHeadDotProductAttention(Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             features=(self.num_heads, head_dim),
-            kernel_init=self.kernel_init,
-            bias_init=self.bias_init,
+            kernel_init=nn.with_logical_partitioning(self.kernel_init, ("embed", "heads", "kv")),
+            bias_init=nn.with_logical_partitioning(self.bias_init, ("kv",)),
             use_bias=self.use_bias,
             precision=self.precision,
             dot_general=self.qkv_dot_general,
@@ -442,6 +442,10 @@ class MultiHeadDotProductAttention(Module):
             # source: https://github.com/google-research/jestimator/blob/main/jestimator/models/rope/modeling.py
             sin, cos = generate_fixed_pos_embedding(head_dim, self.max_length)
             query, key = apply_rotary_embedding(query, key, cos, sin)
+
+        query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+        key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+        value = nn.with_logical_constraint(value, ("batch", "length", "heads", "kv"))
 
         # During fast autoregressive decoding, we feed one position at a time,
         # and cache the keys and values step by step.
@@ -501,8 +505,8 @@ class MultiHeadDotProductAttention(Module):
         out = DenseGeneral(
             features=features,
             axis=(-2, -1),
-            kernel_init=self.kernel_init,
-            bias_init=self.bias_init,
+            kernel_init=nn.with_logical_partitioning(self.kernel_init, ("heads", "kv", "embed")),
+            bias_init=nn.with_logical_partitioning(self.bias_init, ("embed",)),
             use_bias=self.use_bias,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
@@ -637,7 +641,7 @@ class FlaxCLIPEncoder(nn.Module):
         assert not output_hidden_states, "scan does not support output_hidden_states"
         hidden_states, _ = nn.scan(
             layer,
-            variable_axes={"params": 0},
+            variable_axes={"params": 0, "cache": 0},
             split_rngs={"params": True, "dropout": True},
             in_axes=(nn.broadcast, nn.broadcast),
             length=self.config.num_hidden_layers,
