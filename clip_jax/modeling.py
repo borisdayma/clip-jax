@@ -593,6 +593,7 @@ class FlaxCLIPEncoderLayer(nn.Module):
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                 name="pre_attention_layer_norm",
             )(hidden_states)
+            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = MultiHeadDotProductAttention(
             num_heads=self.config.num_attention_heads,
             dtype=self.dtype,
@@ -606,6 +607,7 @@ class FlaxCLIPEncoderLayer(nn.Module):
             name="attention",
         )(inputs_q=hidden_states, inputs_kv=hidden_states, mask=attention_mask, deterministic=deterministic)
         if self.config.ln_type == "normformer":
+            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
             hidden_states = norm(self.config.use_rmsnorm)(
                 epsilon=self.config.layer_norm_eps,
                 dtype=self.dtype,
@@ -616,10 +618,12 @@ class FlaxCLIPEncoderLayer(nn.Module):
                 name="post_attention_layer_norm",
             )(hidden_states)
         hidden_states = residual + hidden_states
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
 
         # MLP
         residual = hidden_states
         hidden_states = FlaxCLIPMLP(self.config, dtype=self.dtype)(hidden_states)
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = residual + hidden_states
 
         if self.config.scan_layers:
