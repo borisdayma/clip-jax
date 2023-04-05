@@ -47,6 +47,7 @@ class CLIPTextConfig(PretrainedConfig):
         force_scale=True,
         use_rmsnorm=False,
         attention_dropout=0.0,
+        use_causal_mask=False,
         initializer_range=0.02,
         initializer_factor=1.0,
         unroll_scan=1,
@@ -80,6 +81,7 @@ class CLIPTextConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.initializer_factor = initializer_factor
         self.attention_dropout = attention_dropout
+        self.use_causal_mask = use_causal_mask
         self.unroll_scan = unroll_scan
         self.gradient_checkpointing = gradient_checkpointing
 
@@ -122,6 +124,7 @@ class CLIPVisionConfig(PretrainedFromWandbMixin, PretrainedConfig):
         force_scale=True,
         use_rmsnorm=False,
         attention_dropout=0.0,
+        use_causal_mask=False,
         initializer_range=0.02,
         initializer_factor=1.0,
         unroll_scan=1,
@@ -147,6 +150,7 @@ class CLIPVisionConfig(PretrainedFromWandbMixin, PretrainedConfig):
         self.initializer_range = initializer_range
         self.initializer_factor = initializer_factor
         self.attention_dropout = attention_dropout
+        self.use_causal_mask = use_causal_mask
         self.layer_norm_eps = layer_norm_eps
         self.hidden_act = hidden_act
         self.unroll_scan = unroll_scan
