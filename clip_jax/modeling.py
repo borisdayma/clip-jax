@@ -665,7 +665,8 @@ class FlaxCLIPEncoder(nn.Module):
             in_axes=(nn.broadcast, nn.broadcast),
             length=self.config.num_hidden_layers,
             unroll=self.config.unroll_scan,
-        )(self.config, dtype=self.dtype, name="scanned")(hidden_states, attention_mask, deterministic)
+            metadata_params={nn.PARTITION_NAME: "layer"},
+        )(self.config, dtype=self.dtype, name="layers")(hidden_states, attention_mask, deterministic)
 
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
@@ -713,6 +714,7 @@ class FlaxCLIPTextTransformer(nn.Module):
         )
 
         last_hidden_state = encoder_outputs[0]
+        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
         last_hidden_state = norm(self.config.use_rmsnorm)(
             epsilon=self.config.layer_norm_eps,
             dtype=self.dtype,
@@ -721,10 +723,21 @@ class FlaxCLIPTextTransformer(nn.Module):
             scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
         )(last_hidden_state)
+        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
-        # take features from the BOS embedding instead of EOS (no causal mask anymore)
-        pooled_output = last_hidden_state[:, 0, :]
+        if not self.config.use_causal_mask:
+            # take features from the BOS embedding instead of EOS (no causal mask)
+            pooled_output = last_hidden_state[:, 0, :]
+        else:
+            # take features from the EOS embedding
+
+            def _get_id_pos(mat, id):
+                return jnp.where(mat == id, 1, 0).argmax(axis=-1)
+
+            pooled_output = last_hidden_state[
+                jnp.arange(last_hidden_state.shape[0]), _get_id_pos(input_ids, self.config.eos_token_id)
+            ]
 
         if not return_dict:
             return (last_hidden_state, pooled_output) + encoder_outputs[1:]
