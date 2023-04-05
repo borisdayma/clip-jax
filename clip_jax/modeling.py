@@ -250,8 +250,8 @@ class RMSNorm(nn.Module):
     param_dtype: Dtype = jnp.float32
     use_bias: bool = True
     use_scale: bool = True
-    bias_init: Callable = jax.nn.initializers.zeros
-    scale_init: Callable = jax.nn.initializers.ones
+    bias_init: Callable = nn.initializers.zeros_init
+    scale_init: Callable = nn.initializers.ones_init
     reduction_axes: Axes = -1
     feature_axes: Axes = -1
     axis_name: Optional[str] = None
@@ -378,7 +378,7 @@ class MultiHeadDotProductAttention(Module):
     deterministic: Optional[bool] = None
     precision: PrecisionLike = None
     kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_kernel_init
-    bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = jax.nn.initializers.zeros_init()
+    bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = nn.initializers.zeros_init()
     use_bias: bool = True
     attention_fn: Callable[..., Array] = dot_product_attention
     decode: bool = False
@@ -523,33 +523,49 @@ class FlaxCLIPMLP(nn.Module):
 
     @nn.compact
     def __call__(self, hidden_states):
+        if self.config.ln_type in ["preln", "normformer"]:
+            hidden_states = norm(self.config.use_rmsnorm)(
+                epsilon=self.config.layer_norm_eps,
+                dtype=self.dtype,
+                use_bias=self.config.use_bias,
+                use_scale=self.config.force_scale,
+                scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+            )(hidden_states)
+            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         h1 = nn.Dense(
             self.config.intermediate_size,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
             use_bias=self.config.use_bias,
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "mlp")),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("mlp",)),
         )(hidden_states)
         h1 = ACT2FN[self.config.hidden_act](h1)
         if self.config.use_glu:
             h2 = nn.Dense(
                 self.config.intermediate_size,
                 dtype=self.dtype,
-                kernel_init=jax.nn.initializers.normal(0.01),
                 use_bias=self.config.use_bias,
+                kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "mlp")),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("mlp",)),
             )(hidden_states)
             h1 = h1 * h2
         if self.config.ln_type == "normformer":
+            h1 = nn.with_logical_constraint(h1, ("batch", "length", "embed"))
             h1 = norm(self.config.use_rmsnorm)(
                 epsilon=self.config.layer_norm_eps,
                 dtype=self.dtype,
                 use_bias=self.config.use_bias,
                 use_scale=self.config.force_scale,
+                scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("mlp",)),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp",)),
             )(h1)
         h1 = nn.Dense(
             self.config.hidden_size,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
             use_bias=self.config.use_bias,
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("mlp", "embed")),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("embed",)),
         )(h1)
         return h1
 
@@ -573,6 +589,8 @@ class FlaxCLIPEncoderLayer(nn.Module):
                 dtype=self.dtype,
                 use_bias=self.config.use_bias,
                 use_scale=self.config.force_scale,
+                scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                 name="pre_attention_layer_norm",
             )(hidden_states)
         hidden_states = MultiHeadDotProductAttention(
@@ -593,18 +611,14 @@ class FlaxCLIPEncoderLayer(nn.Module):
                 dtype=self.dtype,
                 use_bias=self.config.use_bias,
                 use_scale=True,
+                scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                 name="post_attention_layer_norm",
             )(hidden_states)
         hidden_states = residual + hidden_states
 
         # MLP
         residual = hidden_states
-        hidden_states = norm(self.config.use_rmsnorm)(
-            epsilon=self.config.layer_norm_eps,
-            dtype=self.dtype,
-            use_bias=self.config.use_bias,
-            use_scale=self.config.force_scale,
-        )(hidden_states)
         hidden_states = FlaxCLIPMLP(self.config, dtype=self.dtype)(hidden_states)
         hidden_states = residual + hidden_states
 
@@ -700,6 +714,8 @@ class FlaxCLIPTextTransformer(nn.Module):
             dtype=self.dtype,
             use_bias=self.config.use_bias,
             use_scale=self.config.force_scale,
+            scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
         )(last_hidden_state)
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
@@ -740,6 +756,8 @@ class FlaxCLIPVisionTransformer(nn.Module):
             dtype=self.dtype,
             use_bias=self.config.use_bias,
             use_scale=self.config.force_scale,
+            scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
         )(hidden_states)
 
         encoder_outputs = FlaxCLIPEncoder(self.config, dtype=self.dtype)(
@@ -757,6 +775,8 @@ class FlaxCLIPVisionTransformer(nn.Module):
             dtype=self.dtype,
             use_bias=self.config.use_bias,
             use_scale=self.config.force_scale,
+            scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
         )(pooled_output)
 
         if not return_dict:
