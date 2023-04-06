@@ -598,7 +598,6 @@ class FlaxCLIPEncoderLayer(nn.Module):
             use_rotary=(self.config.position_embedding_type == "rotary"),
             max_length=self.config.max_position_embeddings,
             dropout_rate=self.config.attention_dropout,
-            use_bias=self.config.use_bias,
             decode=self.config.use_causal_mask,
             name="attention",
         )(inputs_q=hidden_states, inputs_kv=hidden_states, mask=attention_mask, deterministic=deterministic)
