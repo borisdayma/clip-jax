@@ -1041,6 +1041,7 @@ def main():
         return jnp.mean(log_normalizers - label_logits)
 
     def clip_loss(similarity):
+        # TODO: should we increase precision for large batch, jnp.float64 may have a minimal impact on memory/speed if similarity converted only here
         loss = (cross_entropy(similarity, axis=0) + cross_entropy(similarity, axis=1)) / 2
         return loss
 

@@ -64,7 +64,7 @@ LaxPadding = Union[str, Sequence[Tuple[int, int]]]
 Axes = Union[int, Iterable[int]]
 
 # default initializers
-default_kernel_init = jax.nn.initializers.lecun_normal()
+default_kernel_init = nn.initializers.lecun_normal()
 
 
 @flax.struct.dataclass
@@ -343,16 +343,14 @@ class FlaxCLIPTextEmbeddings(nn.Module):
             self.config.vocab_size,
             embed_dim,
             embedding_init=nn.with_logical_partitioning(
-                jax.nn.initializers.normal(1 / np.sqrt(embed_dim)), ("vocab", "embed")
+                nn.initializers.normal(1 / np.sqrt(embed_dim)), ("vocab", "embed")
             ),
         )(input_ids.astype("i4"))
         embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
         if self.config.position_embedding_type == "absolute":
             position_embeds = self.param(
                 "position_embeds",
-                nn.with_logical_partitioning(
-                    jax.nn.initializers.normal(1 / np.sqrt(embed_dim)), (None, "vocab", "embed")
-                ),
+                nn.with_logical_partitioning(nn.initializers.normal(1 / np.sqrt(embed_dim)), (None, "vocab", "embed")),
                 (1, self.config.max_position_embeddings, embed_dim),
             )
             embeddings += position_embeds
@@ -1282,8 +1280,6 @@ class FlaxCLIPModule(nn.Module):
         text_config = self.config.text_config
         vision_config = self.config.vision_config
         projection_dim = self.config.projection_dim
-        text_embed_dim = text_config.hidden_size
-        vision_embed_dim = vision_config.hidden_size
 
         vision_outputs = FlaxCLIPVisionTransformer(vision_config, dtype=self.dtype)(
             pixel_values=pixel_values,
@@ -1305,23 +1301,24 @@ class FlaxCLIPModule(nn.Module):
 
         image_embeds = vision_outputs[1]
         image_embeds = nn.Dense(
-            self.projection_dim,
+            projection_dim,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.02),
             use_bias=False,
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
             name="vision_projection",
         )(image_embeds)
 
         text_embeds = text_outputs[1]
         text_embeds = nn.Dense(
-            self.projection_dim,
+            projection_dim,
             dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.02),
             use_bias=False,
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
             name="text_projection",
         )(text_embeds)
 
         # normalize features
+        # TODO: do we need a more stable version such as "lax.rsqrt(jpn.mean(lax.square(x)) + eps)"?
         def normalize(x):
             return x / jnp.linalg.norm(x, axis=-1, keepdims=True)
 
@@ -1330,8 +1327,15 @@ class FlaxCLIPModule(nn.Module):
 
         # cosine similarity as logits
         logit_scale = jnp.exp(
-            self.param("logit_scale", jax.nn.initializers.constant(self.config.logit_scale_init_value, self.dtype), [])
+            self.param(
+                "logit_scale",
+                nn.with_logical_partitioning(
+                    nn.initializers.constant(self.config.logit_scale_init_value, self.dtype), (None,)
+                ),
+                [],
+            )
         )
+
         logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
         logits_per_image = logits_per_text.T
 
