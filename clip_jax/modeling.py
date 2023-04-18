@@ -15,6 +15,7 @@
 
 import functools
 import operator
+from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import flax.linen as nn
@@ -299,6 +300,7 @@ class CLIPVisionEmbeddings(nn.Module):
                 nn.initializers.lecun_normal(), ("conv_height", "conv_width", "input_channels", "embed")
             ),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+            name="patch_embeds",
         )(pixel_values)
         patch_embeds = nn.with_logical_constraint(patch_embeds, ("batch", "height", "width", "embed"))
         batch_size, height, width, channels = patch_embeds.shape
@@ -335,6 +337,7 @@ class CLIPTextEmbeddings(nn.Module):
             embedding_init=nn.with_logical_partitioning(
                 nn.initializers.normal(1 / np.sqrt(embed_dim)), ("vocab", "embed")
             ),
+            name="embeddings",
         )(input_ids.astype("i4"))
         embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
         if self.position_embedding_type == "absolute":
@@ -526,7 +529,7 @@ class CLIPMLP(nn.Module):
                 use_scale=self.force_scale,
                 scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
-                name="pre_mlp_layer_norm",
+                name="pre_mlp_norm",
             )(inputs)
             inputs = nn.with_logical_constraint(inputs, ("batch", "length", "embed"))
         activations = []
@@ -554,10 +557,10 @@ class CLIPMLP(nn.Module):
                 use_scale=self.force_scale,
                 scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("mlp",)),
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp",)),
-                name="mid_mlp_layer_norm",
+                name="mid_mlp_norm",
             )(x)
         # Apply dropout and final dense output projection.
-        x = nn.Dropout(rate=self.mlp_dropout_rate, broadcast_dims=(-2,))(
+        x = nn.Dropout(rate=self.mlp_dropout_rate, broadcast_dims=(-2,), name="mlp_dropout")(
             x, deterministic=deterministic
         )  # Broadcast along length.
         x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
@@ -605,7 +608,7 @@ class CLIPEncoderLayer(nn.Module):
                 use_scale=self.force_scale,
                 scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
-                name="pre_attention_layer_norm",
+                name="pre_attention_norm",
             )(hidden_states)
             hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = MultiHeadDotProductAttention(
@@ -627,7 +630,7 @@ class CLIPEncoderLayer(nn.Module):
                 use_scale=True,
                 scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
-                name="post_attention_layer_norm",
+                name="post_attention_norm",
             )(hidden_states)
         hidden_states = residual + hidden_states
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
@@ -643,6 +646,7 @@ class CLIPEncoderLayer(nn.Module):
             force_scale=self.force_scale,
             use_rmsnorm=self.use_rmsnorm,
             dtype=self.dtype,
+            name="mlp",
         )(hidden_states)
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = residual + hidden_states
@@ -753,6 +757,7 @@ class CLIPTextTransformer(nn.Module):
             max_position_embeddings=self.max_position_embeddings,
             position_embedding_type=self.position_embedding_type,
             dtype=self.dtype,
+            name="embeddings",
         )(input_ids=input_ids)
 
         encoder_outputs = CLIPEncoder(
@@ -771,6 +776,7 @@ class CLIPTextTransformer(nn.Module):
             attention_dropout=self.attention_dropout,
             mlp_dropout_rate=self.mlp_dropout_rate,
             unroll=self.unroll,
+            name="encoder",
         )(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -784,6 +790,7 @@ class CLIPTextTransformer(nn.Module):
             use_scale=self.force_scale,
             scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+            name="final_norm",
         )(last_hidden_state)
         last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
@@ -810,6 +817,7 @@ class CLIPTextTransformer(nn.Module):
 
 
 class CLIPVisionTransformer(nn.Module):
+    image_size: int
     hidden_size: int
     patch_size: int
     num_layers: int
@@ -832,9 +840,17 @@ class CLIPVisionTransformer(nn.Module):
         pixel_values=None,
         deterministic: bool = True,
     ):
+        batch, height, width, channels = pixel_values.shape
+        assert (
+            height == self.image_size and width == self.image_size and channels == 3
+        ), f"Input image size ({height}*{width}) doesn't match model ({self.image_size}*{self.image_size})."
         position_embedding_type = "absolute"  # for vision it makes more sense than rotary
         hidden_states = CLIPVisionEmbeddings(
-            hidden_size=self.hidden_size, use_bias=self.use_bias, patch_size=self.patch_size, dtype=self.dtype
+            hidden_size=self.hidden_size,
+            use_bias=self.use_bias,
+            patch_size=self.patch_size,
+            dtype=self.dtype,
+            name="embeddings",
         )(pixel_values)
         hidden_states = norm(self.use_rmsnorm)(
             dtype=self.dtype,
@@ -842,6 +858,7 @@ class CLIPVisionTransformer(nn.Module):
             use_scale=self.force_scale,
             scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+            name="post_embed_norm",
         )(hidden_states)
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         max_position_embeddings = hidden_states.shape[1]
@@ -861,6 +878,7 @@ class CLIPVisionTransformer(nn.Module):
             attention_dropout=self.attention_dropout,
             mlp_dropout_rate=self.mlp_dropout_rate,
             unroll=self.unroll,
+            name="encoder",
         )(
             hidden_states=hidden_states,
             deterministic=deterministic,
@@ -879,6 +897,7 @@ class CLIPVisionTransformer(nn.Module):
             use_scale=self.force_scale,
             scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+            name="final_norm",
         )(pooled_output)
         pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
@@ -1183,3 +1202,18 @@ class CLIPModel(nn.Module):
             text_model_output=text_outputs,
             vision_model_output=vision_outputs,
         )
+
+    @classmethod
+    def init_inputs(cls, rng: jax.random.PRNGKey, config):
+        text_config = config.text_config
+        vision_config = config.vision_config
+        if isinstance(text_config, dict):
+            text_config = SimpleNamespace(**text_config)
+        if isinstance(vision_config, dict):
+            vision_config = SimpleNamespace(**vision_config)
+        input_ids = jnp.ones((1, text_config.max_position_embeddings), dtype="i4")
+        attention_mask = jnp.ones((1, text_config.max_position_embeddings), dtype="i4")
+        pixel_values = jnp.ones((1, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
+        params_rng, dropout_rng = jax.random.split(rng)
+        rngs = {"params": params_rng, "dropout": dropout_rng}
+        return {"rngs": rngs, "input_ids": input_ids, "pixel_values": pixel_values, "attention_mask": attention_mask}
