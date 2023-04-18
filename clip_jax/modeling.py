@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import functools
 import operator
 from types import SimpleNamespace
@@ -1121,7 +1122,20 @@ class CLIPModel(nn.Module):
     vision_config: Any
     projection_dim: int
     logit_scale_init_value: float = 2.6592
-    dtype: jnp.dtype = None
+    dtype: jnp.dtype = jnp.float32
+
+    def __post_init__(self):
+        # add default fields text_config
+        default_fields = dataclasses.fields(CLIPTextTransformer)
+        default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
+        default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
+        self.text_config = {**default_fields, **self.text_config}
+        # add default fields vision_config
+        default_fields = dataclasses.fields(CLIPVisionTransformer)
+        default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
+        default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
+        self.vision_config = {**default_fields, **self.vision_config}
+        return super().__post_init__()
 
     @nn.compact
     def __call__(
