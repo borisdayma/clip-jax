@@ -743,7 +743,7 @@ class CLIPTextTransformer(nn.Module):
     mlp_dropout_rate: float = 0.0
     unroll: int = 100  # unroll scan layers
     eos_token_id: int = -1
-    dtype: Dtype
+    dtype: str = "float32"
 
     @nn.compact
     def __call__(
@@ -752,12 +752,13 @@ class CLIPTextTransformer(nn.Module):
         attention_mask,
         deterministic: bool = True,
     ):
+        dtype = getattr(jnp, self.dtype)
         hidden_states = CLIPTextEmbeddings(
             hidden_size=self.hidden_size,
             vocab_size=self.vocab_size,
             max_position_embeddings=self.max_position_embeddings,
             position_embedding_type=self.position_embedding_type,
-            dtype=self.dtype,
+            dtype=dtype,
             name="embeddings",
         )(input_ids=input_ids)
 
@@ -770,7 +771,7 @@ class CLIPTextTransformer(nn.Module):
             max_position_embeddings=self.max_position_embeddings,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
-            dtype=self.dtype,
+            dtype=dtype,
             activations=self.activations,
             use_bias=self.use_bias,
             force_scale=self.force_scale,
@@ -786,7 +787,7 @@ class CLIPTextTransformer(nn.Module):
         last_hidden_state = encoder_outputs["last_hidden_state"]
         last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
         last_hidden_state = norm(self.use_rmsnorm)(
-            dtype=self.dtype,
+            dtype=dtype,
             use_bias=self.use_bias,
             use_scale=self.force_scale,
             scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
@@ -827,7 +828,7 @@ class CLIPVisionTransformer(nn.Module):
     num_heads: int
     use_causal_mask: bool
     mlp_dim: int
-    dtype: Dtype = jnp.float32
+    dtype: str = "float32"
     activations: Sequence[Union[str, Callable]] = ("relu",)
     use_bias: bool = False
     force_scale: bool = False
@@ -841,6 +842,7 @@ class CLIPVisionTransformer(nn.Module):
         pixel_values=None,
         deterministic: bool = True,
     ):
+        dtype = getattr(jnp, self.dtype)
         batch, height, width, channels = pixel_values.shape
         assert (
             height == self.image_size and width == self.image_size and channels == 3
@@ -850,11 +852,11 @@ class CLIPVisionTransformer(nn.Module):
             hidden_size=self.hidden_size,
             use_bias=self.use_bias,
             patch_size=self.patch_size,
-            dtype=self.dtype,
+            dtype=dtype,
             name="embeddings",
         )(pixel_values)
         hidden_states = norm(self.use_rmsnorm)(
-            dtype=self.dtype,
+            dtype=dtype,
             use_bias=self.use_bias,
             use_scale=self.force_scale,
             scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
@@ -872,7 +874,7 @@ class CLIPVisionTransformer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
-            dtype=self.dtype,
+            dtype=dtype,
             activations=self.activations,
             use_bias=self.use_bias,
             force_scale=self.force_scale,
@@ -893,7 +895,7 @@ class CLIPVisionTransformer(nn.Module):
         pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         pooled_output = norm(self.use_rmsnorm)(
-            dtype=self.dtype,
+            dtype=dtype,
             use_bias=self.use_bias,
             use_scale=self.force_scale,
             scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
@@ -1122,7 +1124,7 @@ class CLIPModel(nn.Module):
     vision_config: Any
     projection_dim: int
     logit_scale_init_value: float = 2.6592
-    dtype: jnp.dtype = jnp.float32
+    dtype: str = "float32"
 
     def __post_init__(self):
         # add default fields text_config
@@ -1145,11 +1147,12 @@ class CLIPModel(nn.Module):
         attention_mask=None,
         deterministic: bool = True,
     ):
-        vision_config = self.vision_config
-        text_config = self.text_config
+        vision_config = unfreeze(self.vision_config)
+        text_config = unfreeze(self.text_config)
         if self.dtype is not None:
             vision_config["dtype"] = self.dtype
             text_config["dtype"] = self.dtype
+        dtype = getattr(jnp, self.dtype)
 
         vision_outputs = CLIPVisionTransformer(
             **vision_config,
@@ -1171,7 +1174,7 @@ class CLIPModel(nn.Module):
         image_embeds = vision_outputs["pooled_output"]
         image_embeds = nn.Dense(
             self.projection_dim,
-            dtype=self.dtype,
+            dtype=dtype,
             use_bias=False,
             kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
             name="vision_projection",
@@ -1180,7 +1183,7 @@ class CLIPModel(nn.Module):
         text_embeds = text_outputs["pooled_output"]
         text_embeds = nn.Dense(
             self.projection_dim,
-            dtype=self.dtype,
+            dtype=dtype,
             use_bias=False,
             kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
             name="text_projection",
@@ -1198,9 +1201,7 @@ class CLIPModel(nn.Module):
         logit_scale = jnp.exp(
             self.param(
                 "logit_scale",
-                nn.with_logical_partitioning(
-                    nn.initializers.constant(self.logit_scale_init_value, self.dtype), (None,)
-                ),
+                nn.with_logical_partitioning(nn.initializers.constant(self.logit_scale_init_value, dtype), (None,)),
                 [],
             )
         )
