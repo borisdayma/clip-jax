@@ -33,17 +33,28 @@ import enum
 import functools
 import itertools
 import logging
-from typing import Any, Callable, cast, List, NamedTuple, Optional, Sequence, Tuple, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+)
 
 import chex
-from flax import struct
 import jax
-from jax import lax
-from jax.experimental import pjit
-from jax.experimental.sparse import linalg
 import jax.numpy as jnp
 import numpy as np
 import optax
+from flax import struct
+from jax import lax
+from jax.experimental import pjit
+from jax.experimental.sparse import linalg
 
 from .quantization_utils import QuantizedValue
 
@@ -550,7 +561,6 @@ def matrix_inverse_pth_root(
         iters = 0
         error_ratio = 0.0
     else:
-
         retry_loop_error_threshold = 0.05
         num_tries = 6
         init_outer_state = tuple([0, identity, 1000.0, 100, 1.0, True])
@@ -843,7 +853,7 @@ class BlockPartitioner:
 
         assert tensor.shape == self._shape
         tensors = [tensor]
-        for (i, indices) in self._splits:
+        for i, indices in self._splits:
             tensors_local = []
             for t in tensors:
                 tensors_local.extend(jnp.split(t, indices_or_sections=indices, axis=i))
@@ -853,7 +863,7 @@ class BlockPartitioner:
     def merge_partitions(self, partitions):
         """Merge partitions back to original shape."""
 
-        for (i, indices) in reversed(self._splits):
+        for i, indices in reversed(self._splits):
             n = len(indices) + 1
             partial_merged_tensors = []
             ind = 0
@@ -2494,7 +2504,6 @@ def distributed_shampoo(
         new_diagonal_statistics = state.diagonal_statistics.to_float()
 
         if graft_type == GraftingType.ADAGRAD or graft_type == GraftingType.ADAGRAD_NORMALIZED:
-
             scaled_grad = grad
             if graft_type == GraftingType.ADAGRAD_NORMALIZED:
                 scaled_grad = grad / (jnp.linalg.norm(grad) + _EPSILON)
@@ -2503,7 +2512,6 @@ def distributed_shampoo(
             adagrad_update = scaled_grad / (jnp.sqrt(new_diagonal_statistics) + diagonal_epsilon)
             grafting_update = adagrad_update
         elif graft_type == GraftingType.RMSPROP or graft_type == GraftingType.RMSPROP_NORMALIZED:
-
             scaled_grad = grad
             if graft_type == GraftingType.RMSPROP_NORMALIZED:
                 scaled_grad = grad / (jnp.linalg.norm(grad) + _EPSILON)

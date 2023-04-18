@@ -252,7 +252,6 @@ def logical_to_mesh_axes(
     array_dim_names,
     rules=None,
 ):
-
     result = _logical_to_mesh_axes(array_dim_names, rules)
     if result is None:
         return None

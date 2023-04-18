@@ -21,7 +21,7 @@ from typing import Union
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
-from .utils import PretrainedFromWandbMixin
+from .wandb_utils import WandbMixin
 
 logger = logging.get_logger(__name__)
 
@@ -101,7 +101,7 @@ class CLIPTextConfig(PretrainedConfig):
         return cls.from_dict(config_dict, **kwargs)
 
 
-class CLIPVisionConfig(PretrainedFromWandbMixin, PretrainedConfig):
+class CLIPVisionConfig(WandbMixin, PretrainedConfig):
     model_type = "clip_jax_vision_model"
 
     def __init__(
