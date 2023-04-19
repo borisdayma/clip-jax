@@ -1,11 +1,10 @@
-import io
+import json
 import logging
 import os
 import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
-from flax.training import checkpoints
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -15,6 +14,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 import flax
 import flax.linen as nn
+import fsspec
 import jax
 import jax.numpy as jnp
 import jaxlib
@@ -25,14 +25,12 @@ import tensorflow as tf
 import tensorflow_io as tfio
 import transformers
 import wandb
-from flax import core, struct
 from flax.core import freeze, unfreeze
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
-from flax.serialization import from_bytes, to_bytes
+from flax.training import checkpoints
 from flax.traverse_util import flatten_dict, unflatten_dict
-from huggingface_hub import Repository
 from jax import numpy as jnp
-from jax.experimental import PartitionSpec, maps
+from jax.experimental import PartitionSpec, multihost_utils
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.mesh_utils import create_device_mesh
 from jax.experimental.pjit import pjit, with_sharding_constraint
@@ -40,9 +38,11 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser
-from transformers.utils import get_full_repo_name
 
+from clip_jax import CLIPModel
+from clip_jax.data import Dataset
 from clip_jax.partitions import logical_axis_rules
+from clip_jax.tokenizer import AutoTokenizer
 from clip_jax.utils import count_params, load_config
 
 try:
@@ -50,11 +50,6 @@ try:
 except:
     storage = None
 
-
-from clip_jax import CLIPModel
-from clip_jax.data import Dataset
-from clip_jax.modeling import AutoTokenizer
-from clip_jax.partitions import set_partitions
 
 logger = logging.getLogger(__name__)
 
@@ -1222,218 +1217,181 @@ def main():
         print(f"Eval metrics: {metrics}")
 
     def run_save_model(params, opt_state):
+        keep_checkpoints = 100_000
+        start_save_time = time.perf_counter()
+        # save config
         if jax.process_index() == 0:
-            start_save_time = time.perf_counter()
-            output_dir = training_args.output_dir
-            use_bucket = output_dir.startswith("gs://")
-            if use_bucket:
-                bucket_path = Path(output_dir[5:]) / wandb.run.id / f"step_{state.step}"
-                bucket, dir_path = str(bucket_path).split("/", 1)
-                tmp_dir = tempfile.TemporaryDirectory()
-                output_dir = tmp_dir.name
+            config_path = f"{training_args.output_dir}/config.json"
+            with fsspec.open(config_path, "w") as f:
+                json.dump(clipConfig, f, indent=2)
+        multihost_utils.sync_global_devices("save_config")
+        # save model
+        if params is not None:
+            checkpoints.save_checkpoint_multiprocess(
+                training_args.output_dir,
+                params,
+                prefix="model_",
+                step=state.step,
+                overwrite=True,
+                keep=keep_checkpoints,
+                orbax_checkpointer=orbax_checkpointer,
+            )
+        # save opt_state
+        checkpoints.save_checkpoint_multiprocess(
+            training_args.output_dir,
+            opt_state,
+            prefix="opt_state_",
+            step=state.step,
+            overwrite=True,
+            keep=keep_checkpoints,
+            orbax_checkpointer=orbax_checkpointer,
+        )
+        # save config
+        if jax.process_index() == 0:
+            artifact = wandb.Artifact(
+                name=f"config-{wandb.run.id}",
+                type="config",
+                metadata={"output_dir": training_args.output_dir, **state.to_dict()},
+            )
+            with artifact.new_file("config.json", mode="w", encoding="utf-8") as f:
+                json.dump(clipConfig, f, indent=2)
+            with artifact.new_file("state.json", mode="w", encoding="utf-8") as f:
+                json.dump(state.to_dict(), f)
+            wandb.run.log_artifact(artifact)
+            # TODO: use artifact.add_reference(path) ref to save model and opt_state?
 
-            # save model
-            params = jax.device_get(state.params)
-            model.save_pretrained(output_dir, params=params)
+        # update timing
+        state.add_time("save", time.perf_counter() - start_save_time)
+        state.log({})
 
-            # save tokenizer
-            tokenizer.save_pretrained(output_dir)
+    # Init training variables
+    evaluation_ran, save_model_ran, metrics_logged = False, False, False
+    profile_start, profile_end = 3, 6
+    step, samples = state.step, state.samples  # separate copies for timing metrics
+    opt_state_step = 0  # ensure it is defined in evaluation mode
+    step_start = step  # define it for test mode
+    metrics = {}  # ensure it is defined in evaluation mode
+    eval_rng, rng = jax.random.split(rng)  # keep a constistent rng for evaluation
+    epochs = tqdm(
+        range(training_args.num_train_epochs),
+        desc=f"Epoch ... (1/{training_args.num_train_epochs})",
+        position=0,
+        disable=jax.process_index() > 0,
+    )
 
-            # copy to bucket
-            if use_bucket:
-                client = storage.Client()
-                bucket = client.bucket(bucket)
-                for filename in Path(output_dir).glob("*"):
-                    blob_name = str(Path(dir_path) / "model" / filename.name)
-                    blob = bucket.blob(blob_name)
-                    blob.upload_from_filename(str(filename))
-                tmp_dir.cleanup()
+    # Training loop
+    logger.info("***** Running training *****")
+    for epoch in epochs:
+        state.update(epoch=epoch)
+        state.log({})
 
-            # save state
-            opt_state = jax.device_get(state.opt_state)
-            if use_bucket:
-                blob_name = str(Path(dir_path) / "state" / "opt_state.msgpack")
-                blob = bucket.blob(blob_name)
-                blob.upload_from_file(io.BytesIO(to_bytes(opt_state)))
-            else:
-                with (Path(output_dir) / "opt_state.msgpack").open("wb") as f:
-                    f.write(to_bytes(opt_state))
+        # train
+        if training_args.do_train:
+            for batch in tqdm(
+                dataset.train,
+                desc="Training...",
+                position=1,
+                leave=False,
+                disable=jax.process_index() > 0,
+            ):
+                # reset control variables
+                evaluation_ran, save_model_ran, metrics_logged = False, False, False
 
-            # save to HF hub
-            if training_args.push_to_hub:
-                repo.push_to_hub(
-                    commit_message=f"Saving weights and logs of epoch {epoch}",
-                    blocking=False,
+                # preprocess batch
+                captions = [caption.decode("utf-8") for caption in batch[1]]
+                txt_inputs = tokenizer(
+                    captions,
+                    padding="max_length",
+                    truncation=True,
+                    max_length=model.config.text_config.max_position_embeddings,
+                    return_tensors="np",
+                )
+                # keep only input_ids and attention_mask
+                txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
+                batch = {"pixel_values": batch[0], **txt_inputs}
+
+                # reshape batch
+                if data_global_shape is None:
+                    data_global_shape = jax.tree_map(_get_global_shape, batch)
+
+                # split per device
+                batch = jax.tree_map(lambda x: np.split(x, num_local_devices, axis=0), batch)
+
+                # put data on device
+                batch = jax.tree_map(
+                    lambda x: [jax.device_put(arr, d) for arr, d in zip(x, local_addressable_devices)],
+                    batch,
+                    is_leaf=lambda x: isinstance(x, list),
                 )
 
-            # save to W&B
-            if training_args.log_model:
-                # save some space
-                c = wandb.wandb_sdk.wandb_artifacts.get_artifacts_cache()
-                c.cleanup(wandb.util.from_human_size("10GB"))
-
-                metadata = {
-                    k: jax.device_get(getattr(state, k)).item()
-                    for k in ["step", "epoch", "train_time", "train_samples"]
-                }
-                metadata["num_params"] = num_params
-                if eval_metrics is not None:
-                    metadata["eval"] = eval_metrics
-
-                # create model artifact
-                if use_bucket:
-                    metadata["bucket_path"] = f"gs://{bucket_path}/model"
-                artifact = wandb.Artifact(
-                    name=f"model-{wandb.run.id}",
-                    type="CLIP",
-                    metadata=metadata,
+                # create global array
+                batch = jax.tree_map(
+                    lambda shape, data: jax.make_array_from_single_device_arrays(shape, data_global_sharding, data),
+                    data_global_shape,
+                    batch,
+                    is_leaf=lambda x: isinstance(x, (list, tuple)),
                 )
-                if use_bucket:
-                    artifact.add_reference(metadata["bucket_path"])
-                else:
-                    for filename in [
-                        "config.json",
-                        "flax_model.msgpack",
-                        # tokenizer
-                        "tokenizer_config.json",
-                        "special_tokens_map.json",
-                        "vocab.json",
-                        "merges.txt",
-                        "added_tokens.json",
-                        "tokenizer.json",
-                    ]:
-                        if (Path(training_args.output_dir) / filename).exists():
-                            artifact.add_file(Path(training_args.output_dir) / filename)
-                        artifact.add_file(f"{Path(training_args.output_dir) / filename}")
-                wandb.run.log_artifact(artifact)
 
-                # create state artifact
-                if use_bucket:
-                    metadata["bucket_path"] = f"gs://{bucket_path}/state"
-                artifact_state = wandb.Artifact(
-                    name=f"state-{wandb.run.id}",
-                    type="state",
-                    metadata=metadata,
-                )
-                if use_bucket:
-                    artifact_state.add_reference(metadata["bucket_path"])
-                else:
-                    artifact_state.add_file(f"{Path(training_args.output_dir) / 'opt_state.msgpack'}")
-                wandb.run.log_artifact(artifact_state)
-            metrics_logger.log_time("save_model", time.perf_counter() - start_save_time)
+                # reshard per mesh
+                with mesh:
+                    batch = reshard_data(batch)
 
-    # defragment memory
-    jax.lib.xla_bridge.get_backend().defragment()
-
-    logger.info("  Ready to start training")
-    with mesh:
-        for epoch in epochs:
-            state = state.replace(epoch=epoch)
-            local_state["epoch"] = epoch
-            # ======================== Training ================================
-            metrics_logger.update_state_metrics(local_state)
-            metrics_logger.log({})
-
-            # train
-            if training_args.do_train:
-                for batch in tqdm(
-                    dataset.train,
-                    desc="Training...",
-                    position=1,
-                    leave=False,
-                    disable=jax.process_index() > 0,
-                ):
-                    # calculate delta time (we have a lag of one step but it's ok)
-                    train_time = time.perf_counter() - start_time
-
-                    # reset control variables
-                    evaluation_ran = False
-                    save_model_ran = False
-
-                    # set correct shape to batch
-                    bs_shape = (
-                        (training_args.batch_size_per_node * training_args.node_groups,)
-                        if not training_args.use_vmap_trick
-                        else (
-                            training_args.local_dp_devices,
-                            training_args.batch_size_per_local_dp_device,
-                        )
-                    )
-                    if training_args.gradient_accumulation_steps > 1:
-                        # reshape data into (gradient_accumulation_steps, batch_per_node, ...)
-                        # to avoid any data redistribution when sharding
-                        bs_shape = (training_args.gradient_accumulation_steps,) + bs_shape
-
-                    # preprocess batch
-                    captions = [caption.decode("utf-8") for caption in batch[1]]
-                    txt_inputs = tokenizer(
-                        captions,
-                        padding="max_length",
-                        truncation=True,
-                        max_length=model.config.text_config.max_position_embeddings,
-                        return_tensors="np",
-                    )
-                    # keep only input_ids and attention_mask
-                    txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
-                    batch = {"pixel_values": batch[0], **txt_inputs}
-
-                    # reshape batch
-                    batch = jax.tree_util.tree_map(
-                        lambda x: x.reshape(bs_shape + x.shape[1:]),
-                        batch,
-                    )
-
-                    # optional profile
-                    if training_args.do_profile and local_state["step"] == profile_step:
-                        # blocking operation
-                        jax.block_until_ready(state.params)
+                # optional profile - TODO: not very clean
+                if training_args.do_profile:
+                    if step == profile_start:
+                        jax.block_until_ready(params)
                         jax.profiler.start_trace("./profiles")
-
-                    # train step
-                    state, train_metrics = p_train_step(state, batch, train_time)
-
-                    # end profile
-                    if training_args.do_profile and local_state["step"] == profile_step:
-                        # blocking operation
-                        jax.block_until_ready(state.params)
+                    elif step == profile_end:
+                        jax.block_until_ready(params)
                         jax.profiler.stop_trace()
 
-                    # update local state
-                    local_state["step"] += 1
-                    local_state["train_time"] = train_time
-                    local_state["train_samples"] += training_args.batch_size_per_step
+                # train step
+                step_rng, rng = jax.random.split(rng)
+                with mesh:
+                    metrics, params, opt_state, opt_state_step = p_train_step(step_rng, params, opt_state, batch, step)
+                step += 1
+                samples += training_args.batch_size_per_step
 
-                    if local_state["step"] % training_args.logging_steps == 0 and jax.process_index() == 0:
-                        metrics_logger.update_state_metrics(local_state)
-                        metrics_logger.log(train_metrics, prefix="train")
+                # log metrics
+                if step % training_args.logging_steps == 0:
+                    state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+                    if jax.process_index() == 0:
+                        state.log(metrics)
+                    metrics_logged = True
 
-                    eval_metrics = None
-                    if local_state["step"] % training_args.eval_steps == 0:
-                        eval_metrics = run_evaluation()
-                        evaluation_ran = True
+                # evaluation
+                if training_args.do_eval and step % training_args.eval_steps == 0:
+                    state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+                    run_evaluation(eval_rng, params, mesh)
+                    evaluation_ran = True
 
-                    if local_state["step"] % training_args.save_steps == 0:
-                        run_save_model(state, eval_metrics)
-                        save_model_ran = True
+                # save model
+                if step % training_args.save_steps == 0:
+                    state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+                    run_save_model(params, opt_state)
+                    save_model_ran = True
 
-                # log final train metrics
-                if train_metrics is not None:
-                    metrics_logger.update_state_metrics(local_state)
-                    metrics_logger.log(train_metrics, prefix="train")
+                # end test
+                if training_args.do_test_steps and (step - step_start >= training_args.do_test_steps):
+                    # terminate script
+                    print("Test successful")
+                    return
 
-                    epochs.write(
-                        f"Epoch... ({epoch + 1}/{num_epochs} | Loss:"
-                        f" {train_metrics['loss']}, Learning Rate:"
-                        f" {train_metrics['learning_rate']})"
-                    )
+        # log final metrics
+        if not metrics_logged:
+            state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+            if jax.process_index() == 0:
+                state.log(metrics)
 
-            # Final evaluation at the end of each epoch
-            if not evaluation_ran:
-                eval_metrics = run_evaluation()
+        # run final evaluation
+        if training_args.do_eval and not evaluation_ran:
+            state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+            run_evaluation(eval_rng, params, mesh)
 
-            # save checkpoint after each epoch
-            if not save_model_ran:
-                run_save_model(state, eval_metrics)
+        # save final model
+        if not save_model_ran:
+            state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+            run_save_model(params, opt_state)
 
 
 if __name__ == "__main__":
