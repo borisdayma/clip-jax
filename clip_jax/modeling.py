@@ -839,7 +839,7 @@ class CLIPVisionTransformer(nn.Module):
     @nn.compact
     def __call__(
         self,
-        pixel_values=None,
+        pixel_values,
         deterministic: bool = True,
     ):
         dtype = getattr(jnp, self.dtype)
@@ -1080,7 +1080,7 @@ class CLIPVisionModelForImageClassification(nn.Module):
         deterministic: bool = True,
     ):
         outputs = CLIPVisionTransformer(**self.vision_config, dtype=self.dtype)(
-            pixel_values,
+            pixel_values=pixel_values,
             deterministic=deterministic,
         )
 
@@ -1142,9 +1142,9 @@ class CLIPModel(nn.Module):
     @nn.compact
     def __call__(
         self,
-        input_ids=None,
-        pixel_values=None,
-        attention_mask=None,
+        input_ids,
+        pixel_values,
+        attention_mask,
         deterministic: bool = True,
     ):
         vision_config = unfreeze(self.vision_config)
