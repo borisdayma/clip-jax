@@ -742,6 +742,7 @@ class CLIPTextTransformer(nn.Module):
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
     unroll: int = 100  # unroll scan layers
+    gradient_checkpointing: bool = True
     eos_token_id: int = -1
     dtype: str = "float32"
 
@@ -778,6 +779,7 @@ class CLIPTextTransformer(nn.Module):
             attention_dropout=self.attention_dropout,
             mlp_dropout_rate=self.mlp_dropout_rate,
             unroll=self.unroll,
+            gradient_checkpointing=self.gradient_checkpointing,
             name="encoder",
         )(
             hidden_states=hidden_states,
@@ -835,6 +837,7 @@ class CLIPVisionTransformer(nn.Module):
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
     unroll: int = 100  # unroll scan layers
+    gradient_checkpointing: bool = True
 
     @nn.compact
     def __call__(
@@ -881,6 +884,7 @@ class CLIPVisionTransformer(nn.Module):
             attention_dropout=self.attention_dropout,
             mlp_dropout_rate=self.mlp_dropout_rate,
             unroll=self.unroll,
+            gradient_checkpointing=self.gradient_checkpointing,
             name="encoder",
         )(
             hidden_states=hidden_states,
@@ -1202,7 +1206,7 @@ class CLIPModel(nn.Module):
             self.param(
                 "logit_scale",
                 nn.with_logical_partitioning(nn.initializers.constant(self.logit_scale_init_value, dtype), (None,)),
-                [],
+                (1,),
             )
         )
 
@@ -1218,8 +1222,7 @@ class CLIPModel(nn.Module):
             vision_model_output=vision_outputs,
         )
 
-    @classmethod
-    def init_inputs(cls, rng: jax.random.PRNGKey, config):
+    def init_inputs(config, rng: jax.random.PRNGKey):
         text_config = config.text_config
         vision_config = config.vision_config
         if isinstance(text_config, dict):
