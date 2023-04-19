@@ -1,26 +1,28 @@
-import os
-
-# TODO: required before importing jax, until we can figure out how to be compatible with new API
-os.environ["JAX_JIT_PJIT_API_MERGE"] = "0"
-
-
 import io
 import logging
+import os
 import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
+from flax.training import checkpoints
 from enum import Enum
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, List, NamedTuple, Optional
+from platform import python_version
+from pprint import pformat
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 import flax
+import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import jaxlib
 import numpy as np
 import optax
+import orbax
+import tensorflow as tf
+import tensorflow_io as tfio
 import transformers
 import wandb
 from flax import core, struct
@@ -32,12 +34,16 @@ from huggingface_hub import Repository
 from jax import numpy as jnp
 from jax.experimental import PartitionSpec, maps
 from jax.experimental.compilation_cache import compilation_cache as cc
+from jax.experimental.mesh_utils import create_device_mesh
 from jax.experimental.pjit import pjit, with_sharding_constraint
-from jax.sharding import Mesh, PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser
 from transformers.utils import get_full_repo_name
+
+from clip_jax.partitions import logical_axis_rules
+from clip_jax.utils import count_params, load_config
 
 try:
     from google.cloud import storage
@@ -45,27 +51,18 @@ except:
     storage = None
 
 
-from clip_jax import CLIPConfig, FlaxCLIPModel
+from clip_jax import CLIPModel
 from clip_jax.data import Dataset
 from clip_jax.modeling import AutoTokenizer
 from clip_jax.partitions import set_partitions
 
 logger = logging.getLogger(__name__)
 
-# jax flags
-use_jax_arrays = False
-if use_jax_arrays:
-    jax.config.update("jax_threefry_partitionable", True)
-    jax.config.update("jax_array", True)
-    # jax.config.update("jax_distributed_debug", True)
-else:
-    jax.config.update("jax_array", False)
-
 
 @dataclass
 class TrainingArguments:
     output_dir: str = field(
-        metadata={"help": ("The output directory where the model predictions and checkpoints will" " be written.")},
+        metadata={"help": ("The output directory where the model predictions and checkpoints will be written.")},
     )
     overwrite_output_dir: bool = field(
         default=False,
@@ -97,7 +94,7 @@ class TrainingArguments:
         metadata={"help": "Beta1 for Adam & Distributed Shampoo."},
     )
     beta2: float = field(
-        default=0.999,
+        default=0.99,
         metadata={"help": "Beta2 for for Adam & Distributed Shampoo."},
     )
     adam_epsilon: float = field(default=1e-8, metadata={"help": "Epsilon for AdamW optimizer."})
@@ -106,7 +103,7 @@ class TrainingArguments:
         metadata={"help": "Chunked size for large layers with Distributed Shampoo."},
     )
     preconditioning_compute_steps: int = field(
-        default=10, metadata={"help": "Number of steps to update preconditioner."}
+        default=20, metadata={"help": "Number of steps to update preconditioner."}
     )
     skip_preconditioning_dim_size_gt: int = field(
         default=4096,
@@ -132,9 +129,7 @@ class TrainingArguments:
     shard_shampoo_across: str = field(
         default="data",
         metadata={
-            "help": (
-                "Whether to shard the optimizer across data devices (data), model devices" " (model) or both (2d)."
-            )
+            "help": ("Whether to shard the optimizer across data devices (data), model devices (model) or both (2d).")
         },
     )
     activation_partitioning_dims: int = field(
@@ -148,25 +143,12 @@ class TrainingArguments:
     lr_decay: str = field(
         default=None,
         metadata={
-            "help": (
-                "Decay to be used in the learning rate scheduler. Can be None" " (default), linear or exponential."
-            )
-        },
-    )
-    num_train_steps: int = field(
-        default=None,
-        metadata={
-            "help": (
-                "Total number of training steps to perform. Required only when defining"
-                " using linear learning rate decay."
-            )
+            "help": ("Decay to be used in the learning rate scheduler. Can be None, linear, cosine or exponential.")
         },
     )
     lr_transition_steps: int = field(
         default=None,
-        metadata={
-            "help": ("Number of transition steps associated with learning rate decay when" " using exponential decay.")
-        },
+        metadata={"help": ("Number of transition steps associated with learning rate decay when applicable.")},
     )
     lr_decay_rate: float = field(
         default=None,
@@ -174,19 +156,15 @@ class TrainingArguments:
     )
     lr_staircase: bool = field(
         default=False,
-        metadata={"help": ("Whether to use staircase or continuous learning rate when using" " exponential decay.")},
+        metadata={"help": ("Whether to use staircase or continuous learning rate when using exponential decay.")},
     )
     lr_offset: int = field(
         default=0,
         metadata={"help": "Number of steps to offset learning rate and keep it at 0."},
     )
-    logging_steps: int = field(default=40, metadata={"help": "Log every X updates steps."})
-    eval_steps: int = field(default=400, metadata={"help": "Run an evaluation every X steps."})
-    save_steps: int = field(default=4000, metadata={"help": "Save checkpoint every X updates steps."})
-    log_model: bool = field(
-        default=False,
-        metadata={"help": "Log model to wandb at `save_steps` frequency."},
-    )
+    logging_steps: int = field(default=50, metadata={"help": "Log every X updates steps."})
+    eval_steps: int = field(default=500, metadata={"help": "Run an evaluation every X steps."})
+    save_steps: int = field(default=None, metadata={"help": "Save checkpoint every X updates steps."})
     log_norm: bool = field(
         default=True,
         metadata={"help": "Log parameters and gradients norm at this frequency."},
@@ -214,24 +192,9 @@ class TrainingArguments:
         metadata={"help": "The name of the wandb job type."},
     )
 
-    push_to_hub: bool = field(
-        default=False,
-        metadata={"help": ("Whether or not to upload the trained model to the model hub after" " training.")},
-    )
-    hub_model_id: str = field(
-        default=None,
-        metadata={"help": ("The name of the repository to keep in sync with the local" " `output_dir`.")},
-    )
-    hub_token: str = field(default=None, metadata={"help": "The token to use to push to the Model Hub."})
-
     assert_TPU_available: bool = field(
         default=False,
         metadata={"help": "Verify that TPU is not in use."},
-    )
-
-    use_vmap_trick: bool = field(
-        default=False,
-        metadata={"help": "Optimization trick that should lead to faster training."},
     )
 
     mp_devices: Optional[int] = field(
@@ -248,14 +211,15 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Profile performance of training loop."},
     )
+    do_test_steps: int = field(
+        default=False,
+        metadata={"help": "Run script for only a few steps."},
+    )
 
     dp_devices: int = field(init=False)
-    local_dp_devices: int = field(init=False)
-    node_groups: int = field(init=False)
     batch_size_per_step: int = field(init=False)
     train_batch_size: int = field(init=False)
     valid_batch_size: int = field(init=False)
-    valid_batch_size_per_step: int = field(init=False)
     log_norm_steps: int = field(init=False)
 
     def __post_init__(self):
@@ -317,37 +281,12 @@ class TrainingArguments:
             f" number of devices used for model parallelism ({self.mp_devices})."
         )
         self.dp_devices = jax.device_count() // self.mp_devices
-        # consider batch distributed across nodes (model > local devices)
-        self.node_groups = max(1, self.mp_devices // jax.local_device_count())
-        # local data devices (1 when model > local devices)
-        self.local_dp_devices = jax.local_device_count() * self.node_groups // self.mp_devices
         # batch sizes
-        assert self.batch_size_per_node % self.local_dp_devices == 0, (
-            f"Batch size per node ({self.batch_size_per_node}) must be divisible by"
-            f" number of local devices ({jax.local_device_count()})."
-        )
         batch_size_per_node_per_step = self.batch_size_per_node * self.gradient_accumulation_steps
         self.batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
-        self.batch_size_per_local_dp_device = self.batch_size_per_node // self.local_dp_devices
         # define batch size for data loader
-        self.train_batch_size = batch_size_per_node_per_step * self.node_groups
-        self.valid_batch_size = self.batch_size_per_node * self.node_groups
-        self.valid_batch_size_per_step = self.batch_size_per_node * jax.process_count()
-
-    def to_dict(self):
-        """
-        Serializes this instance while replace `Enum` by their values (for JSON serialization support). It obfuscates
-        the token values by removing their value.
-        """
-        d = asdict(self)
-        for k, v in d.items():
-            if isinstance(v, Enum):
-                d[k] = v.value
-            if isinstance(v, list) and len(v) > 0 and isinstance(v[0], Enum):
-                d[k] = [x.value for x in v]
-            if k.endswith("_token"):
-                d[k] = f"<{k.upper()}>"
-        return d
+        self.train_batch_size = batch_size_per_node_per_step
+        self.valid_batch_size = self.batch_size_per_node
 
 
 @dataclass
@@ -373,10 +312,6 @@ class ModelArguments:
         default=None,
         metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"},
     )
-    cache_dir: Optional[str] = field(
-        default=None,
-        metadata={"help": ("Where do you want to store the pretrained models downloaded from s3")},
-    )
     dtype: Optional[str] = field(
         default="float32",
         metadata={
@@ -386,79 +321,35 @@ class ModelArguments:
             )
         },
     )
-    use_scan: bool = field(
+    unroll: bool = field(
         default=False,
-        metadata={"help": "Use scan on the model layers."},
-    )
-    use_auth_token: bool = field(
-        default=False,
-        metadata={
-            "help": (
-                "Will use the token generated when running `transformers-cli login`"
-                " (necessary to use this script with private models)."
-            )
-        },
+        metadata={"help": "Unroll layers."},
     )
     restore_state: Optional[bool] = field(
         default=False,
-        metadata={
-            "help": (
-                "Restore optimizer and training state. Can be True (will retrieve"
-                " associated wandb artifact) or a local directory."
-            )
-        },
+        metadata={"help": ("Restore optimizer.")},
     )
+    config_metadata: Dict = field(init=False)
 
     def __post_init__(self):
-        if self.tokenizer_name is None:
-            self.tokenizer_name = self.model_name_or_path
-            assert self.tokenizer_name is not None, "Tokenizer name or model name/path needs to be specified"
-        if self.restore_state is True:
-            assert (
-                self.model_name_or_path is not None
-            ), "If you want to restore state, you must provide a model name or path."
-        if self.use_scan:
-            assert self.model_name_or_path is None, "use_scan can only be defined when training from scratch."
-
-    def get_metadata(self):
-        if self.model_name_or_path is not None and ":" in self.model_name_or_path:
-            if jax.process_index() == 0:
-                artifact = wandb.run.use_artifact(self.model_name_or_path)
+        assert self.config_name is not None, "config_name is required and is not inferred from model_name_or_path"
+        assert self.tokenizer_name is not None, "Tokenizer name is required."
+        # get config metadata
+        if ":" in self.config_name and not os.path.isdir(self.config_name):
+            # wandb artifact
+            if wandb.run is not None:
+                artifact = wandb.run.use_artifact(self.config_name)
             else:
-                artifact = wandb.Api().artifact(self.model_name_or_path)
-            return artifact.metadata
+                artifact = wandb.Api().artifact(self.config_name)
+            self.config_metadata = artifact.metadata
         else:
-            return dict()
-
-    def get_opt_state(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:  # avoid multiple artifact copies
-            if self.restore_state is True:
-                # wandb artifact
-                state_artifact = self.model_name_or_path.replace("/model-", "/state-", 1)
-                if jax.process_index() == 0:
-                    artifact = wandb.run.use_artifact(state_artifact)
-                else:
-                    artifact = wandb.Api().artifact(state_artifact)
-                if artifact.metadata.get("bucket_path"):
-                    # we will read directly file contents
-                    self.restore_state = artifact.metadata["bucket_path"]
-                else:
-                    artifact_dir = artifact.download(tmp_dir)
-                    self.restore_state = Path(artifact_dir)
-
-            if self.restore_state.startswith("gs://"):
-                bucket_path = Path(self.restore_state[5:]) / "opt_state.msgpack"
-                bucket, blob_name = str(bucket_path).split("/", 1)
-                assert (
-                    storage is not None
-                ), 'Could not find google.storage. Install with "pip install google-cloud-storage"'
-                client = storage.Client()
-                bucket = client.bucket(bucket)
-                blob = bucket.blob(blob_name)
-                return blob.download_as_bytes()
-
-            with (Path(self.restore_state) / "opt_state.msgpack").open("rb") as f:
-                return f.read()
+            self.config_metadata = None
+        # get checkpoint path
+        if self.model_name_or_path is None:
+            if self.config_metadata is not None:
+                self.model_name_or_path = self.config_metadata["output_dir"]
+        if self.restore_state is True:
+            assert self.config_metadata is not None, "Cannot restore state without config restored from W&B."
 
 
 @dataclass
@@ -474,16 +365,16 @@ class DataTrainingArguments:
         default=None, metadata={"help": "Path to the root validation directory which contains tfrecords."}
     )
     image_size: Optional[int] = field(
-        default=0,
-        metadata={"help": " The dimension images need to be resized to, if needed."},
+        default=None,
+        metadata={"help": "The dimension images need to be cropped to, if needed."},
     )
     min_original_image_size: Optional[int] = field(
         default=None,
-        metadata={"help": (" The minimum size (resolution) of each original image from training" " set.")},
+        metadata={"help": ("The minimum size (resolution) of each original image from training" " set.")},
     )
     max_original_aspect_ratio: Optional[float] = field(
         default=None,
-        metadata={"help": (" The maximum aspect ratio of each original image from training set.")},
+        metadata={"help": ("The maximum aspect ratio of each original image from training set.")},
     )
     seed_dataset: Optional[int] = field(
         default=None,
@@ -514,11 +405,12 @@ def flat_args(model_args, data_args, training_args):
 
 def split_scanned_params(data):
     """Split params between scanned and non-scanned"""
+    # NOTE: technically this is not needed with Adam (and could be slower) but is required with shampoo
     flat = flatten_dict(unfreeze(data))
     split = {"standard": {}, "scanned_text": {}, "scanned_vision": {}}
     for k, v in flat.items():
-        if "scanned" in k:
-            if "text_model" in k:
+        if "layers" in k:
+            if "text" in k:
                 split["scanned_text"][k] = v
             else:
                 split["scanned_vision"][k] = v
@@ -528,6 +420,7 @@ def split_scanned_params(data):
     split = {k: v for k, v in split.items() if v}
     for k, v in split.items():
         split[k] = freeze(unflatten_dict(v))
+    breakpoint()
     return split
 
 
@@ -538,7 +431,91 @@ def unsplit_scanned_params(data):
     return freeze(unflatten_dict(flat))
 
 
+@dataclass
+class State:
+    step: int = 0
+    opt_state_step: int = 0
+    epoch: int = 0
+    samples: int = 0
+    time_total: float = 0.0
+    time_train: float = 0.0
+    time_per_train_step: float = 0.0
+    time_per_eval: float = 0.0
+    time_per_save: float = 0.0
+    timestamp: float = field(init=False)
+    offset_time: float = field(init=False)  # used to substract eval and save times
+
+    def __post_init__(self):
+        self.timestamp = time.perf_counter()
+        self.offset_time = 0.0
+
+    @classmethod
+    def from_config_metadata(cls, config_metadata, restore_state):
+        if config_metadata is not None:
+            init_state = {
+                k: config_metadata[k] for k, v in cls.__dataclass_fields__.items() if k in config_metadata and v.init
+            }
+        else:
+            init_state = {}
+        if not restore_state:
+            init_state["opt_state_step"] = 0
+        return cls(**init_state)
+
+    def update(self, **kwargs):
+        # update timing info
+        if kwargs.get("step", 0) > self.step:
+            now = time.perf_counter()
+            self.time_total += now - self.timestamp
+            delta_time = now - self.timestamp - self.offset_time
+            self.time_train += delta_time
+            self.offset_time = 0.0
+            self.timestamp = now
+            self.time_per_train_step = delta_time / (kwargs["step"] - self.step)
+        # update state
+        for k, v in kwargs.items():
+            if isinstance(v, jnp.ndarray):
+                v = v.item()
+            setattr(self, k, v)
+
+    def add_time(self, key, duration):
+        assert key in ["eval", "save"]
+        if key == "eval":
+            self.time_per_eval = duration
+        elif key == "save":
+            self.time_per_save = duration
+        self.offset_time += duration
+
+    def to_dict(self):
+        # return only items that are not init=False
+        return {
+            k: v
+            for k, v in asdict(self).items()
+            if k in self.__dataclass_fields__ and self.__dataclass_fields__[k].init
+        }
+
+    def log(self, metrics={}):
+        if jax.process_index() == 0:
+            metrics = jax.device_get(metrics)
+            log_metrics = flatten_dict({"state": self.to_dict()}, sep="/")
+            for k, v in metrics.items():
+                if "_norm" in k:
+                    log_metrics[f"{k}/"] = v
+                elif "_hist" in k:
+                    v = jax.tree_util.tree_map(
+                        lambda x: wandb.Histogram(np_histogram=x),
+                        v,
+                        is_leaf=lambda x: isinstance(x, tuple),
+                    )
+                    log_metrics[f"{k}/"] = v
+                else:
+                    log_metrics[k] = v
+            wandb.log(log_metrics)
+
+
 def main():
+    # cluster initialization
+    jax.distributed.initialize()
+
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
@@ -546,12 +523,6 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
-    # check arguments
-    if training_args.mp_devices > jax.local_device_count():
-        assert (
-            data_args.seed_dataset is not None
-        ), "Seed dataset must be provided when model is split over multiple hosts"
 
     # Use jax cache
     if not training_args.no_cache:
@@ -570,32 +541,21 @@ def main():
     else:
         transformers.utils.logging.set_verbosity_error()
 
-    # Set the verbosity to info of the Transformers logger (on main process only):
-    logger.info(f"Training/evaluation parameters {training_args}")
+    # Show arguments
+    logger.info(f"Training/evaluation parameters:\n{pformat(asdict(training_args))}")
+    logger.info(f"Model parameters:\n{pformat(asdict(model_args))}")
+    logger.info(f"Data parameters:\n{pformat(asdict(data_args))}")
 
-    # Handle the repository creation
-    if training_args.push_to_hub:
-        if training_args.hub_model_id is None:
-            repo_name = get_full_repo_name(
-                Path(training_args.output_dir).absolute().name,
-                token=training_args.hub_token,
-            )
-        else:
-            repo_name = training_args.hub_model_id
-        repo = Repository(training_args.output_dir, clone_from=repo_name)
+    # Info on local devices
+    logger.info(f"Local TPUs/GPUs: {jax.local_device_count()}")
+    logger.info(f"Global TPUs/GPUs: {jax.device_count()}")
 
     # Initialize datasets and pre-processing transforms
     dataset = Dataset(
         train_batch_size=training_args.train_batch_size,
         valid_batch_size=training_args.valid_batch_size,
-        valid_batch_size_per_step=training_args.valid_batch_size_per_step,
-        node_groups=training_args.node_groups,
         **asdict(data_args),
     )
-
-    # Info on local devices
-    logger.info(f"Local TPUs/GPUs: {jax.local_device_count()}")
-    logger.info(f"Global TPUs/GPUs: {jax.device_count()}")
 
     # Set up wandb run
     if jax.process_index() == 0:
@@ -606,91 +566,145 @@ def main():
             config=flat_args(model_args, data_args, training_args),
         )
 
-    # Set up model configs
-    if model_args.config_name:
-        config = CLIPConfig.from_pretrained(
-            model_args.config_name,
-            use_scan=model_args.use_scan,
-            gradient_checkpointing=training_args.gradient_checkpointing,
-        )
-    else:
-        config = None
-
-    # Load or create new models
-    if model_args.model_name_or_path:
-        model, params = FlaxCLIPModel.from_pretrained(
-            model_args.model_name_or_path,
-            config=config,
-            seed=training_args.seed_model,
-            dtype=getattr(jnp, model_args.dtype),
-            use_scan=model_args.use_scan,
-            gradient_checkpointing=training_args.gradient_checkpointing,
-            _do_init=False,  # we overwrite them with loaded checkpoint
-        )
-        params = freeze(params)
-    else:
-        model = FlaxCLIPModel(
-            config,
-            seed=training_args.seed_model,
-            dtype=getattr(jnp, model_args.dtype),
-            _do_init=False,
-        )
-        params = None
-
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name,
-    )
+    tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name)
 
-    # get model metadata
-    model_metadata = model_args.get_metadata()
+    # Load config
+    clipConfig = load_config(model_args.config_name)
+
+    # Update config
+    if model_args.unroll:
+        clipConfig["text_config"]["unroll"] = 100
+        clipConfig["vision_config"]["unroll"] = 100
+    else:
+        clipConfig["text_config"]["unroll"] = 1
+        clipConfig["vision_config"]["unroll"] = 1
+    if model_args.gradient_checkpointing:
+        clipConfig["text_config"]["gradient_checkpointing"] = True
+        clipConfig["vision_config"]["gradient_checkpointing"] = True
+    else:
+        clipConfig["text_config"]["gradient_checkpointing"] = False
+        clipConfig["vision_config"]["gradient_checkpointing"] = False
+
+    # Load model
+    model = CLIPModel(**clipConfig, dtype=model_args.dtype)
+    model_eval = model if model_args.dtype == "float32" else CLIPModel(**clipConfig, dtype="float32")
+
+    # Load state
+    state = State.from_config_metadata(model_args.config_metadata, model_args.restore_state)
+
+    # set rng
+    rng = jax.random.PRNGKey(training_args.seed_model)
+    model_inputs = model.init_inputs(rng)
 
     # get PartitionSpec and shape for model params
-    params_shape = freeze(model.params_shape_tree)
-    params_spec = set_partitions(
-        unfreeze(params_shape),
-        use_scan=model.config.text_config.use_scan,
-        activation_partitioning_dims=training_args.activation_partitioning_dims,
-        parameter_partitioning_dims=training_args.parameter_partitioning_dims,
+    logical_params = jax.eval_shape(lambda inputs: model.init(**inputs), model_inputs)["params"]
+
+    # Parameter count
+    num_params = {
+        "Total": count_params(logical_params),
+        "Text": count_params(logical_params["text_config"]),
+        "Vision": count_params(logical_params["vision_config"]),
+    }
+
+    # Log some info
+    logger.info(f"Num epochs: {training_args.num_train_epochs}")
+    logger.info(f"Batch size per node = {training_args.batch_size_per_node}")
+    logger.info(f"Number of devices = {jax.device_count()}")
+    logger.info(f"Gradient accumulation steps = {training_args.gradient_accumulation_steps}")
+    logger.info(f"Batch size per update = {training_args.batch_size_per_step}")
+    logger.info(
+        f"Model parameters: Text {num_params['Text']:,} + Vision {num_params['Vision']:,} + Projection = {num_params['Total']:,}"
     )
 
-    # Initialize our training
-    rng = jax.random.PRNGKey(training_args.seed_model)
-    rng, dropout_rng = jax.random.split(rng)
-
-    # Store some constant
-    num_epochs = training_args.num_train_epochs
-    num_params = model.num_params(params_shape)
-
-    # log some info
-    logger.info("***** Running training *****")
-    logger.info(f"  Num Epochs = {num_epochs}")
-    logger.info(f"  Batch size per node = {training_args.batch_size_per_node}")
-    logger.info(f"  Number of devices = {jax.device_count()}")
-    logger.info(f"  Gradient accumulation steps = {training_args.gradient_accumulation_steps}")
-    logger.info(f"  Batch size per update = {training_args.batch_size_per_step}")
-    logger.info(f"  Model parameters = {num_params:,}")
-
+    # update wandb run
     if jax.process_index() == 0:
         # set default x-axis as 'train/step'
-        wandb.define_metric("*", step_metric="train/step")
+        wandb.define_metric("*", step_metric="state/step")
 
         # add interesting config parameters
         wandb.config.update(
             {
                 "batch_size_per_step": training_args.batch_size_per_step,
                 "num_params": num_params,
-                "model_config": model.config.to_dict(),
+                "model_config": clipConfig,
                 "num_devices": jax.device_count(),
                 "versions": {
+                    "python": python_version(),
                     "jax": jax.__version__,
                     "jaxlib": jaxlib.__version__,
                     "flax": flax.__version__,
                     "optax": optax.__version__,
+                    "orbax": orbax.__version__,
+                    "numpy": np.__version__,
+                    "tensorflow": tf.__version__,
+                    "tensorflow-io": tfio.__version__,
                     "transformers": transformers.__version__,
                     "wandb": wandb.__version__,
                 },
             }
+        )
+
+    # Partition Spec
+    logical_spec = nn.get_partition_spec(logical_params)
+    rules = logical_axis_rules(
+        activation_partitioning_dims=training_args.activation_partitioning_dims,
+        parameter_partitioning_dims=training_args.parameter_partitioning_dims,
+    )
+    params_spec = nn.logical_to_mesh(logical_spec, rules)
+    data_spec = PartitionSpec("data")
+    scan_spec = PartitionSpec(None)
+
+    # Orbax checkpointer
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+
+    # Create mesh
+    logger.info(f"Creating a mesh of ({training_args.dp_devices}, {training_args.mp_devices})")
+    dev_mesh = create_device_mesh((training_args.dp_devices, training_args.mp_devices))
+    mesh = Mesh(dev_mesh, ("data", "model"))
+    logger.info(f"Mesh: {mesh.shape}")
+
+    # Data sharding parameters
+    num_local_devices = jax.local_device_count()
+    num_hosts = jax.process_count()
+    data_global_spec = PartitionSpec(("data", "model"))
+    data_global_sharding = NamedSharding(mesh, data_global_spec)
+    data_mesh_spec = PartitionSpec("data")
+    data_mesh_sharding = NamedSharding(mesh, data_mesh_spec)
+    local_addressable_devices = data_global_sharding.addressable_devices
+    data_global_shape = None  # will be set at first batch
+    reshard_data = pjit(lambda x: x, in_shardings=(data_global_sharding,), out_shardings=data_mesh_sharding)
+
+    def _get_global_shape(x):
+        shape = x.shape
+        # multiply first dimension by number of hosts
+        shape = (shape[0] * num_hosts,) + shape[1:]
+        return shape
+
+    # Initialize or restore model
+    logger.info("Initializing model parameters")
+
+    @partial(pjit, in_shardings=None, out_shardings=params_spec)
+    def init_params():
+        params = model.init(**model_inputs)["params"]
+        if model_args.model_name_or_path is not None:
+            # init to 0 (faster?)
+            params = jax.tree_map(lambda x: jnp.zeros_like(x), params)
+        return params
+
+    # Set params
+    with mesh:
+        params = init_params()
+
+    if model_args.model_name_or_path is not None:
+        # Restore checkpoint
+        logger.info(f"Restoring checkpoint from {model_args.model_name_or_path}")
+        params = checkpoints.restore_checkpoint(
+            model_args.model_name_or_path,
+            prefix="model_",
+            step=state.step,
+            target=params,
+            orbax_checkpointer=orbax_checkpointer,
         )
 
     # Create learning rate schedule
@@ -711,7 +725,7 @@ def main():
         last_boundary = 0
 
         # offset
-        lr_offset = training_args.lr_offset
+        lr_offset = training_args.lr_offset + state.opt_state_step
         if lr_offset:
             schedule_fn = _add_schedule(schedule_fn, optax.constant_schedule(0.0), last_boundary)
             last_boundary += lr_offset
@@ -758,7 +772,6 @@ def main():
 
     # create optimizer
     if training_args.optim == "distributed_shampoo":
-        # parameters from https://github.com/tensorflow/lingvo/blob/03ee9d7cd50764b0424c7c863733c91fc0b053ec/lingvo/jax/optimizers.py#L729
         graft_type = {
             "sgd": GraftingType.SGD,
             "adagrad": GraftingType.ADAGRAD,
@@ -771,6 +784,16 @@ def main():
             PartitionSpec(None, training_args.shard_shampoo_across, None)
             if training_args.shard_shampoo_across != "2d"
             else PartitionSpec(None, "data", "model")
+        )
+        preconditioner_axis = (
+            training_args.shard_shampoo_across
+            if training_args.shard_shampoo_across != "2d"
+            else "model"
+            if training_args.mp_devices > training_args.dp_devices
+            else "data"
+        )
+        preconditioner_num_devices = (
+            training_args.mp_devices if preconditioner_axis == "model" else training_args.dp_devices
         )
         _opt = partial(
             distributed_shampoo,
@@ -788,14 +811,8 @@ def main():
             nesterov=training_args.nesterov,
             exponent_override=0,
             statistics_partition_spec=statistics_partition_spec,
-            preconditioner_partition_spec=PartitionSpec(training_args.shard_shampoo_across, None, None)
-            if training_args.shard_shampoo_across != "2d"
-            else PartitionSpec(
-                "model" if training_args.mp_devices > training_args.dp_devices else "data",
-                None,
-                None,
-            ),
-            num_devices_for_pjit=training_args.dp_devices,
+            preconditioner_partition_spec=PartitionSpec(preconditioner_axis, None, None),
+            num_devices_for_pjit=preconditioner_num_devices,
             shard_optimizer_states=True,
             inverse_failure_threshold=0.1,
             moving_average_for_momentum=True,
@@ -812,7 +829,7 @@ def main():
         # for main optimizer, we need to allow scanned layers
         optimizer = {}
         opt_fn = {}
-        for k, p in split_scanned_params(params_shape).items():
+        for k, p in split_scanned_params(logical_params).items():
             if ("scanned_text" in k) or ("scanned_vision" in k):
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
@@ -830,13 +847,13 @@ def main():
             eps=training_args.adam_epsilon,
             weight_decay=training_args.weight_decay,
         )
-        optimizer = {k: _opt(learning_rate=learning_rate_fn) for k in split_scanned_params(params_shape)}
+        optimizer = {k: _opt(learning_rate=learning_rate_fn) for k in split_scanned_params(logical_params)}
 
-    # get PartitionSpec and shape of optimizer state
-    def get_opt_state_spec_and_shape():
+    # get PartitionSpecof optimizer state
+    def get_opt_state_spec():
         # get opt_state shape without actual init
         opt_state_shape = {}
-        for k, p in split_scanned_params(params_shape).items():
+        for k, p in split_scanned_params(logical_params).items():
             if ("scanned_text" in k) or ("scanned_vision" in k):
                 opt_state_shape[k] = jax.eval_shape(jax.vmap(optimizer[k].init), p)
             else:
@@ -880,157 +897,78 @@ def main():
             else:
                 raise NotImplementedError
 
-        for k, p in split_scanned_params(params_shape).items():
+        for k, p in split_scanned_params(logical_params).items():
+            p_spec = split_spec[k]
             if ("scanned_text" in k) or ("scanned_vision" in k):
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
+                p_spec = jax.tree_util.tree_map(lambda y: PartitionSpec(*y[1:]), p_spec)
             _opt_fn = opt_fn[k] if training_args.optim == "distributed_shampoo" else None
             opt_state_spec[k] = _get_spec(
-                params_spec=split_spec[k],
+                params_spec=p_spec,
                 opt_state_shape=opt_state_shape[k],
                 opt_fn=_opt_fn,
                 params_shape=p,
             )
-        return opt_state_spec, opt_state_shape
+            if "scanned" in k:
+                # add scan dimension
+                opt_state_spec[k] = jax.tree_util.tree_map(
+                    lambda x: PartitionSpec(*scan_spec + x),
+                    opt_state_spec[k],
+                    is_leaf=lambda x: isinstance(x, PartitionSpec),
+                )
+        return opt_state_spec
 
-    opt_state_spec, opt_state_shape = get_opt_state_spec_and_shape()
+    opt_state_spec = get_opt_state_spec()
 
-    # create a mesh
-    mesh_shape = (training_args.dp_devices, training_args.mp_devices)
-    devices = np.asarray(jax.devices()).reshape(*mesh_shape)
-    mesh = maps.Mesh(devices, ("data", "model"))
-    logger.info(f"  Mesh shape: {mesh_shape}")
+    # Initialize or restore optimizer state
+    logger.info("Initializing optimizer state")
 
-    class TrainState(struct.PyTreeNode):
-        step: int
-        params: core.FrozenDict[str, Any]
-        opt_state: optax.OptState
-        dropout_rng: jnp.ndarray = None
-        epoch: int = 0
-        train_time: float = 0.0  # total time the model trained
-        train_samples: int = 0  # number of samples seen
+    @partial(pjit, in_shardings=(params_spec,), out_shardings=opt_state_spec)
+    def init_opt_state(params):
+        opt_state = {}
+        for k, p in split_scanned_params(params).items():
+            init_fn = optimizer[k].init
+            if "scanned" in k:
+                init_fn = jax.vmap(init_fn)
+            opt_state[k] = init_fn(p)
+        return opt_state
 
-        def apply_gradients(self, *, grads, **kwargs):
-            # apply gradients to model parameters
-            grads = split_scanned_params(grads)
-            params = split_scanned_params(self.params)
-            new_opt_state = {}
-            new_params = {}
-            for k, param in params.items():
-                update_fn = optimizer[k].update
-                if ("scanned_text" in k) or ("scanned_vision" in k):
-                    update_fn = jax.vmap(update_fn, in_axes=(0, 0, 0), out_axes=(0, 0))
-                updates, new_opt_state[k] = update_fn(grads[k], self.opt_state[k], param)
-                new_params[k] = optax.apply_updates(param, updates)
-            new_params = unsplit_scanned_params(new_params)
-
-            return self.replace(
-                step=self.step + 1,
-                params=new_params,
-                opt_state=new_opt_state,
-                **kwargs,
-            )
-
-        @classmethod
-        def create(cls, *, params, **kwargs):
-            opt_state = {}
-            step = kwargs.pop("step", 0)
-            for k, p in split_scanned_params(params).items():
-                init_fn = optimizer[k].init
-                if ("scanned_text" in k) or ("scanned_vision" in k):
-                    init_fn = jax.vmap(init_fn)
-                opt_state[k] = init_fn(p)
-            return cls(
-                step=step,
-                params=params,
-                opt_state=opt_state,
-                **kwargs,
-            )
-
-    # define state spec
-    state_spec = TrainState(
-        params=params_spec,
-        opt_state=opt_state_spec,
-        dropout_rng=None,
-        step=None,
-        epoch=None,
-        train_time=None,
-        train_samples=None,
-    )
-
-    # init params if not available yet
-    def maybe_init_params(params, m):
-        if params is not None:
-            # model params are correctly loaded
-            return params
-        else:
-            # params have not been initialized yet
-            return m.init_weights(m.key, m.input_shape)
-
+    # Set opt_state
     with mesh:
-        logger.info("  Creating state")
+        opt_state = init_opt_state(params)
 
-        # restore metadata
-        attr_state = {}
-        keys = ["train_time", "train_samples", "step", "epoch"]
-        attr_state = {k: v for k, v in model_metadata.items() if k in keys}
-
-        if not model_args.restore_state:
-
-            def init_state(params):
-                return TrainState.create(
-                    params=maybe_init_params(params, model),
-                    dropout_rng=dropout_rng,
-                    **attr_state,
-                )
-
-            state = pjit(
-                init_state,
-                in_axis_resources=(params_spec,) if model_args.model_name_or_path else None,
-                out_axis_resources=state_spec,
-                donate_argnums=(0,),
-            )(params)
-
-        else:
-            # load opt_state
-            opt_state = model_args.get_opt_state()
-            opt_state = from_bytes(opt_state_shape, opt_state)
-
-            def restore_state(params, opt_state):
-                return TrainState(
-                    params=params,
-                    opt_state=opt_state,
-                    dropout_rng=dropout_rng,
-                    **attr_state,
-                )
-
-            state = pjit(
-                restore_state,
-                in_axis_resources=(
-                    params_spec,
-                    opt_state_spec,
-                ),
-                out_axis_resources=state_spec,
-                donate_argnums=(0, 1),
-            )(params, opt_state)
-
-            # remove opt_state from CPU
-            del opt_state
-
-    # free CPU memory
-    del params, opt_state_spec, opt_state_shape
-
-    # define batch spec
-    batch_spec = PartitionSpec("data")
-    grad_batch_spec = PartitionSpec(None, "data")
-
-    # "vmap trick" avoids a crash when mp_devices > 1 (not sure why it happens)
-    # lead to better perf: see https://wandb.ai/dalle-mini/dalle-mini/reports/JAX-pmap-vs-pjit--VmlldzoxNDg1ODA2
-    if training_args.use_vmap_trick:
-        grad_params_spec = jax.tree_util.tree_map(
-            lambda x: PartitionSpec(*("data",) + (x if x is not None else (None,))),
-            params_spec,
+    if model_args.restore_state:
+        # Restore checkpoint
+        logger.info(f"Restoring optimizer checkpoint from {model_args.model_name_or_path}")
+        opt_state = checkpoints.restore_checkpoint(
+            model_args.model_name_or_path,
+            prefix="opt_state_",
+            step=state.step,
+            target=opt_state,
+            orbax_checkpointer=orbax_checkpointer,
         )
+
+    # Define update function
+    def update_params(params, opt_state, grads):
+        grads = split_scanned_params(grads)
+        split_params = split_scanned_params(params)
+        new_opt_state = {}
+        new_params = {}
+        for k, param in split_params.items():
+            update_fn = optimizer[k].update
+            if ("scanned_text" in k) or ("scanned_vision" in k):
+                update_fn = jax.vmap(update_fn, in_axes=(0, 0, 0), out_axes=(0, 0))
+            updates, new_opt_state[k] = update_fn(grads[k], opt_state[k], param)
+            new_params[k] = optax.apply_updates(param, updates)
+        new_params = unsplit_scanned_params(new_params)
+        # merge with non-trainable params
+        # NOTE: this is only for future compatibility if we want to train only certain parameters
+        params, new_params = flatten_dict(unfreeze(params)), flatten_dict(unfreeze(new_params))
+        params.update(new_params)
+        new_params = freeze(unflatten_dict(params))
+
+        return new_params, new_opt_state
 
     # Define loss
     def cross_entropy(logits, axis):
@@ -1051,13 +989,18 @@ def main():
         return loss
 
     # Define gradient update step fn
-    def train_step(state, batch, train_time):
+    def train_step(rng, params, opt_state, batch, step):
         # get a minibatch (one gradient accumulation slice)
         def get_minibatch(batch, grad_idx):
-            return jax.tree_util.tree_map(
-                lambda x: jax.lax.dynamic_index_in_dim(x, grad_idx, keepdims=False),
-                batch,
-            )
+            def _check_shape(x):
+                assert (
+                    x.shape[0] == training_args.batch_size_per_step
+                ), f"{x.shape[0]} != {training_args.batch_size_per_step}"
+
+            jax.tree_map(_check_shape, batch)
+            offset = grad_idx * training_args.batch_size_per_node
+            length = training_args.batch_size_per_node
+            return jax.tree_util.tree_map(lambda x: jax.lax.dynamic_slice_in_dim(x, offset, length), batch)
 
         train_compute_loss = partial(compute_loss, train=True)
         grad_fn = jax.value_and_grad(train_compute_loss)
@@ -1066,65 +1009,34 @@ def main():
             # minibatch at grad_idx for gradient accumulation (None otherwise)
             minibatch = get_minibatch(batch, grad_idx) if grad_idx is not None else batch
             # ensure it is sharded properly
-            minibatch = with_sharding_constraint(minibatch, batch_spec)
+            minibatch = with_sharding_constraint(minibatch, data_spec)
             # only 1 single rng per grad step, let us handle larger batch size (not sure why)
             dropout_rng, _ = jax.random.split(dropout_rng)
-
-            if training_args.use_vmap_trick:
-                # "vmap trick", calculate loss and grads independently per dp_device
-                loss, grads = jax.vmap(grad_fn, in_axes=(None, 0, None, None), out_axes=(0, 0))(
-                    state.params,
-                    minibatch,
-                    dropout_rng,
-                    model,
-                )
-                # ensure they are sharded correctly
-                loss = with_sharding_constraint(loss, batch_spec)
-                grads = with_sharding_constraint(grads, grad_params_spec)
-
-                # average across all devices
-                # Note: we could average per device only after gradient accumulation, right before params update
-                (
-                    loss,
-                    grads,
-                ) = jax.tree_util.tree_map(
-                    lambda x: jnp.mean(x, axis=0),
-                    (
-                        loss,
-                        grads,
-                    ),
-                )
-            else:
-                # "vmap trick" may not work in multi-hosts or require too much hbm
-                loss, grads = grad_fn(
-                    state.params,
-                    minibatch,
-                    dropout_rng,
-                    model,
-                )
+            # get loss and grads
+            loss, grads = grad_fn(params, minibatch, dropout_rng, model)
             # ensure grads are sharded
             grads = with_sharding_constraint(grads, params_spec)
             # return loss and grads
             return loss, grads, dropout_rng
 
         if training_args.gradient_accumulation_steps == 1:
-            loss, grads, dropout_rng = loss_and_grad(None, state.dropout_rng)
+            loss, grads, rng = loss_and_grad(None, rng)
         else:
             # create initial state for cumul_minibatch_step loop
-            init_minibatch_step = (
+            init_state = (
                 0.0,
-                with_sharding_constraint(jax.tree_util.tree_map(jnp.zeros_like, state.params), params_spec),
-                state.dropout_rng,
+                with_sharding_constraint(jax.tree_util.tree_map(jnp.zeros_like, params), params_spec),
+                rng,
             )
 
             # accumulate gradients
-            def cumul_minibatch_step(grad_idx, cumul_loss_grad_dropout):
+            def cumul_minibatch_step(grad_idx, cumul_state):
                 (
                     cumul_loss,
                     cumul_grads,
-                    dropout_rng,
-                ) = cumul_loss_grad_dropout
-                loss, grads, dropout_rng = loss_and_grad(grad_idx, dropout_rng)
+                    rng,
+                ) = cumul_state
+                loss, grads, rng = loss_and_grad(grad_idx, rng)
                 (
                     cumul_loss,
                     cumul_grads,
@@ -1137,15 +1049,15 @@ def main():
                 return (
                     cumul_loss,
                     cumul_grads,
-                    dropout_rng,
+                    rng,
                 )
 
             # loop over gradients
-            loss, grads, dropout_rng = jax.lax.fori_loop(
+            loss, grads, rng = jax.lax.fori_loop(
                 0,
                 training_args.gradient_accumulation_steps,
                 cumul_minibatch_step,
-                init_minibatch_step,
+                init_state,
             )
             grads = with_sharding_constraint(grads, params_spec)
             # sum -> mean
@@ -1154,44 +1066,42 @@ def main():
                 (loss, grads),
             )
 
+        # enforce sharding
         grads = with_sharding_constraint(grads, params_spec)
 
+        # update params
+        new_params, new_opt_state = update_params(params, opt_state, grads)
+
         # get opt_state_step - TODO: only shampoo is supported at the moment
-        opt_state_step = state.opt_state["standard"][0]
+        opt_state_step = opt_state["standard"][0]
 
-        # update state
-        state = state.apply_gradients(
-            grads=grads,
-            dropout_rng=dropout_rng,
-            train_time=train_time,
-            train_samples=state.train_samples + training_args.batch_size_per_step,
-        )
-
+        # get metrics
         metrics = {
-            "loss": loss,
-            "learning_rate": learning_rate_fn(opt_state_step),
-            "opt_state_step": opt_state_step,
+            "train/loss": loss,
+            "train/learning_rate": learning_rate_fn(opt_state_step),
         }
+
+        # increment step
+        step += 1
 
         # extract norms and histograms
 
-        def maybe_fn(fn, val, zeros, freq):
+        def maybe_fn(fn, val, freq):
             """Call fn only if it is a logging step"""
             return jax.lax.cond(
                 state.step % freq == 0,
                 fn,
-                lambda _: zeros,
+                lambda p: jax.tree_map(lambda v: jnp.zeros_like(v), fn(p)),
                 val,
             )
 
         if training_args.log_norm_steps:
-            zeros_norm = jax.tree_util.tree_map(lambda _: jnp.float32(0), state.params)
 
             def norm(val):
-                return jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), val)
+                return unfreeze(jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), val))
 
-            gradients_norm = maybe_fn(norm, grads, zeros_norm, training_args.log_norm_steps)
-            params_norm = maybe_fn(norm, state.params, zeros_norm, training_args.log_norm_steps)
+            gradients_norm = maybe_fn(norm, grads, training_args.log_norm_steps)
+            params_norm = maybe_fn(norm, state.params, training_args.log_norm_steps)
 
             metrics.update(
                 {
@@ -1201,13 +1111,12 @@ def main():
             )
 
         if training_args.log_histogram_steps:
-            zeros_hist = jax.tree_util.tree_map(lambda _: jnp.histogram(jnp.zeros(1), density=True), state.params)
 
             def histogram(val):
                 return jax.tree_util.tree_map(lambda x: jnp.histogram(x, density=True), val)
 
-            gradients_hist = maybe_fn(histogram, grads, zeros_hist, training_args.log_histogram_steps)
-            params_hist = maybe_fn(histogram, state.params, zeros_hist, training_args.log_histogram_steps)
+            gradients_hist = maybe_fn(histogram, grads, training_args.log_histogram_steps)
+            params_hist = maybe_fn(histogram, state.params, training_args.log_histogram_steps)
 
             metrics.update(
                 {
@@ -1216,197 +1125,103 @@ def main():
                 }
             )
 
-        return state, metrics
-
-    # Ensure eval_fn is in float32 to avoid numerical issues
-    eval_model = (
-        model
-        if model_args.dtype == "float32"
-        else FlaxCLIPModel(
-            model.config,
-            seed=training_args.seed_model,
-            dtype=jnp.float32,
-            _do_init=False,
-        )
-    )
+        return metrics, new_params, new_opt_state, opt_state_step
 
     # Evaluation step
-    def eval_step(state, batch):
+    def eval_step(params, batch):
         def compute_eval_loss(batch):
             loss = compute_loss(
-                state.params,
+                params,
                 batch,
                 dropout_rng=None,
-                model_fn=eval_model,
+                model_fn=model_eval,
                 train=False,
             )
             return {
-                "loss": loss,
+                "eval/loss": loss,
             }
 
-        if training_args.use_vmap_trick:
-            metrics = jax.vmap(compute_eval_loss)(batch)
-            # ensure they are sharded correctly
-            metrics = with_sharding_constraint(metrics, batch_spec)
-            # average across all devices
-            metrics = jax.tree_util.tree_map(jnp.mean, metrics)
-        else:
-            metrics = compute_eval_loss(batch)
-
+        metrics = compute_eval_loss(batch)
         return metrics
 
     # Create parallel version of the train and eval step
     p_train_step = pjit(
         train_step,
-        in_axis_resources=(
-            state_spec,
-            grad_batch_spec if training_args.gradient_accumulation_steps > 1 else batch_spec,
-            None,
-        ),
-        out_axis_resources=(state_spec, None),
-        donate_argnums=(0,),
+        in_shardings=(None, params_spec, opt_state_spec, data_spec, None),
+        out_shardings=(None, params_spec, opt_state_spec, None),
+        donate_argnums=(1, 2),
     )
     p_eval_step = pjit(
         eval_step,
-        in_axis_resources=(state_spec, batch_spec),
-        out_axis_resources=None,
+        in_shardings=(params_spec, data_spec),
+        out_shardings=(None,),
     )
 
-    # define metrics logger
-    class MetricsLogger:
-        def __init__(self, step):
-            # keep state to use any key as a custom x-axis
-            self.state_dict = {}
-            # estimate speed
-            self.step = step
-            self.time = time.perf_counter()
-            self.offset_time = 0.0
+    def run_evaluation(rng, params, mesh):
+        start_eval_time = time.perf_counter()
+        metrics = []
+        for batch in tqdm(
+            dataset.valid,
+            desc="Evaluating...",
+            position=2,
+            leave=False,
+            disable=jax.process_index() > 0,
+        ):
+            # preprocess batch
+            captions = [caption.decode("utf-8") for caption in batch[1]]
+            txt_inputs = tokenizer(
+                captions,
+                padding="max_length",
+                truncation=True,
+                max_length=model.config.text_config.max_position_embeddings,
+                return_tensors="np",
+            )
+            # keep only input_ids and attention_mask
+            txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
+            batch = {"pixel_values": batch[0], **txt_inputs}
 
-        def update_state_metrics(self, state):
-            """Update internal state metrics (logged at each call to be used as x-axis)"""
-            self.state_dict = {
-                f'train/{k.split("_")[-1]}': state[k] for k in ["step", "epoch", "train_time", "train_samples"]
-            }
-            # timing metrics
-            new_step = int(state["step"])
-            new_time = time.perf_counter()
-            if new_step > self.step:
-                # remove time for eval & save
-                delta_time = new_time - self.time - self.offset_time
-                self.offset_time = 0
-                time_per_step = delta_time / (new_step - self.step)
-                self.step = new_step
-                self.time = new_time
-                self.log_time("train_per_step", time_per_step, offset=False)
-                self.log_time("train_per_log", delta_time, offset=False)
+            # convert to jax arrays
+            data_global_shape_eval = jax.tree_map(_get_global_shape, batch)
+            # split per device
+            batch = jax.tree_map(lambda x: np.split(x, num_local_devices, axis=0), batch)
+            # put data on device
+            batch = jax.tree_map(
+                lambda x: [jax.device_put(arr, d) for arr, d in zip(x, local_addressable_devices)],
+                batch,
+                is_leaf=lambda x: isinstance(x, list),
+            )
+            # create global array
+            batch = jax.tree_map(
+                lambda shape, data: jax.make_array_from_single_device_arrays(shape, data_global_sharding, data),
+                data_global_shape_eval,
+                batch,
+                is_leaf=lambda x: isinstance(x, (list, tuple)),
+            )
+            # reshard per mesh
+            with mesh:
+                batch = reshard_data(batch)
 
-        def log_time(self, key, duration, offset=True):
-            if jax.process_index() == 0:
-                wandb.log({f"time/{key}": duration, **self.state_dict})
-            if offset:
-                self.offset_time += duration
+            # accumulate losses async
+            step_rng, rng = jax.random.split(rng)
+            with mesh:
+                metrics_batch = p_eval_step(params, batch)
+            metrics_batch = jax.device_get(metrics_batch)
+            metrics.append(p_eval_step(state, batch))
 
-        def log(self, metrics, prefix=None):
-            if jax.process_index() == 0:
-                log_metrics = {}
-                for k, v in metrics.items():
-                    if "_norm" in k:
-                        if self.step % training_args.log_norm_steps == 0:
-                            log_metrics[f"{k}/"] = unfreeze(v)
-                    elif "_hist" in k:
-                        if self.step % training_args.log_histogram_steps == 0:
-                            v = jax.tree_util.tree_map(lambda x: jax.device_get(x), unfreeze(v))
-                            v = jax.tree_util.tree_map(
-                                lambda x: wandb.Histogram(np_histogram=x),
-                                v,
-                                is_leaf=lambda x: isinstance(x, tuple),
-                            )
-                            log_metrics[f"{k}/"] = v
-                    else:
-                        if prefix is not None:
-                            k = f"{prefix}/{k}"
-                        log_metrics[k] = v
-                wandb.log({**log_metrics, **self.state_dict})
+        # get the mean of the metrics
+        metrics = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *metrics)
+        metrics = jax.tree_util.tree_map(jnp.mean, metrics)
 
-    # keep local copy of state to avoid communication
-    local_state = {
-        k: jax.device_get(getattr(state, k)).item() for k in ["step", "epoch", "train_time", "train_samples"]
-    }
+        # update timing
+        state.add_time("eval", time.perf_counter() - start_eval_time)
 
-    # init variables
-    start_time = time.perf_counter() - local_state["train_time"]
-    train_metrics = None
-    evaluation_ran = False
-    save_model_ran = False
-    profile_step = local_state["step"] + 3
-    metrics_logger = MetricsLogger(local_state["step"])
-    epochs = tqdm(
-        range(local_state["epoch"], num_epochs),
-        desc=f"Epoch ... (1/{num_epochs})",
-        position=0,
-        disable=jax.process_index() > 0,
-    )
+        # log metrics
+        state.log(metrics)
 
-    def run_evaluation():
-        # ======================== Evaluating ==============================
-        if training_args.do_eval:
-            # defragment memory
-            jax.lib.xla_bridge.get_backend().defragment()
+        # Print metrics and update progress bar
+        print(f"Eval metrics: {metrics}")
 
-            start_eval_time = time.perf_counter()
-            metrics = []
-            for batch in tqdm(
-                dataset.valid,
-                desc="Evaluating...",
-                position=2,
-                leave=False,
-                disable=jax.process_index() > 0,
-            ):
-                # preprocess batch
-                captions = [caption.decode("utf-8") for caption in batch[1]]
-                txt_inputs = tokenizer(
-                    captions,
-                    padding="max_length",
-                    truncation=True,
-                    max_length=model.config.text_config.max_position_embeddings,
-                    return_tensors="np",
-                )
-                # keep only input_ids and attention_mask
-                txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
-                batch = {"pixel_values": batch[0], **txt_inputs}
-
-                # add data dimension when using "vmap trick"
-                if training_args.use_vmap_trick:
-                    bs_shape = (
-                        training_args.local_dp_devices,
-                        training_args.batch_size_per_local_dp_device,
-                    )
-                    batch = jax.tree_util.tree_map(lambda x: x.reshape(bs_shape + x.shape[1:]), batch)
-
-                # accumulate losses async
-                metrics.append(p_eval_step(state, batch))
-
-            # get the mean of the metrics
-            metrics = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *metrics)
-            metrics = jax.tree_util.tree_map(jnp.mean, metrics)
-
-            # log metrics
-            metrics_logger.log(metrics, prefix="valid")
-
-            # Print metrics and update progress bar
-            desc = f"Epoch... ({epoch + 1}/{num_epochs} | Valid Loss: {metrics['loss']})"
-            epochs.write(desc)
-            epochs.desc = desc
-
-            # log time
-            metrics_logger.log_time("valid", time.perf_counter() - start_eval_time)
-
-            # defragment memory
-            jax.lib.xla_bridge.get_backend().defragment()
-
-            return metrics
-
-    def run_save_model(state, eval_metrics=None):
+    def run_save_model(params, opt_state):
         if jax.process_index() == 0:
             start_save_time = time.perf_counter()
             output_dir = training_args.output_dir
