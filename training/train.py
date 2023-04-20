@@ -989,7 +989,10 @@ def main():
         return loss
 
     def compute_loss(params, minibatch, dropout_rng, model_fn, train):
-        logits = model_fn(**minibatch, params=params, dropout_rng=dropout_rng, train=train)[0]
+        rngs = {"dropout": dropout_rng} if train else None
+        logits = model_fn.apply({"params": params}, rngs=rngs, deterministic=not train, **minibatch)[
+            "logits_per_image"
+        ]
         loss = clip_loss(logits)
         return loss
 
@@ -1106,7 +1109,7 @@ def main():
                 return unfreeze(jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), val))
 
             gradients_norm = maybe_fn(norm, grads, training_args.log_norm_steps)
-            params_norm = maybe_fn(norm, state.params, training_args.log_norm_steps)
+            params_norm = maybe_fn(norm, params, training_args.log_norm_steps)
 
             metrics.update(
                 {
@@ -1121,7 +1124,7 @@ def main():
                 return jax.tree_util.tree_map(lambda x: jnp.histogram(x, density=True), val)
 
             gradients_hist = maybe_fn(histogram, grads, training_args.log_histogram_steps)
-            params_hist = maybe_fn(histogram, state.params, training_args.log_histogram_steps)
+            params_hist = maybe_fn(histogram, params, training_args.log_histogram_steps)
 
             metrics.update(
                 {
@@ -1313,7 +1316,7 @@ def main():
                     captions,
                     padding="max_length",
                     truncation=True,
-                    max_length=model.config.text_config.max_position_embeddings,
+                    max_length=model.text_config["max_position_embeddings"],
                     return_tensors="np",
                 )
                 # keep only input_ids and attention_mask
