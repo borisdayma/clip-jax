@@ -93,7 +93,11 @@ class TrainingArguments:
         metadata={"help": "Beta2 for for Adam & Distributed Shampoo."},
     )
     adam_epsilon: float = field(default=1e-8, metadata={"help": "Epsilon for AdamW optimizer."})
-    block_size: int = field(
+    block_size_text: int = field(
+        default=1024,
+        metadata={"help": "Chunked size for large layers with Distributed Shampoo."},
+    )
+    block_size_vision: int = field(
         default=1024,
         metadata={"help": "Chunked size for large layers with Distributed Shampoo."},
     )
@@ -402,7 +406,7 @@ def split_scanned_params(data):
     """Split params between scanned and non-scanned"""
     # NOTE: technically this is not needed with Adam (and could be slower) but is required with shampoo
     flat = flatten_dict(unfreeze(data))
-    split = {"standard": {}, "scanned_text": {}, "scanned_vision": {}}
+    split = {"text": {}, "vision": {}, "scanned_text": {}, "scanned_vision": {}}
     for k, v in flat.items():
         if "layers" in k:
             if "text" in k:
@@ -410,7 +414,10 @@ def split_scanned_params(data):
             else:
                 split["scanned_vision"][k] = v
         else:
-            split["standard"][k] = v
+            if "text" in k:
+                split["text"][k] = v
+            else:
+                split["vision"][k] = v
     # remove empty keys
     split = {k: v for k, v in split.items() if v}
     for k, v in split.items():
@@ -598,8 +605,8 @@ def main():
     # Parameter count
     num_params = {
         "Total": count_params(logical_params),
-        "Text": count_params(logical_params["text_config"]),
-        "Vision": count_params(logical_params["vision_config"]),
+        "Text": count_params(logical_params["text"]),
+        "Vision": count_params(logical_params["vision"]),
     }
 
     # Log some info
@@ -792,7 +799,6 @@ def main():
         )
         _opt = partial(
             distributed_shampoo,
-            block_size=training_args.block_size,
             beta1=training_args.beta1,
             beta2=training_args.beta2,
             diagonal_epsilon=1e-10,
@@ -818,8 +824,10 @@ def main():
             generate_training_metrics=False,
         )
         # get the real optimizer and helper functions
-        opt = _opt(learning_rate_fn)
-        update_fn = opt.update
+        opt_text = _opt(learning_rate_fn, block_size=training_args.block_size_text)
+        opt_vision = _opt(learning_rate_fn, block_size=training_args.block_size_text)
+        update_fn_text = opt_text.update
+        update_fn_vision = opt_vision.update
 
         # for main optimizer, we need to allow scanned layers
         optimizer = {}
@@ -828,11 +836,16 @@ def main():
             if ("scanned_text" in k) or ("scanned_vision" in k):
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
-            optimizer[k] = opt.init(p)
+            optimizer[k] = (
+                opt_vision.init(p) if any(name in k for name in ["vision", "scanned_vision"]) else opt_text.init(p)
+            )
             opt_fn[k] = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
                 optimizer[k].pspec_fn, optimizer[k].shape_and_dtype_fn
             )
-            optimizer[k] = optax.GradientTransformation(optimizer[k].init_fn, update_fn)
+            optimizer[k] = optax.GradientTransformation(
+                optimizer[k].init_fn,
+                update_fn_vision if any(name in k for name in ["vision", "scanned_vision"]) else update_fn_text,
+            )
 
     elif training_args.optim == "adam":
         _opt = partial(
@@ -1068,7 +1081,7 @@ def main():
         new_params, new_opt_state = update_params(params, opt_state, grads)
 
         # get opt_state_step - TODO: only shampoo is supported at the moment
-        opt_state_step = opt_state["standard"][0]
+        opt_state_step = opt_state["text"][0]
 
         # get metrics
         metrics = {
