@@ -1,8 +1,7 @@
 # Below section adapted from t5x
-def standard_logical_axis_rules(
+def logical_axis_rules(
     activation_partitioning_dims=1,
     parameter_partitioning_dims=1,
-    additional_rules=None,
 ):
     """Default sharding rules in terms of logical axis names.
 
@@ -62,14 +61,16 @@ def standard_logical_axis_rules(
             ("embed", "model"),
             ("embed", "data"),
         ]
+    elif activation_partitioning_dims == 3:
+        # Does not make sense but it's to create a new partitioning rule.
+        rules = [
+            ("batch", "data"),
+            ("embed", "data"),
+        ]
     else:
         raise ValueError(
             f"`activation_partitioning_dims` = {activation_partitioning_dims} "
             f"`parameter_partitioning_dims` = {parameter_partitioning_dims} "
             "is not supported."
         )
-
-    if additional_rules:
-        rules.extend(additional_rules)
-
     return rules
