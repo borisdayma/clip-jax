@@ -5,20 +5,23 @@ This repository is used to train CLIP models from 🤗 transformers using JAX.
 ## Installation
 
 ```bash
-pip install -e .
+pip install clip-jax
 ```
+
+Note: this package is under active development, install from source for latest version.
 
 ## Usage
 
-1. Use [dataset/prepare_dataset.ipynb](dataset/prepare_dataset.ipynb) to prepare your dataset.
-1. Train the model with [training/train_clip.py](training/train_clip.py).
+1. Use [utils/prepare_dataset.ipynb](utils/prepare_dataset.ipynb) to prepare your dataset.
+1. Train the model with [training/train.py](training/train.py).
 
 ## Supported downstream tasks
 
-- [x] Image classification with `FlaxCLIPVisionModelForImageClassification`
+- [ ] Image classification with `CLIPVisionModelForImageClassification`
+- [ ] Text encoder with `CLIPTextModelForFineTuning`
 
 ## TODO
 
-- [ ] Add guides
+- [ ] Add guides: download LAION, train CLIP
 - [ ] Add pre-trained models
-- [ ] Add more downstream tasks
+- [ ] Add script for downstream tasks
