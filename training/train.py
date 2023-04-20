@@ -494,6 +494,13 @@ class State:
     def log(self, metrics={}):
         if jax.process_index() == 0:
             metrics = jax.device_get(metrics)
+            # unbox LogicallyPartitioned - https://github.com/google/maxtext/blob/ba01756ff0d96819fb2739bd6bc3648e0eeb8d2b/MaxText/max_utils.py#L77
+            metrics = jax.tree_util.tree_map(
+                lambda x: x.unbox() if isinstance(x, flax.linen.spmd.LogicallyPartitioned) else x,
+                metrics,
+                is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned),
+            )
+
             log_metrics = flatten_dict({"state": self.to_dict()}, sep="/")
             for k, v in metrics.items():
                 if "_norm" in k:
@@ -1181,7 +1188,7 @@ def main():
                 captions,
                 padding="max_length",
                 truncation=True,
-                max_length=model.config.text_config.max_position_embeddings,
+                max_length=model.config.text_config["max_position_embeddings"],
                 return_tensors="np",
             )
             # keep only input_ids and attention_mask
