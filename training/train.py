@@ -2,12 +2,9 @@ import json
 import logging
 import os
 import sys
-import tempfile
 import time
 from dataclasses import asdict, dataclass, field
-from enum import Enum
 from functools import partial
-from pathlib import Path
 from platform import python_version
 from pprint import pformat
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
@@ -422,7 +419,6 @@ def split_scanned_params(data):
     split = {k: v for k, v in split.items() if v}
     for k, v in split.items():
         split[k] = freeze(unflatten_dict(v))
-    breakpoint()
     return split
 
 
@@ -581,16 +577,17 @@ def main():
     else:
         clipConfig["text_config"]["unroll"] = 1
         clipConfig["vision_config"]["unroll"] = 1
-    if model_args.gradient_checkpointing:
+    if training_args.gradient_checkpointing:
         clipConfig["text_config"]["gradient_checkpointing"] = True
         clipConfig["vision_config"]["gradient_checkpointing"] = True
     else:
         clipConfig["text_config"]["gradient_checkpointing"] = False
         clipConfig["vision_config"]["gradient_checkpointing"] = False
+    clipConfig["dtype"] = model_args.dtype
 
     # Load model
-    model = CLIPModel(**clipConfig, dtype=model_args.dtype)
-    model_eval = model if model_args.dtype == "float32" else CLIPModel(**clipConfig, dtype="float32")
+    model = CLIPModel(**clipConfig)
+    model_eval = model if model_args.dtype == "float32" else CLIPModel(**{**clipConfig, "dtype": "float32"})
 
     # Load state
     state = State.from_config_metadata(model_args.config_metadata, model_args.restore_state)
