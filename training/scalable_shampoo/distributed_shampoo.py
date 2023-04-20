@@ -1361,7 +1361,7 @@ def distributed_shampoo(
         Args:
           params: the parameters that should be updated.
         """
-        params_flat, treedef = jax.tree_flatten(params)
+        params_flat, treedef = jax.tree_util.tree_flatten(params)
         # Find max size to pad to.
         max_size = 0
         for param in params_flat:
@@ -1416,7 +1416,7 @@ def distributed_shampoo(
                 )
             )
 
-        local_stats = jax.tree_unflatten(treedef, local_stats_flat)
+        local_stats = jax.tree_util.tree_unflatten(treedef, local_stats_flat)
         to_pad = -len(padded_statistics) % num_devices_for_pjit
         if max_size == 0:
             to_pad = num_devices_for_pjit
@@ -1468,8 +1468,8 @@ def distributed_shampoo(
           partition_spec_for_statistics: PartitionSpec for the statistics.
         """
         # Parallel lists of spec, and params.
-        param_pspec_flat, _ = jax.tree_flatten(params_partition_spec, is_leaf=lambda x: x is None)
-        params_flat, treedef = jax.tree_flatten(params)
+        param_pspec_flat, _ = jax.tree_util.tree_flatten(params_partition_spec, is_leaf=lambda x: x is None)
+        params_flat, treedef = jax.tree_util.tree_flatten(params)
         assert param_pspec_flat
         assert params_flat
         # Step is replicated across cores.
@@ -1531,7 +1531,7 @@ def distributed_shampoo(
                 )
             )
 
-        local_stats = jax.tree_unflatten(treedef, local_stats_flat)
+        local_stats = jax.tree_util.tree_unflatten(treedef, local_stats_flat)
         global_stats = GlobalShardedParameterStats(
             partition_spec_for_statistics,  # pytype: disable=wrong-arg-types  # numpy-scalars
             partition_spec_for_statistics,
@@ -1548,7 +1548,7 @@ def distributed_shampoo(
           params: A pytree with params.
         """
         # Parallel lists of spec, and params.
-        params_flat, treedef = jax.tree_flatten(params)
+        params_flat, treedef = jax.tree_util.tree_flatten(params)
         assert params_flat
         # Step is replicated across cores.
         # None means cores.
@@ -1611,7 +1611,7 @@ def distributed_shampoo(
                 )
             )
 
-        local_stats = jax.tree_unflatten(treedef, local_stats_flat)
+        local_stats = jax.tree_util.tree_unflatten(treedef, local_stats_flat)
         max_statistics_size = _max_statistics_size_from_params(params_flat)
         to_pad = -num_statistics % num_devices_for_pjit
         num_statistics += to_pad
@@ -1636,7 +1636,7 @@ def distributed_shampoo(
         Returns:
           A tuple containing the new parameters and the new optimizer state.
         """
-        params_flat, treedef = jax.tree_flatten(params)
+        params_flat, treedef = jax.tree_util.tree_flatten(params)
         grads_flat = treedef.flatten_up_to(grads)
 
         global_stats = state.stats.global_stats
@@ -1659,7 +1659,7 @@ def distributed_shampoo(
         )
         updates_flat, new_stats_flat = list(zip(*outputs)) if outputs else ((), ())
 
-        updates = jax.tree_unflatten(treedef, updates_flat)
+        updates = jax.tree_util.tree_unflatten(treedef, updates_flat)
         new_local_stats_flat = []
         for new_stat, local_stat in zip(new_stats_flat, local_stats_flat):
             new_local_stats_flat.append(
@@ -1748,7 +1748,7 @@ def distributed_shampoo(
 
         if generate_training_metrics:
             new_local_stats_flat = _add_metrics_into_local_stats(new_local_stats_flat, metrics, ~perform_step)
-        new_local_stats = jax.tree_unflatten(treedef, new_local_stats_flat)
+        new_local_stats = jax.tree_util.tree_unflatten(treedef, new_local_stats_flat)
         errors = metrics.inverse_pth_root_errors
         errors = errors.reshape((-1, 1, 1))
         predicate = jnp.logical_or(jnp.isnan(errors), errors >= inverse_failure_threshold).astype(
@@ -2617,7 +2617,7 @@ def distributed_shampoo(
         if custom_preconditioner and isinstance(grads, tuple):
             grads, grads_custom = grads
 
-        params_flat, treedef = jax.tree_flatten(params)
+        params_flat, treedef = jax.tree_util.tree_flatten(params)
         stats_flat = treedef.flatten_up_to(state.stats)
         grads_flat = treedef.flatten_up_to(grads)
         stats_grads = grads_flat
@@ -2635,8 +2635,8 @@ def distributed_shampoo(
         )
         updates_flat, new_stats_flat = list(zip(*outputs)) if outputs else ((), ())
 
-        updates = jax.tree_unflatten(treedef, updates_flat)
-        new_stats = jax.tree_unflatten(treedef, new_stats_flat)
+        updates = jax.tree_util.tree_unflatten(treedef, updates_flat)
+        new_stats = jax.tree_util.tree_unflatten(treedef, new_stats_flat)
 
         new_state = ShampooState(count=state.count + 1, stats=new_stats)
         return updates, new_state
