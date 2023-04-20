@@ -1169,10 +1169,10 @@ def main():
     p_eval_step = pjit(
         eval_step,
         in_shardings=(params_spec, data_spec),
-        out_shardings=(None,),
+        out_shardings=None,
     )
 
-    def run_evaluation(rng, params, mesh):
+    def run_evaluation(params, mesh):
         start_eval_time = time.perf_counter()
         metrics = []
         for batch in tqdm(
@@ -1217,11 +1217,10 @@ def main():
                 batch = reshard_data(batch)
 
             # accumulate losses async
-            step_rng, rng = jax.random.split(rng)
             with mesh:
                 metrics_batch = p_eval_step(params, batch)
             metrics_batch = jax.device_get(metrics_batch)
-            metrics.append(p_eval_step(state, batch))
+            metrics.append(metrics_batch)
 
         # get the mean of the metrics
         metrics = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *metrics)
@@ -1291,7 +1290,6 @@ def main():
     opt_state_step = 0  # ensure it is defined in evaluation mode
     step_start = step  # define it for test mode
     metrics = {}  # ensure it is defined in evaluation mode
-    eval_rng, rng = jax.random.split(rng)  # keep a constistent rng for evaluation
     epochs = tqdm(
         range(training_args.num_train_epochs),
         desc=f"Epoch ... (1/{training_args.num_train_epochs})",
@@ -1382,7 +1380,7 @@ def main():
                 # evaluation
                 if training_args.do_eval and step % training_args.eval_steps == 0:
                     state.update(step=step, samples=samples, opt_state_step=opt_state_step)
-                    run_evaluation(eval_rng, params, mesh)
+                    run_evaluation(params, mesh)
                     evaluation_ran = True
 
                 # save model
@@ -1406,7 +1404,7 @@ def main():
         # run final evaluation
         if training_args.do_eval and not evaluation_ran:
             state.update(step=step, samples=samples, opt_state_step=opt_state_step)
-            run_evaluation(eval_rng, params, mesh)
+            run_evaluation(params, mesh)
 
         # save final model
         if not save_model_ran:
