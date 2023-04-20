@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2022 The Google Research Authors.
+# Copyright 2023 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -40,12 +40,7 @@ class QuantizedValue:
             return QuantizedValue([], [], [], quantized_dtype, extract_diagonal, [])
         quantized, diagonal_fvalue, bucket_size = QuantizedValue.quantize(fvalue, quantized_dtype, extract_diagonal)
         return QuantizedValue(
-            quantized,
-            diagonal_fvalue,
-            bucket_size,
-            quantized_dtype,
-            extract_diagonal,
-            list(quantized.shape),
+            quantized, diagonal_fvalue, bucket_size, quantized_dtype, extract_diagonal, list(quantized.shape)
         )
 
     # Quantization is from Lingvo JAX optimizers.
@@ -82,7 +77,7 @@ class QuantizedValue:
         # SM3 style which will be useful for diagonal statistics
         # We first decide the scale.
         if fvalue.ndim < 1:
-            raise ValueError(f"Input array {fvalue} must have a strictly positive number of dimensions.")
+            raise ValueError(f"Input array {fvalue} must have a strictly positive number of " "dimensions.")
 
         max_abs = jnp.max(jnp.abs(fvalue), axis=0)
         bucket_size = max_abs / num_buckets
