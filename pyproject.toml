@@ -12,6 +12,7 @@ dependencies = [
     "flax",
     "jax",
     "numpy",
+    "orbax",
     "tensorflow-io[tensorflow-cpu]",
     "transformers",
 ]
@@ -22,6 +23,7 @@ dev = [
     "isort",
     "optax",
     "tqdm",
+    "wandb",
 ]
 
 [tool.hatch.version]
