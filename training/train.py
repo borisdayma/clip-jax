@@ -1188,7 +1188,7 @@ def main():
                 captions,
                 padding="max_length",
                 truncation=True,
-                max_length=model.config.text_config["max_position_embeddings"],
+                max_length=model.text_config["max_position_embeddings"],
                 return_tensors="np",
             )
             # keep only input_ids and attention_mask
