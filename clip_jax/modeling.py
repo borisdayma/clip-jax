@@ -612,6 +612,9 @@ class CLIPEncoderLayer(nn.Module):
                 name="pre_attention_norm",
             )(hidden_states)
             hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        # Reshape attention mask for direct use in attention heads
+        if attention_mask is not None:
+            attention_mask = nn.attention.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
         hidden_states = MultiHeadDotProductAttention(
             num_heads=self.num_heads,
             dtype=self.dtype,
