@@ -1040,9 +1040,11 @@ class CLIPModel(nn.Module):
         )(text_embeds)
 
         # normalize features
-        # TODO: do we need a more stable version such as "lax.rsqrt(jpn.mean(lax.square(x)) + eps)"?
-        def normalize(x):
-            return x / jnp.linalg.norm(x, axis=-1, keepdims=True)
+        def normalize(x, eps=1e-7, safe_norm=True):
+            if safe_norm:
+                return x * jax.lax.rsqrt(jnp.sum(jax.lax.square(x), axis=-1, keepdims=True) + eps)
+            else:
+                return x / jnp.linalg.norm(x, axis=-1, keepdims=True)
 
         image_embeds = normalize(image_embeds)
         text_embeds = normalize(text_embeds)
