@@ -40,6 +40,7 @@
     "mlp_dim": 1024
   },
   "projection_dim": 512,
-  "logit_scale_init_value": 2.6592,
+  "logit_scale_init_value": 10.0,
+  "logit_bias_init_value": -10.0,
   "dtype": "float32"
 }
