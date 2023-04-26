@@ -1028,6 +1028,9 @@ def main():
         # reshape to (dp_devices, bs // dp_devices, -1)
         text_embeds = text_embeds.reshape((dp_devices, bs // dp_devices, -1))
         image_embeds = image_embeds.reshape((dp_devices, bs // dp_devices, -1))
+        # enforce sharding per device
+        text_embeds = with_sharding_constraint(text_embeds, data_spec)
+        image_embeds = with_sharding_constraint(image_embeds, data_spec)
         # calculate loss per device
         loss = jax.vmap(mini_batch_sigmoid_loss, in_axes=(0, 0, None, None), out_axes=0)(
             text_embeds, image_embeds, outputs["logit_scale"], outputs["logit_bias"]
@@ -1037,6 +1040,8 @@ def main():
             def add_negative_sigmoid_loss(offset, loss):
                 # offset image embeds only
                 offset_image_embeds = jnp.roll(image_embeds, offset, axis=0)
+                # move to dp device
+                offset_image_embeds = with_sharding_constraint(offset_image_embeds, data_spec)
                 # calculate loss
                 loss += jax.vmap(mini_batch_negative_sigmoid_loss, in_axes=(0, 0, None, None), out_axes=0)(
                     text_embeds, offset_image_embeds, outputs["logit_scale"], outputs["logit_bias"]
