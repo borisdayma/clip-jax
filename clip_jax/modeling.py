@@ -974,6 +974,7 @@ class CLIPModel(nn.Module):
     vision_config: Any
     projection_dim: int
     logit_scale_init_value: float = 2.6592
+    logit_bias_init_value: float = 0.0
     dtype: str = "float32"
 
     def __post_init__(self):
@@ -1057,8 +1058,13 @@ class CLIPModel(nn.Module):
                 (1,),
             )
         )
+        logit_bias = self.param(
+            "logit_bias",
+            nn.with_logical_partitioning(nn.initializers.constant(self.logit_bias_init_value, dtype), (None,)),
+            (1,),
+        )
 
-        logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
+        logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale + logit_bias
         logits_per_image = logits_per_text.T
 
         return dict(
