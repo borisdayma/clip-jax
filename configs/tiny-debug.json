@@ -35,7 +35,7 @@
     "num_layers": 2,
     "use_rmsnorm": true,
     "ln_type": "normformer",
-    "num_heads": 8,
+    "num_heads": 4,
     "use_causal_mask": false,
     "mlp_dim": 512
   },
