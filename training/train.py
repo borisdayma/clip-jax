@@ -1035,12 +1035,11 @@ def main():
         if training_args.dp_devices > 1:
             # add negative loss with offset of inputs
             def add_negative_sigmoid_loss(offset, loss):
-                # offset embeds
-                offset_text_embeds = jnp.roll(text_embeds, offset, axis=0)
+                # offset image embeds only
                 offset_image_embeds = jnp.roll(image_embeds, offset, axis=0)
                 # calculate loss
                 loss += jax.vmap(mini_batch_negative_sigmoid_loss, in_axes=(0, 0, None, None), out_axes=0)(
-                    offset_text_embeds, offset_image_embeds, outputs["logit_scale"], outputs["logit_bias"]
+                    text_embeds, offset_image_embeds, outputs["logit_scale"], outputs["logit_bias"]
                 )
                 return loss
 
