@@ -74,6 +74,10 @@ class TrainingArguments:
         default=1,
         metadata={"help": ("Number of updates steps to accumulate before performing an update" " pass.")},
     )
+    loss_type: str = field(
+        default="cross_entropy",
+        metadata={"help": ("The type of loss to use. Can be 'cross_entropy' (default) or 'sigmoid'.")},
+    )
     gradient_checkpointing: bool = field(default=False, metadata={"help": "Use gradient checkpointing."})
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate."})
     optim: str = field(
@@ -252,6 +256,10 @@ class TrainingArguments:
         if not self.do_train:
             # eval only
             self.num_train_epochs = 1
+        assert self.loss_type in [
+            "cross_entropy",
+            "sigmoid",
+        ], f"Selected loss type not supported: {self.loss_type}"
         assert self.optim in [
             "distributed_shampoo",
             "adam",
@@ -993,17 +1001,65 @@ def main():
         log_normalizers = jax.nn.logsumexp(logits, axis=axis)
         return jnp.mean(log_normalizers - label_logits)
 
-    def clip_loss(similarity):
+    def cross_entropy_loss(similarity):
         # TODO: should we increase precision for large batch, jnp.float64 may have a minimal impact on memory/speed if similarity converted only here
         loss = (cross_entropy(similarity, axis=0) + cross_entropy(similarity, axis=1)) / 2
         return loss
 
+    def mini_batch_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias):
+        bs = text_embeds.shape[0]
+        labels = 2 * jnp.eye(bs) - jnp.ones((bs, bs))
+        logits = jnp.matmul(text_embeds, image_embeds.T) * logit_scale + logit_bias
+        return -jnp.mean(jax.nn.log_sigmoid(labels * logits))
+
+    def mini_batch_negative_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias):
+        """Offset should be >0 to use only negative samples"""
+        bs = text_embeds.shape[0]
+        labels = -jnp.ones((bs, bs))
+        logits = jnp.matmul(text_embeds, image_embeds.T) * logit_scale + logit_bias
+        return -jnp.mean(jax.nn.log_sigmoid(labels * logits))
+
+    def sigmoid_loss(outputs):
+        text_embeds = outputs["text_embeds"]
+        image_embeds = outputs["image_embeds"]
+        # extract local embeds
+        bs = text_embeds.shape[0]
+        dp_devices = training_args.dp_devices
+        # reshape to (dp_devices, bs // dp_devices, -1)
+        text_embeds = text_embeds.reshape((dp_devices, bs // dp_devices, -1))
+        image_embeds = image_embeds.reshape((dp_devices, bs // dp_devices, -1))
+        # calculate loss per device
+        loss = jax.vmap(mini_batch_sigmoid_loss, in_axes=(0, 0, None, None), out_axes=0)(
+            text_embeds, image_embeds, outputs["logit_scale"], outputs["logit_bias"]
+        )
+        if training_args.dp_devices > 1:
+            # add negative loss with offset of inputs
+            def add_negative_sigmoid_loss(offset, loss):
+                # offset embeds
+                offset_text_embeds = jnp.roll(text_embeds, offset, axis=0)
+                offset_image_embeds = jnp.roll(image_embeds, offset, axis=0)
+                # calculate loss
+                loss += jax.vmap(mini_batch_negative_sigmoid_loss, in_axes=(0, 0, None, None), out_axes=0)(
+                    offset_text_embeds, offset_image_embeds, outputs["logit_scale"], outputs["logit_bias"]
+                )
+                return loss
+
+            loss = jax.lax.fori_loop(lower=1, upper=dp_devices, body_fun=add_negative_sigmoid_loss, init_val=loss)
+
+        # average loss across devices
+        loss = jnp.mean(loss)
+        return loss
+
     def compute_loss(params, minibatch, dropout_rng, model_fn, train):
         rngs = {"dropout": dropout_rng} if train else None
-        logits = model_fn.apply({"params": params}, rngs=rngs, deterministic=not train, **minibatch)[
-            "logits_per_image"
-        ]
-        loss = clip_loss(logits)
+        outputs = model_fn.apply({"params": params}, rngs=rngs, deterministic=not train, **minibatch)
+        if training_args.loss_type == "cross_entropy":
+            logits = outputs["logits_per_text"]
+            loss = cross_entropy_loss(logits)
+        elif training_args.loss_type == "sigmoid":
+            loss = sigmoid_loss(outputs)
+        else:
+            raise NotImplementedError
         return loss
 
     # Define gradient update step fn

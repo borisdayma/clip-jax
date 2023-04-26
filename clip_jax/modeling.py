@@ -1058,13 +1058,15 @@ class CLIPModel(nn.Module):
                 (1,),
             )
         )
+
+        # logit bias is only used for sigmoid loss
         logit_bias = self.param(
             "logit_bias",
             nn.with_logical_partitioning(nn.initializers.constant(self.logit_bias_init_value, dtype), (None,)),
             (1,),
         )
 
-        logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale + logit_bias
+        logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
         logits_per_image = logits_per_text.T
 
         return dict(
@@ -1074,6 +1076,8 @@ class CLIPModel(nn.Module):
             image_embeds=image_embeds,
             text_model_output=text_outputs,
             vision_model_output=vision_outputs,
+            logit_scale=logit_scale,
+            logit_bias=logit_bias,
         )
 
     def init_inputs(config, rng: jax.random.PRNGKey):
