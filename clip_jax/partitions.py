@@ -24,7 +24,6 @@ def logical_axis_rules(
             ("embed_proj", "model"),
             ("heads", "model"),
             ("kv", None),
-            ("joined_kv", "model"),
         ]
     elif activation_partitioning_dims == 2 and parameter_partitioning_dims == 1:
         rules = [
@@ -34,7 +33,6 @@ def logical_axis_rules(
             ("embed_proj", "model"),
             ("heads", "model"),
             ("kv", None),
-            ("joined_kv", "model"),
             ("embed", "model"),
         ]
     elif activation_partitioning_dims == 1 and parameter_partitioning_dims == 2:
@@ -45,8 +43,6 @@ def logical_axis_rules(
             ("embed_proj", "model"),
             ("heads", "model"),
             ("kv", None),
-            ("joined_kv", "model"),
-            ("image_kv", None),
             ("embed", "data"),
         ]
     elif activation_partitioning_dims == 2 and parameter_partitioning_dims == 2:
@@ -57,14 +53,7 @@ def logical_axis_rules(
             ("embed_proj", "model"),
             ("heads", "model"),
             ("kv", None),
-            ("joined_kv", "model"),
             ("embed", "model"),
-            ("embed", "data"),
-        ]
-    elif activation_partitioning_dims == 3:
-        # Does not make sense but it's to create a new partitioning rule.
-        rules = [
-            ("batch", "data"),
             ("embed", "data"),
         ]
     else:
