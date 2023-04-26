@@ -987,7 +987,7 @@ def main():
         logits_max = jnp.max(logits, axis=axis, keepdims=True)
         logits -= jax.lax.stop_gradient(logits_max)
         label_logits = jnp.diag(logits)
-        log_normalizers = jnp.log(jnp.sum(jnp.exp(logits), axis=axis))
+        log_normalizers = jax.nn.logsumexp(logits, axis=axis)
         return jnp.mean(log_normalizers - label_logits)
 
     def clip_loss(similarity):
