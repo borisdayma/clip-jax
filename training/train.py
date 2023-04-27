@@ -1036,20 +1036,25 @@ def main():
         loss = jax.vmap(mini_batch_sigmoid_loss, in_axes=(0, 0, None, None), out_axes=0)(
             text_embeds, image_embeds, outputs["logit_scale"], outputs["logit_bias"]
         )
+        loss = with_sharding_constraint(loss, data_spec)
+
         if training_args.dp_devices > 1:
             # add negative loss with offset of inputs
-            def add_negative_sigmoid_loss(offset, loss):
+            def negative_sigmoid_loss(offset):
                 # offset image embeds only
                 offset_image_embeds = jnp.roll(image_embeds, offset, axis=0)
                 # move to dp device
                 offset_image_embeds = with_sharding_constraint(offset_image_embeds, embed_spec)
                 # calculate loss
-                loss += jax.vmap(mini_batch_negative_sigmoid_loss, in_axes=(0, 0, None, None), out_axes=0)(
+                loss = jax.vmap(mini_batch_negative_sigmoid_loss, in_axes=(0, 0, None, None), out_axes=0)(
                     text_embeds, offset_image_embeds, outputs["logit_scale"], outputs["logit_bias"]
                 )
+                loss = with_sharding_constraint(loss, data_spec)
                 return loss
 
-            loss = jax.lax.fori_loop(lower=1, upper=dp_devices, body_fun=add_negative_sigmoid_loss, init_val=loss)
+            for i in range(1, dp_devices):
+                loss += negative_sigmoid_loss(i)
+                loss = with_sharding_constraint(loss, data_spec)
 
         # average loss across devices
         loss = jnp.mean(loss)
