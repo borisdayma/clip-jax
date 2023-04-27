@@ -4,16 +4,17 @@ WANDB_NOTES=$(cat ~/instance_name) python train.py \
     --assert_TPU_available \
     --unroll \
     --output_dir gs://craiyon_models_us_central2/clip/$UUID \
-    --config_name ../configs/tiny-debug.json --dtype float32 \
+    --config_name ../configs/small-patch16.json --dtype float32 \
     --key_image webp_256 \
     --train_folder train_files.pkl --valid_folder valid_files.pkl \
     --tokenizer_name craiyon/clip/craiyon_tokenizer:v0 \
     --do_train --do_eval \
-    --batch_size_per_node 64 --gradient_accumulation_steps 2 \
-    --learning_rate 0.00001 --warmup_steps 0 --lr_offset 0 \
+    --batch_size_per_node 4096 --gradient_accumulation_steps 1 \
+    --learning_rate 0.0001 --warmup_steps 2000 --lr_offset 0 \
     --optim distributed_shampoo --beta1 0.9 --beta2 0.99 --weight_decay 0.0 \
-    --block_size_text 1024 --block_size_vision 1024 --nesterov \
+    --block_size_text 512 --block_size_vision 512 --nesterov \
     --graft_type rmsprop_normalized --preconditioning_compute_steps 20 \
     --mp_devices 1 --shard_shampoo_across data \
     --activation_partitioning_dims 1 --parameter_partitioning_dims 1 \
-    --logging_steps 20 --eval_steps 100 --save_steps 110 --do_test_steps 120
+    --loss_type sigmoid \
+    --logging_steps 100 --eval_steps 500 --save_steps 5000 --do_test_steps 100000
