@@ -800,7 +800,7 @@ class CLIPTextTransformer(nn.Module):
             deterministic=deterministic,
         )
         last_hidden_state = encoder_outputs["last_hidden_state"]
-        # last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
         last_hidden_state = norm(self.use_rmsnorm)(
             dtype=dtype,
             use_bias=self.use_bias,
@@ -809,7 +809,7 @@ class CLIPTextTransformer(nn.Module):
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
             name="final_norm",
         )(last_hidden_state)
-        # last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
         if not self.use_causal_mask:
@@ -824,7 +824,7 @@ class CLIPTextTransformer(nn.Module):
             pooled_output = last_hidden_state[
                 jnp.arange(last_hidden_state.shape[0]), _get_id_pos(input_ids, self.eos_token_id)
             ]
-        # pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         return dict(
             last_hidden_state=last_hidden_state,
@@ -910,7 +910,8 @@ class CLIPVisionTransformer(nn.Module):
         # average pool
         # TEMP: test sharding issues
         # pooled_output = last_hidden_state[:, 0, :]
-        pooled_output = last_hidden_state.mean(axis=1)
+        # pooled_output = last_hidden_state.mean(axis=1)
+        pooled_output = jnp.sum(last_hidden_state, axis=1)
         pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         pooled_output = norm(self.use_rmsnorm)(
