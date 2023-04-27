@@ -909,9 +909,9 @@ class CLIPVisionTransformer(nn.Module):
 
         # average pool
         # TEMP: test sharding issues
-        # pooled_output = last_hidden_state[:, 0, :]
-        # pooled_output = last_hidden_state.mean(axis=1)
-        pooled_output = jnp.sum(last_hidden_state, axis=1)
+        # pooled_output = last_hidden_state[:, 0, :]  # this works but it's not a mean
+        # pooled_output = last_hidden_state.mean(axis=1)  # this leads to huge memory usage
+        pooled_output = jnp.einsum("ijk->ik", last_hidden_state) / last_hidden_state.shape[1]
         pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         pooled_output = norm(self.use_rmsnorm)(
