@@ -407,104 +407,106 @@ class MultiHeadDotProductAttention(Module):
         assert qkv_features % self.num_heads == 0, "Memory dimension must be divisible by number of heads."
         head_dim = qkv_features // self.num_heads
 
-        dense = functools.partial(
-            DenseGeneral,
-            axis=-1,
-            dtype=self.dtype,
-            param_dtype=self.param_dtype,
-            features=(self.num_heads, head_dim),
-            kernel_init=nn.with_logical_partitioning(self.kernel_init, ("embed", "heads", "kv")),
-            bias_init=nn.with_logical_partitioning(self.bias_init, ("kv",)),
-            use_bias=self.use_bias,
-            precision=self.precision,
-            dot_general=self.qkv_dot_general,
-        )
-        # project inputs_q to multi-headed q/k/v
-        # dimensions are then [batch..., length, n_heads, n_features_per_head]
-        query, key, value = (
-            dense(name="query")(inputs_q),
-            dense(name="key")(inputs_kv),
-            dense(name="value")(inputs_kv),
-        )
+        with jax.profiler.TraceAnnotation("Attention"):
+            dense = functools.partial(
+                DenseGeneral,
+                axis=-1,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                features=(self.num_heads, head_dim),
+                kernel_init=nn.with_logical_partitioning(self.kernel_init, ("embed", "heads", "kv")),
+                bias_init=nn.with_logical_partitioning(self.bias_init, ("kv",)),
+                use_bias=self.use_bias,
+                precision=self.precision,
+                dot_general=self.qkv_dot_general,
+            )
+            # project inputs_q to multi-headed q/k/v
+            # dimensions are then [batch..., length, n_heads, n_features_per_head]
+            query, key, value = (
+                dense(name="query")(inputs_q),
+                dense(name="key")(inputs_kv),
+                dense(name="value")(inputs_kv),
+            )
 
-        if self.use_rotary:
-            assert self.max_length is not None, "max_length must be specified for rotary embeddings."
-            # source: https://github.com/google-research/jestimator/blob/main/jestimator/models/rope/modeling.py
-            sin, cos = generate_fixed_pos_embedding(head_dim, self.max_length)
-            query, key = apply_rotary_embedding(query, key, cos, sin)
+            if self.use_rotary:
+                assert self.max_length is not None, "max_length must be specified for rotary embeddings."
+                # source: https://github.com/google-research/jestimator/blob/main/jestimator/models/rope/modeling.py
+                sin, cos = generate_fixed_pos_embedding(head_dim, self.max_length)
+                query, key = apply_rotary_embedding(query, key, cos, sin)
 
-        # query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
-        # key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
-        # value = nn.with_logical_constraint(value, ("batch", "length", "heads", "kv"))
+            # query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+            # key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+            # value = nn.with_logical_constraint(value, ("batch", "length", "heads", "kv"))
 
-        # During fast autoregressive decoding, we feed one position at a time,
-        # and cache the keys and values step by step.
-        if self.decode:
-            # detect if we're initializing by absence of existing cache data.
-            is_initialized = self.has_variable("cache", "cached_key")
-            cached_key = self.variable("cache", "cached_key", jnp.zeros, key.shape, key.dtype)
-            cached_value = self.variable("cache", "cached_value", jnp.zeros, value.shape, value.dtype)
-            cache_index = self.variable("cache", "cache_index", lambda: jnp.array(0, dtype=jnp.int32))
-            if is_initialized:
-                *batch_dims, max_length, num_heads, depth_per_head = cached_key.value.shape
-                # shape check of cached keys against query input
-                expected_shape = tuple(batch_dims) + (1, num_heads, depth_per_head)
-                if expected_shape != query.shape:
-                    raise ValueError(
-                        "Autoregressive cache shape error, "
-                        "expected query shape %s instead got %s." % (expected_shape, query.shape)
+            # During fast autoregressive decoding, we feed one position at a time,
+            # and cache the keys and values step by step.
+            if self.decode:
+                # detect if we're initializing by absence of existing cache data.
+                is_initialized = self.has_variable("cache", "cached_key")
+                cached_key = self.variable("cache", "cached_key", jnp.zeros, key.shape, key.dtype)
+                cached_value = self.variable("cache", "cached_value", jnp.zeros, value.shape, value.dtype)
+                cache_index = self.variable("cache", "cache_index", lambda: jnp.array(0, dtype=jnp.int32))
+                if is_initialized:
+                    *batch_dims, max_length, num_heads, depth_per_head = cached_key.value.shape
+                    # shape check of cached keys against query input
+                    expected_shape = tuple(batch_dims) + (1, num_heads, depth_per_head)
+                    if expected_shape != query.shape:
+                        raise ValueError(
+                            "Autoregressive cache shape error, "
+                            "expected query shape %s instead got %s." % (expected_shape, query.shape)
+                        )
+                    # update key, value caches with our new 1d spatial slices
+                    cur_index = cache_index.value
+                    indices = (0,) * len(batch_dims) + (cur_index, 0, 0)
+                    key = jax.lax.dynamic_update_slice(cached_key.value, key, indices)
+                    value = jax.lax.dynamic_update_slice(cached_value.value, value, indices)
+                    cached_key.value = key
+                    cached_value.value = value
+                    cache_index.value = cache_index.value + 1
+                    # causal mask for cached decoder self-attention:
+                    # our single query position should only attend to those key
+                    # positions that have already been generated and cached,
+                    # not the remaining zero elements.
+                    mask = combine_masks(
+                        mask,
+                        jnp.broadcast_to(jnp.arange(max_length) <= cur_index, tuple(batch_dims) + (1, 1, max_length)),
                     )
-                # update key, value caches with our new 1d spatial slices
-                cur_index = cache_index.value
-                indices = (0,) * len(batch_dims) + (cur_index, 0, 0)
-                key = jax.lax.dynamic_update_slice(cached_key.value, key, indices)
-                value = jax.lax.dynamic_update_slice(cached_value.value, value, indices)
-                cached_key.value = key
-                cached_value.value = value
-                cache_index.value = cache_index.value + 1
-                # causal mask for cached decoder self-attention:
-                # our single query position should only attend to those key
-                # positions that have already been generated and cached,
-                # not the remaining zero elements.
-                mask = combine_masks(
-                    mask, jnp.broadcast_to(jnp.arange(max_length) <= cur_index, tuple(batch_dims) + (1, 1, max_length))
-                )
 
-        dropout_rng = None
-        if self.dropout_rate > 0.0:  # Require `deterministic` only if using dropout.
-            m_deterministic = merge_param("deterministic", self.deterministic, deterministic)
-            if not m_deterministic:
-                dropout_rng = self.make_rng("dropout")
-        else:
-            m_deterministic = True
+            dropout_rng = None
+            if self.dropout_rate > 0.0:  # Require `deterministic` only if using dropout.
+                m_deterministic = merge_param("deterministic", self.deterministic, deterministic)
+                if not m_deterministic:
+                    dropout_rng = self.make_rng("dropout")
+            else:
+                m_deterministic = True
 
-        # apply attention
-        x = self.attention_fn(
-            query,
-            key,
-            value,
-            mask=mask,
-            dropout_rng=dropout_rng,
-            dropout_rate=self.dropout_rate,
-            broadcast_dropout=self.broadcast_dropout,
-            deterministic=m_deterministic,
-            dtype=self.dtype,
-            precision=self.precision,
-        )  # pytype: disable=wrong-keyword-args
-        # back to the original inputs dimensions
-        out = DenseGeneral(
-            features=features,
-            axis=(-2, -1),
-            kernel_init=nn.with_logical_partitioning(self.kernel_init, ("heads", "kv", "embed")),
-            bias_init=nn.with_logical_partitioning(self.bias_init, ("embed",)),
-            use_bias=self.use_bias,
-            dtype=self.dtype,
-            param_dtype=self.param_dtype,
-            precision=self.precision,
-            dot_general=self.out_dot_general,
-            name="out",  # type: ignore[call-arg]
-        )(x)
-        return out
+            # apply attention
+            x = self.attention_fn(
+                query,
+                key,
+                value,
+                mask=mask,
+                dropout_rng=dropout_rng,
+                dropout_rate=self.dropout_rate,
+                broadcast_dropout=self.broadcast_dropout,
+                deterministic=m_deterministic,
+                dtype=self.dtype,
+                precision=self.precision,
+            )  # pytype: disable=wrong-keyword-args
+            # back to the original inputs dimensions
+            out = DenseGeneral(
+                features=features,
+                axis=(-2, -1),
+                kernel_init=nn.with_logical_partitioning(self.kernel_init, ("heads", "kv", "embed")),
+                bias_init=nn.with_logical_partitioning(self.bias_init, ("embed",)),
+                use_bias=self.use_bias,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                precision=self.precision,
+                dot_general=self.out_dot_general,
+                name="out",  # type: ignore[call-arg]
+            )(x)
+            return out
 
 
 class CLIPMLP(nn.Module):
@@ -523,57 +525,62 @@ class CLIPMLP(nn.Module):
         assert self.ln_type in ["normformer", "preln"], f"ln_type {self.ln_type} not supported."
         # Iterate over specified MLP input activation functions.
         # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
-        if self.ln_type in ["normformer", "preln"]:
-            inputs = norm(self.use_rmsnorm)(
-                dtype=self.dtype,
-                use_bias=self.use_bias,
-                use_scale=self.force_scale,
-                scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
-                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
-                name="pre_mlp_norm",
-            )(inputs)
-            # inputs = nn.with_logical_constraint(inputs, ("batch", "length", "embed"))
-        activations = []
-        for idx, act_fn in enumerate(self.activations):
-            dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
-            x = DenseGeneral(
-                self.mlp_dim,
-                dtype=self.dtype,
-                use_bias=self.use_bias,
-                kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "mlp")),
-                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("mlp",)),
-                name=dense_name,
-            )(inputs)
-            x = _convert_to_activation_function(act_fn)(x)
-            activations.append(x)
-        # Take elementwise product of above intermediate activations.
-        x = functools.reduce(operator.mul, activations)
+        with jax.profiler.TraceAnnotation("MLP"):
+            if self.ln_type in ["normformer", "preln"]:
+                inputs = norm(self.use_rmsnorm)(
+                    dtype=self.dtype,
+                    use_bias=self.use_bias,
+                    use_scale=self.force_scale,
+                    scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+                    name="pre_mlp_norm",
+                )(inputs)
+                inputs = nn.with_logical_constraint(inputs, ("batch", "length", "embed"))
+            activations = []
+            for idx, act_fn in enumerate(self.activations):
+                dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
+                x = DenseGeneral(
+                    self.mlp_dim,
+                    dtype=self.dtype,
+                    use_bias=self.use_bias,
+                    kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "mlp")),
+                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("mlp",)),
+                    name=dense_name,
+                )(inputs)
+                x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+                x = _convert_to_activation_function(act_fn)(x)
+                x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+                activations.append(x)
+            # Take elementwise product of above intermediate activations.
+            x = functools.reduce(operator.mul, activations)
+            x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
 
-        # layer norm
-        if self.ln_type == "normformer":
-            # x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
-            x = norm(self.use_rmsnorm)(
+            # layer norm
+            if self.ln_type == "normformer":
+                x = norm(self.use_rmsnorm)(
+                    dtype=self.dtype,
+                    use_bias=self.use_bias,
+                    use_scale=self.force_scale,
+                    scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("mlp",)),
+                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp",)),
+                    name="mid_mlp_norm",
+                )(x)
+                x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+            # Apply dropout and final dense output projection.
+            x = nn.Dropout(rate=self.mlp_dropout_rate, broadcast_dims=(-2,), name="mlp_dropout")(
+                x, deterministic=deterministic
+            )  # Broadcast along length.
+            x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+            output = DenseGeneral(
+                inputs.shape[-1],
                 dtype=self.dtype,
                 use_bias=self.use_bias,
-                use_scale=self.force_scale,
-                scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("mlp",)),
-                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp",)),
-                name="mid_mlp_norm",
+                kernel_init=nn.with_logical_partitioning(default_kernel_init, ("mlp", "embed")),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("embed",)),
+                name="wo",
             )(x)
-        # Apply dropout and final dense output projection.
-        x = nn.Dropout(rate=self.mlp_dropout_rate, broadcast_dims=(-2,), name="mlp_dropout")(
-            x, deterministic=deterministic
-        )  # Broadcast along length.
-        # x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
-        output = DenseGeneral(
-            inputs.shape[-1],
-            dtype=self.dtype,
-            use_bias=self.use_bias,
-            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("mlp", "embed")),
-            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("embed",)),
-            name="wo",
-        )(x)
-        return output
+            output = nn.with_logical_constraint(output, ("batch", "length", "embed"))
+            return output
 
 
 class CLIPEncoderLayer(nn.Module):
