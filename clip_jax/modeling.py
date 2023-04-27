@@ -909,8 +909,8 @@ class CLIPVisionTransformer(nn.Module):
 
         # average pool
         # TEMP: test sharding issues
-        pooled_output = last_hidden_state[:, 0, :]
-        # pooled_output = last_hidden_state.mean(axis=1)
+        # pooled_output = last_hidden_state[:, 0, :]
+        pooled_output = last_hidden_state.mean(axis=1)
         pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         pooled_output = norm(self.use_rmsnorm)(
