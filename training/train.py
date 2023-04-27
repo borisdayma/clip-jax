@@ -13,6 +13,7 @@ import flax
 import flax.linen as nn
 import fsspec
 import jax
+from jax.experimental.shard_map import shard_map
 import jax.numpy as jnp
 import jaxlib
 import numpy as np
@@ -670,7 +671,10 @@ def main():
     )
     params_spec = nn.logical_to_mesh(logical_spec, rules)
     data_spec = nn.logical_to_mesh(PartitionSpec("batch"), rules)
-    embed_spec = nn.logical_to_mesh(PartitionSpec("batch", None, "embed"), rules)
+    embed_spec = nn.logical_to_mesh(PartitionSpec("batch", "embed"), rules)
+    device_spec = PartitionSpec("data", "model")
+
+    embed_reshaped_spec = nn.logical_to_mesh(PartitionSpec("batch", None, "embed"), rules)
     scan_spec = PartitionSpec(None)
 
     # Orbax checkpointer
@@ -1023,40 +1027,33 @@ def main():
     def sigmoid_loss(outputs):
         text_embeds = outputs["text_embeds"]
         image_embeds = outputs["image_embeds"]
-        # extract local embeds
-        bs = text_embeds.shape[0]
-        dp_devices = training_args.dp_devices
-        # reshape to (dp_devices, bs // dp_devices, -1)
-        text_embeds = text_embeds.reshape((dp_devices, bs // dp_devices, -1))
-        image_embeds = image_embeds.reshape((dp_devices, bs // dp_devices, -1))
-        # enforce sharding per device
-        text_embeds = with_sharding_constraint(text_embeds, embed_spec)
-        image_embeds = with_sharding_constraint(image_embeds, embed_spec)
-        # calculate loss per device
-        loss = jax.vmap(mini_batch_sigmoid_loss, in_axes=(0, 0, None, None), out_axes=0)(
-            text_embeds, image_embeds, outputs["logit_scale"], outputs["logit_bias"]
-        )
-        loss = with_sharding_constraint(loss, data_spec)
 
-        if training_args.dp_devices > 1:
-            # add negative loss with offset of inputs
-            def negative_sigmoid_loss(offset):
-                # offset image embeds only
-                offset_image_embeds = jnp.roll(image_embeds, offset, axis=0)
-                # move to dp device
-                offset_image_embeds = with_sharding_constraint(offset_image_embeds, embed_spec)
-                # calculate loss
-                loss = jax.vmap(mini_batch_negative_sigmoid_loss, in_axes=(0, 0, None, None), out_axes=0)(
-                    text_embeds, offset_image_embeds, outputs["logit_scale"], outputs["logit_bias"]
+        @partial(shard_map, mesh=mesh, in_specs=(data_spec, data_spec), out_specs=data_spec)
+        def chunked_loss(text_embeds, image_embeds):
+            axis_size = jax.lax.psum(1, axis_name="data")
+
+            # calculate local device loss
+            loss = mini_batch_sigmoid_loss(text_embeds, image_embeds, outputs["logit_scale"], outputs["logit_bias"])
+
+            # add negative losses
+            def add_negative_loss(i, carrys):
+                cumul_loss, image_embeds = carrys
+                # shift image_embeds
+                image_embeds = jax.lax.ppermute(
+                    image_embeds, axis_name="data", perm=[(j, (j - 1) % axis_size) for j in range(axis_size)]
                 )
-                loss = with_sharding_constraint(loss, data_spec)
-                return loss
+                # add loss (all negative samples)
+                cumul_loss += mini_batch_negative_sigmoid_loss(
+                    text_embeds, image_embeds, outputs["logit_scale"], outputs["logit_bias"]
+                )
+                return cumul_loss, image_embeds
 
-            for i in range(1, dp_devices):
-                loss += negative_sigmoid_loss(i)
-                loss = with_sharding_constraint(loss, data_spec)
+            loss, _ = jax.lax.fori_loop(0, axis_size - 1, add_negative_loss, (loss, image_embeds))
+            loss = loss / axis_size
+            return loss
 
         # average loss across devices
+        loss = chunked_loss(text_embeds, image_embeds)
         loss = jnp.mean(loss)
         return loss
 
