@@ -13,7 +13,6 @@ import flax
 import flax.linen as nn
 import fsspec
 import jax
-from jax.experimental.shard_map import shard_map
 import jax.numpy as jnp
 import jaxlib
 import numpy as np
@@ -32,6 +31,7 @@ from jax.experimental import PartitionSpec, multihost_utils
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.mesh_utils import create_device_mesh
 from jax.experimental.pjit import pjit, with_sharding_constraint
+from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
@@ -1013,27 +1013,34 @@ def main():
 
     def mini_batch_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias):
         bs = text_embeds.shape[0]
-        labels = 2 * jnp.eye(bs) - jnp.ones((bs, bs))
+        labels = 2 * np.eye(bs) - np.ones((bs, bs))
         logits = jnp.matmul(text_embeds, image_embeds.T) * logit_scale + logit_bias
         return -jnp.mean(jax.nn.log_sigmoid(labels * logits))
 
     def mini_batch_negative_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias):
         """Offset should be >0 to use only negative samples"""
         bs = text_embeds.shape[0]
-        labels = -jnp.ones((bs, bs))
+        labels = -np.ones((bs, bs))
         logits = jnp.matmul(text_embeds, image_embeds.T) * logit_scale + logit_bias
         return -jnp.mean(jax.nn.log_sigmoid(labels * logits))
 
     def sigmoid_loss(outputs):
         text_embeds = outputs["text_embeds"]
         image_embeds = outputs["image_embeds"]
+        logit_scale = outputs["logit_scale"]
+        logit_bias = outputs["logit_bias"]
 
-        @partial(shard_map, mesh=mesh, in_specs=(data_spec, data_spec), out_specs=data_spec)
-        def chunked_loss(text_embeds, image_embeds):
+        @partial(
+            shard_map,
+            mesh=mesh,
+            in_specs=(data_spec, data_spec, PartitionSpec(None), PartitionSpec(None)),
+            out_specs=data_spec,
+        )
+        def chunked_loss(text_embeds, image_embeds, logit_scale, logit_bias):
             axis_size = jax.lax.psum(1, axis_name="data")
 
             # calculate local device loss
-            loss = mini_batch_sigmoid_loss(text_embeds, image_embeds, outputs["logit_scale"], outputs["logit_bias"])
+            loss = mini_batch_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias)
 
             # add negative losses
             def add_negative_loss(i, carrys):
@@ -1043,17 +1050,16 @@ def main():
                     image_embeds, axis_name="data", perm=[(j, (j - 1) % axis_size) for j in range(axis_size)]
                 )
                 # add loss (all negative samples)
-                cumul_loss += mini_batch_negative_sigmoid_loss(
-                    text_embeds, image_embeds, outputs["logit_scale"], outputs["logit_bias"]
-                )
+                cumul_loss += mini_batch_negative_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias)
                 return cumul_loss, image_embeds
 
             loss, _ = jax.lax.fori_loop(0, axis_size - 1, add_negative_loss, (loss, image_embeds))
             loss = loss / axis_size
+            loss = loss.reshape((-1,))
             return loss
 
         # average loss across devices
-        loss = chunked_loss(text_embeds, image_embeds)
+        loss = chunked_loss(text_embeds, image_embeds, logit_scale, logit_bias)
         loss = jnp.mean(loss)
         return loss
 
