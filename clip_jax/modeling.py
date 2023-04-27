@@ -1076,16 +1076,16 @@ class CLIPModel(nn.Module):
             (1,),
         )
 
-        logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
-        logits_per_image = logits_per_text.T
+        # logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
+        # logits_per_image = logits_per_text.T
 
         return dict(
-            logits_per_image=logits_per_image,
-            logits_per_text=logits_per_text,
+            # logits_per_image=logits_per_image,
+            # logits_per_text=logits_per_text,
             text_embeds=text_embeds,
             image_embeds=image_embeds,
-            text_model_output=text_outputs,
-            vision_model_output=vision_outputs,
+            # text_model_output=text_outputs,
+            # vision_model_output=vision_outputs,
             logit_scale=logit_scale,
             logit_bias=logit_bias,
         )
