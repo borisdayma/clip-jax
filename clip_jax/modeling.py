@@ -908,7 +908,9 @@ class CLIPVisionTransformer(nn.Module):
         last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         # average pool
-        pooled_output = last_hidden_state.mean(axis=1)
+        # TEMP: test sharding issues
+        pooled_output = last_hidden_state[:, 0, :]
+        # pooled_output = last_hidden_state.mean(axis=1)
         pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         pooled_output = norm(self.use_rmsnorm)(
@@ -1033,6 +1035,7 @@ class CLIPModel(nn.Module):
         )
 
         image_embeds = vision_outputs["pooled_output"]
+        # TEMP: may be better to go from embed to embed_proj
         image_embeds = nn.Dense(
             self.projection_dim,
             dtype=dtype,
@@ -1042,6 +1045,7 @@ class CLIPModel(nn.Module):
         )(image_embeds)
 
         text_embeds = text_outputs["pooled_output"]
+        # TEMP: may be better to go from embed to embed_proj
         text_embeds = nn.Dense(
             self.projection_dim,
             dtype=dtype,
