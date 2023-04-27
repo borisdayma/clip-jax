@@ -608,6 +608,7 @@ class CLIPEncoderLayer(nn.Module):
         assert self.ln_type in ["normformer", "preln"], f"ln_type {self.ln_type} not supported."
         assert self.position_embedding_type in ["absolute", "rotary"]
         # Self attention
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         residual = hidden_states
         if self.ln_type in ["preln", "normformer"]:
             hidden_states = norm(self.use_rmsnorm)(
@@ -618,7 +619,7 @@ class CLIPEncoderLayer(nn.Module):
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                 name="pre_attention_norm",
             )(hidden_states)
-            # hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         # Reshape attention mask for direct use in attention heads
         if attention_mask is not None:
             attention_mask = nn.attention.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
@@ -633,8 +634,8 @@ class CLIPEncoderLayer(nn.Module):
             decode=self.use_causal_mask,
             name="attention",
         )(inputs_q=hidden_states, inputs_kv=hidden_states, mask=attention_mask, deterministic=deterministic)
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         if self.ln_type == "normformer":
-            # hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
             hidden_states = norm(self.use_rmsnorm)(
                 dtype=self.dtype,
                 use_bias=self.use_bias,
@@ -643,8 +644,9 @@ class CLIPEncoderLayer(nn.Module):
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                 name="post_attention_norm",
             )(hidden_states)
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = residual + hidden_states
-        # hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
 
         # MLP
         residual = hidden_states
@@ -659,8 +661,9 @@ class CLIPEncoderLayer(nn.Module):
             dtype=self.dtype,
             name="mlp",
         )(hidden_states)
-        # hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = residual + hidden_states
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         return hidden_states, None
 
 
@@ -902,11 +905,11 @@ class CLIPVisionTransformer(nn.Module):
         )
 
         last_hidden_state = encoder_outputs["last_hidden_state"]
-        # last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         # average pool
         pooled_output = last_hidden_state.mean(axis=1)
-        # pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         pooled_output = norm(self.use_rmsnorm)(
             dtype=dtype,
@@ -916,7 +919,7 @@ class CLIPVisionTransformer(nn.Module):
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
             name="final_norm",
         )(pooled_output)
-        # pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         return dict(
             last_hidden_state=last_hidden_state,
@@ -1034,7 +1037,7 @@ class CLIPModel(nn.Module):
             self.projection_dim,
             dtype=dtype,
             use_bias=False,
-            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed_proj", "embed")),
             name="vision_projection",
         )(image_embeds)
 
@@ -1043,7 +1046,7 @@ class CLIPModel(nn.Module):
             self.projection_dim,
             dtype=dtype,
             use_bias=False,
-            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed_proj", "embed")),
             name="text_projection",
         )(text_embeds)
 
