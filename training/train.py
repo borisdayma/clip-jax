@@ -1,3 +1,4 @@
+import itertools
 import json
 import logging
 import os
@@ -242,6 +243,10 @@ class TrainingArguments:
             assert (
                 storage is not None
             ), 'Could not find google.storage. Install with "pip install google-cloud-storage"'
+        if self.do_profile:
+            self.start_profile = 3
+            self.end_profile = 6
+            self.do_test_steps = self.end_profile + 2
         assert self.lr_decay in [
             None,
             "linear",
@@ -1357,7 +1362,6 @@ def main():
 
     # Init training variables
     evaluation_ran, save_model_ran, metrics_logged = False, False, False
-    profile_start, profile_end = 3, 6
     step, samples = state.step, state.samples  # separate copies for timing metrics
     opt_state_step = 0  # ensure it is defined in evaluation mode
     step_start = step  # define it for test mode
@@ -1377,8 +1381,14 @@ def main():
 
         # train
         if training_args.do_train:
+            if not training_args.do_profile:
+                batch_iterator = dataset.train
+            else:
+                # we don't want tensorflow loading in the profile
+                sample = next(iter(dataset.train))
+                batch_iterator = itertools.repeat(sample)
             for batch in tqdm(
-                dataset.train,
+                batch_iterator,
                 desc="Training...",
                 position=1,
                 leave=False,
@@ -1426,12 +1436,12 @@ def main():
                 with mesh:
                     batch = reshard_data(batch)
 
-                # optional profile - TODO: not very clean
+                # optional profile
                 if training_args.do_profile:
-                    if step == profile_start:
+                    if step == training_args.start_profile:
                         jax.block_until_ready(params)
                         jax.profiler.start_trace("./profiles")
-                    elif step == profile_end:
+                    elif step == training_args.end_profile:
                         jax.block_until_ready(params)
                         jax.profiler.stop_trace()
 
