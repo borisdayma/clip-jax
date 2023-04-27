@@ -551,7 +551,7 @@ class CLIPMLP(nn.Module):
 
         # layer norm
         if self.ln_type == "normformer":
-            x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
+            x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
             x = norm(self.use_rmsnorm)(
                 dtype=self.dtype,
                 use_bias=self.use_bias,
@@ -564,7 +564,7 @@ class CLIPMLP(nn.Module):
         x = nn.Dropout(rate=self.mlp_dropout_rate, broadcast_dims=(-2,), name="mlp_dropout")(
             x, deterministic=deterministic
         )  # Broadcast along length.
-        x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
+        x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
         output = DenseGeneral(
             inputs.shape[-1],
             dtype=self.dtype,
