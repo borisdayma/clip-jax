@@ -331,9 +331,9 @@ class ModelArguments:
             )
         },
     )
-    unroll: bool = field(
-        default=False,
-        metadata={"help": "Unroll layers."},
+    unroll: int = field(
+        default=1,
+        metadata={"help": ("Number of steps to unroll scanned layers.")},
     )
     restore_state: Optional[bool] = field(
         default=False,
@@ -592,12 +592,8 @@ def main():
     clipConfig = load_config(model_args.config_name)
 
     # Update config
-    if model_args.unroll:
-        clipConfig["text_config"]["unroll"] = 100
-        clipConfig["vision_config"]["unroll"] = 100
-    else:
-        clipConfig["text_config"]["unroll"] = 1
-        clipConfig["vision_config"]["unroll"] = 1
+    clipConfig["text_config"]["unroll"] = training_args.unroll
+    clipConfig["vision_config"]["unroll"] = training_args.unroll
     if training_args.gradient_checkpointing:
         clipConfig["text_config"]["gradient_checkpointing"] = True
         clipConfig["vision_config"]["gradient_checkpointing"] = True
