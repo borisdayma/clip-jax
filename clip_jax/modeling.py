@@ -912,9 +912,16 @@ class CLIPVisionTransformer(nn.Module):
         # pooled_output = last_hidden_state[:, 0, :]  # this works but it's not a mean
         # pooled_output = last_hidden_state.mean(axis=1)  # this leads to huge memory usage
         # pooled_output = jnp.einsum("ijk->ik", last_hidden_state) / last_hidden_state.shape[1]  # still huge memory
-        pooled_output = einshape("ble->bel", last_hidden_state)
-        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed", "length"))
-        pooled_output = jnp.mean(pooled_output, axis=-1)
+        # pooled_output = einshape("ble->bel", last_hidden_state)
+        # pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed", "length"))
+        # pooled_output = jnp.mean(pooled_output, axis=-1)
+        length = last_hidden_state.shape[1]
+        # mean over length
+        pooled_output = last_hidden_state[:, 0, :]
+        for i in range(1, length):
+            pooled_output = pooled_output + last_hidden_state[:, i, :]
+        pooled_output = pooled_output / length
+
         pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         pooled_output = norm(self.use_rmsnorm)(
