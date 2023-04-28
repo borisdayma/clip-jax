@@ -526,6 +526,7 @@ class CLIPMLP(nn.Module):
         # Iterate over specified MLP input activation functions.
         # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
         with jax.profiler.TraceAnnotation("MLP"):
+            embed_dim = inputs.shape[-1]
             if self.ln_type in ["normformer", "preln"]:
                 inputs = norm(self.use_rmsnorm)(
                     dtype=self.dtype,
@@ -572,7 +573,7 @@ class CLIPMLP(nn.Module):
             )  # Broadcast along length.
             x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
             output = DenseGeneral(
-                inputs.shape[-1],
+                embed_dim,
                 dtype=self.dtype,
                 use_bias=self.use_bias,
                 kernel_init=nn.with_logical_partitioning(default_kernel_init, ("mlp", "embed")),
