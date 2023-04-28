@@ -592,8 +592,8 @@ def main():
     clipConfig = load_config(model_args.config_name)
 
     # Update config
-    clipConfig["text_config"]["unroll"] = training_args.unroll
-    clipConfig["vision_config"]["unroll"] = training_args.unroll
+    clipConfig["text_config"]["unroll"] = model_args.unroll
+    clipConfig["vision_config"]["unroll"] = model_args.unroll
     if training_args.gradient_checkpointing:
         clipConfig["text_config"]["gradient_checkpointing"] = True
         clipConfig["vision_config"]["gradient_checkpointing"] = True
