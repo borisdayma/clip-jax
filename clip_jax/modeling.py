@@ -1042,22 +1042,20 @@ class CLIPModel(nn.Module):
         )
 
         image_embeds = vision_outputs["pooled_output"]
-        # TEMP: may be better to go from embed to embed_proj
         image_embeds = nn.Dense(
             self.projection_dim,
             dtype=dtype,
             use_bias=False,
-            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed_proj", "embed")),
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
             name="vision_projection",
         )(image_embeds)
 
         text_embeds = text_outputs["pooled_output"]
-        # TEMP: may be better to go from embed to embed_proj
         text_embeds = nn.Dense(
             self.projection_dim,
             dtype=dtype,
             use_bias=False,
-            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed_proj", "embed")),
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
             name="text_projection",
         )(text_embeds)
 
@@ -1087,16 +1085,16 @@ class CLIPModel(nn.Module):
             (1,),
         )
 
-        # logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
-        # logits_per_image = logits_per_text.T
+        logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
+        logits_per_image = logits_per_text.T
 
         return dict(
-            # logits_per_image=logits_per_image,
-            # logits_per_text=logits_per_text,
+            logits_per_image=logits_per_image,
+            logits_per_text=logits_per_text,
             text_embeds=text_embeds,
             image_embeds=image_embeds,
-            # text_model_output=text_outputs,
-            # vision_model_output=vision_outputs,
+            text_model_output=text_outputs,
+            vision_model_output=vision_outputs,
             logit_scale=logit_scale,
             logit_bias=logit_bias,
         )
