@@ -426,15 +426,20 @@ class MultiHeadDotProductAttention(Module):
                 dense(name="value")(inputs_kv),
             )
 
+            # ensure correct sharding
+            query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+            key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+            value = nn.with_logical_constraint(value, ("batch", "length", "heads", "kv"))
+
             if self.use_rotary:
                 assert self.max_length is not None, "max_length must be specified for rotary embeddings."
                 # source: https://github.com/google-research/jestimator/blob/main/jestimator/models/rope/modeling.py
                 sin, cos = generate_fixed_pos_embedding(head_dim, self.max_length)
                 query, key = apply_rotary_embedding(query, key, cos, sin)
 
-            # query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
-            # key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
-            # value = nn.with_logical_constraint(value, ("batch", "length", "heads", "kv"))
+                # ensure sharding
+                query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+                key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
 
             # During fast autoregressive decoding, we feed one position at a time,
             # and cache the keys and values step by step.
@@ -879,7 +884,7 @@ class CLIPVisionTransformer(nn.Module):
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
             name="post_embed_norm",
         )(hidden_states)
-        # hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         max_length = hidden_states.shape[1]
         encoder_outputs = CLIPEncoder(
             num_layers=self.num_layers,
