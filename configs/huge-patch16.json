@@ -11,7 +11,7 @@
     "eos_token_id": 2,
     "vocab_size": 50000,
     "hidden_size": 1024,
-    "max_position_embeddings": 80,
+    "max_length": 80,
     "num_layers": 18,
     "use_rmsnorm": true,
     "ln_type": "normformer",
@@ -40,6 +40,7 @@
     "mlp_dim": 3840
   },
   "projection_dim": 1024,
-  "logit_scale_init_value": 2.6592,
+  "logit_scale_init_value": 10.0,
+  "logit_bias_init_value": -10.0,
   "dtype": "float32"
 }

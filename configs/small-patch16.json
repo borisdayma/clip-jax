@@ -11,7 +11,7 @@
     "eos_token_id": 2,
     "vocab_size": 50000,
     "hidden_size": 512,
-    "max_position_embeddings": 80,
+    "max_length": 80,
     "num_layers": 5,
     "use_rmsnorm": true,
     "ln_type": "normformer",

@@ -322,7 +322,7 @@ class CLIPVisionEmbeddings(nn.Module):
 class CLIPTextEmbeddings(nn.Module):
     hidden_size: int
     vocab_size: int
-    max_position_embeddings: int
+    max_length: int
     position_embedding_type: str  # "absolute" or "rotary"
     dtype: Dtype
 
@@ -343,7 +343,7 @@ class CLIPTextEmbeddings(nn.Module):
             position_embeds = self.param(
                 "position_embeds",
                 nn.with_logical_partitioning(nn.initializers.normal(1 / np.sqrt(embed_dim)), (None, "vocab", "embed")),
-                (1, self.max_position_embeddings, embed_dim),
+                (1, self.max_length, embed_dim),
             )
             embeddings += position_embeds
             embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
@@ -587,7 +587,7 @@ class CLIPEncoderLayer(nn.Module):
     ln_type: str  # "preln", "normformer"
     num_heads: int
     position_embedding_type: str  # "absolute", "rotary"
-    max_position_embeddings: int
+    max_length: int
     use_causal_mask: bool
     mlp_dim: int
     dtype: Dtype = jnp.float32
@@ -628,7 +628,7 @@ class CLIPEncoderLayer(nn.Module):
             deterministic=deterministic,
             use_bias=self.use_bias,
             use_rotary=(self.position_embedding_type == "rotary"),
-            max_length=self.max_position_embeddings,
+            max_length=self.max_length,
             dropout_rate=self.attention_dropout,
             decode=self.use_causal_mask,
             name="attention",
@@ -672,7 +672,7 @@ class CLIPEncoder(nn.Module):
     ln_type: str  # "preln", "normformer"
     num_heads: int
     position_embedding_type: str  # "absolute", "rotary"
-    max_position_embeddings: int
+    max_length: int
     use_causal_mask: bool
     mlp_dim: int
     dtype: Dtype = jnp.float32
@@ -717,7 +717,7 @@ class CLIPEncoder(nn.Module):
             ln_type=self.ln_type,
             num_heads=self.num_heads,
             position_embedding_type=self.position_embedding_type,
-            max_position_embeddings=self.max_position_embeddings,
+            max_length=self.max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
             dtype=self.dtype,
@@ -740,7 +740,7 @@ class CLIPEncoder(nn.Module):
 class CLIPTextTransformer(nn.Module):
     hidden_size: int
     vocab_size: int
-    max_position_embeddings: int
+    max_length: int
     position_embedding_type: str  # "absolute" or "rotary"
     num_layers: int
     use_rmsnorm: bool
@@ -770,7 +770,7 @@ class CLIPTextTransformer(nn.Module):
         hidden_states = CLIPTextEmbeddings(
             hidden_size=self.hidden_size,
             vocab_size=self.vocab_size,
-            max_position_embeddings=self.max_position_embeddings,
+            max_length=self.max_length,
             position_embedding_type=self.position_embedding_type,
             dtype=dtype,
             name="embeddings",
@@ -782,7 +782,7 @@ class CLIPTextTransformer(nn.Module):
             ln_type=self.ln_type,
             num_heads=self.num_heads,
             position_embedding_type=self.position_embedding_type,
-            max_position_embeddings=self.max_position_embeddings,
+            max_length=self.max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
             dtype=dtype,
@@ -880,14 +880,14 @@ class CLIPVisionTransformer(nn.Module):
             name="post_embed_norm",
         )(hidden_states)
         # hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
-        max_position_embeddings = hidden_states.shape[1]
+        max_length = hidden_states.shape[1]
         encoder_outputs = CLIPEncoder(
             num_layers=self.num_layers,
             use_rmsnorm=self.use_rmsnorm,
             ln_type=self.ln_type,
             num_heads=self.num_heads,
             position_embedding_type=position_embedding_type,
-            max_position_embeddings=max_position_embeddings,
+            max_length=max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
             dtype=dtype,
@@ -1107,8 +1107,8 @@ class CLIPModel(nn.Module):
             text_config = SimpleNamespace(**text_config)
         if isinstance(vision_config, dict):
             vision_config = SimpleNamespace(**vision_config)
-        input_ids = jnp.ones((1, text_config.max_position_embeddings), dtype="i4")
-        attention_mask = jnp.ones((1, text_config.max_position_embeddings), dtype="i4")
+        input_ids = jnp.ones((1, text_config.max_length), dtype="i4")
+        attention_mask = jnp.ones((1, text_config.max_length), dtype="i4")
         pixel_values = jnp.ones((1, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
         params_rng, dropout_rng = jax.random.split(rng)
         rngs = {"params": params_rng, "dropout": dropout_rng}

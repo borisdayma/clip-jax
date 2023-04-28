@@ -1266,7 +1266,7 @@ def main():
                 captions,
                 padding="max_length",
                 truncation=True,
-                max_length=model.text_config["max_position_embeddings"],
+                max_length=model.text_config["max_length"],
                 return_tensors="np",
             )
             # keep only input_ids and attention_mask
@@ -1404,7 +1404,7 @@ def main():
                     captions,
                     padding="max_length",
                     truncation=True,
-                    max_length=model.text_config["max_position_embeddings"],
+                    max_length=model.text_config["max_length"],
                     return_tensors="np",
                 )
                 # keep only input_ids and attention_mask
@@ -1450,7 +1450,9 @@ def main():
                 step_rng, rng = jax.random.split(rng)
                 with jax.profiler.StepTraceAnnotation("train", step_num=step):
                     with mesh:
-                        metrics, params, opt_state, opt_state_step = p_train_step(step_rng, params, opt_state, batch, step)
+                        metrics, params, opt_state, opt_state_step = p_train_step(
+                            step_rng, params, opt_state, batch, step
+                        )
                     step += 1
                     samples += training_args.batch_size_per_step
 
