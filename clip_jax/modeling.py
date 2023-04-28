@@ -23,7 +23,8 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
-from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
+from einshape import jax_einshape as einshape
+from flax.core.frozen_dict import unfreeze
 from flax.linen import combine_masks, dot_product_attention
 from flax.linen import partitioning as nn_partitioning
 from flax.linen.dtypes import canonicalize_dtype
@@ -31,8 +32,6 @@ from flax.linen.linear import DenseGeneral, DotGeneralT, PrecisionLike
 from flax.linen.module import Module, compact, merge_param
 from flax.linen.normalization import _canonicalize_axes
 from flax.linen.partitioning import remat
-from flax.traverse_util import flatten_dict, unflatten_dict
-from transformers.modeling_flax_utils import FlaxPreTrainedModel
 
 remat = nn_partitioning.remat
 
@@ -910,9 +909,12 @@ class CLIPVisionTransformer(nn.Module):
 
         # average pool
         # TEMP: test sharding issues
-        pooled_output = last_hidden_state[:, 0, :]  # this works but it's not a mean
+        # pooled_output = last_hidden_state[:, 0, :]  # this works but it's not a mean
         # pooled_output = last_hidden_state.mean(axis=1)  # this leads to huge memory usage
         # pooled_output = jnp.einsum("ijk->ik", last_hidden_state) / last_hidden_state.shape[1]  # still huge memory
+        pooled_output = einshape("ble->bel", last_hidden_state)
+        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed", "length"))
+        pooled_output = jnp.mean(pooled_output, axis=-1)
         pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         pooled_output = norm(self.use_rmsnorm)(
