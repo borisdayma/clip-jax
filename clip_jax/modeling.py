@@ -23,7 +23,6 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
-from einshape import jax_einshape as einshape
 from flax.core.frozen_dict import unfreeze
 from flax.linen import combine_masks, dot_product_attention
 from flax.linen import partitioning as nn_partitioning
@@ -904,24 +903,21 @@ class CLIPVisionTransformer(nn.Module):
             deterministic=deterministic,
         )
 
+        # get last hidden state
         last_hidden_state = encoder_outputs["last_hidden_state"]
         last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
-        # average pool
-        # TEMP: test sharding issues
-        # pooled_output = last_hidden_state[:, 0, :]  # this works but it's not a mean
-        # pooled_output = last_hidden_state.mean(axis=1)  # this leads to huge memory usage
-        # pooled_output = jnp.einsum("ijk->ik", last_hidden_state) / last_hidden_state.shape[1]  # still huge memory
-        # pooled_output = einshape("ble->bel", last_hidden_state)
-        # pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed", "length"))
-        # pooled_output = jnp.mean(pooled_output, axis=-1)
+        # mean pool - jnp.mean -> leads to large memory consumption
+        # pooled_output = jnp.mean(last_hidden_state, axis=1)
+
+        # mean pool - for loop -> this works!
         length = last_hidden_state.shape[1]
-        # mean over length
         pooled_output = last_hidden_state[:, 0, :]
         for i in range(1, length):
             pooled_output = pooled_output + last_hidden_state[:, i, :]
         pooled_output = pooled_output / length
 
+        # ensure correct sharding
         pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         pooled_output = norm(self.use_rmsnorm)(
