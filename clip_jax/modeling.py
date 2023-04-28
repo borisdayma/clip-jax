@@ -405,7 +405,7 @@ class MultiHeadDotProductAttention(Module):
         assert qkv_features % self.num_heads == 0, "Memory dimension must be divisible by number of heads."
         head_dim = qkv_features // self.num_heads
 
-        with jax.profiler.TraceAnnotation("Attention"):
+        with jax.profiler.TraceAnnotation("Attention_Block"):
             dense = functools.partial(
                 DenseGeneral,
                 axis=-1,
@@ -523,7 +523,7 @@ class CLIPMLP(nn.Module):
         assert self.ln_type in ["normformer", "preln"], f"ln_type {self.ln_type} not supported."
         # Iterate over specified MLP input activation functions.
         # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
-        with jax.profiler.TraceAnnotation("MLP"):
+        with jax.profiler.TraceAnnotation("MLP_Block"):
             embed_dim = inputs.shape[-1]
             if self.ln_type in ["normformer", "preln"]:
                 inputs = norm(self.use_rmsnorm)(

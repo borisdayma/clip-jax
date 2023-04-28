@@ -1071,14 +1071,15 @@ def main():
     def compute_loss(params, minibatch, dropout_rng, model_fn, train):
         rngs = {"dropout": dropout_rng} if train else None
         outputs = model_fn.apply({"params": params}, rngs=rngs, deterministic=not train, **minibatch)
-        if training_args.loss_type == "cross_entropy":
-            logits = outputs["logits_per_text"]
-            loss = cross_entropy_loss(logits)
-        elif training_args.loss_type == "sigmoid":
-            loss = sigmoid_loss(outputs)
-        else:
-            raise NotImplementedError
-        return loss
+        with jax.profiler.TraceAnnotation("Compute_Loss"):
+            if training_args.loss_type == "cross_entropy":
+                logits = outputs["logits_per_text"]
+                loss = cross_entropy_loss(logits)
+            elif training_args.loss_type == "sigmoid":
+                loss = sigmoid_loss(outputs)
+            else:
+                raise NotImplementedError
+            return loss
 
     # Define gradient update step fn
     def train_step(rng, params, opt_state, batch, step):
@@ -1447,10 +1448,11 @@ def main():
 
                 # train step
                 step_rng, rng = jax.random.split(rng)
-                with mesh:
-                    metrics, params, opt_state, opt_state_step = p_train_step(step_rng, params, opt_state, batch, step)
-                step += 1
-                samples += training_args.batch_size_per_step
+                with jax.profiler.StepTraceAnnotation("train", step_num=step):
+                    with mesh:
+                        metrics, params, opt_state, opt_state_step = p_train_step(step_rng, params, opt_state, batch, step)
+                    step += 1
+                    samples += training_args.batch_size_per_step
 
                 # log metrics
                 if step % training_args.logging_steps == 0:
