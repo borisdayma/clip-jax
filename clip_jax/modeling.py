@@ -223,9 +223,6 @@ def _normalize(
     return jnp.asarray(y, dtype)
 
 
-nn.LayerNorm
-
-
 class RMSNorm(nn.Module):
     """RMSNorm, adapted from flax LayerNorm"""
 
