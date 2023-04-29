@@ -28,7 +28,7 @@ You can download training data from [DataComp](https://github.com/mlfoundations/
 python download_upstream.py \
     --scale small --data_dir gs://my_bucket/datacomp/small metadata_dir metadata \
     --image_size 256 --resize_mode center_crop --skip_bbox_blurring \
-    --output_format tfrecord
+    --encode_format webp --output_format tfrecord
 ```
 
 Alternatively, you can use your own dataset. In that case you should use [img2dataset](https://github.com/rom1504/img2dataset) with `output_format="tfrecord"`.
