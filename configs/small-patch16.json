@@ -8,7 +8,7 @@
     "mlp_dropout_rate": 0.0,
     "unroll": 100,
     "gradient_checkpointing": true,
-    "eos_token_id": 2,
+    "eos_token_id": 49407,
     "vocab_size": 50000,
     "hidden_size": 512,
     "max_length": 80,
