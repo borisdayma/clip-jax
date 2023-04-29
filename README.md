@@ -39,7 +39,7 @@ TODO
 
 ### Use a trained model
 
-TODO
+Refer to [`utils/demo.ipynb`](utils/demo.ipynb).
 
 ### Downstream tasks
 
