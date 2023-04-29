@@ -700,8 +700,7 @@ class CLIPEncoder(nn.Module):
                 CLIPEncoderLayer,
                 static_argnums=(2,),
                 prevent_cse=not use_scan,
-                # TODO: does it do anything?
-                #policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
+                policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
             )
             if self.gradient_checkpointing
             else CLIPEncoderLayer
