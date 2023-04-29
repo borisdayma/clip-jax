@@ -298,6 +298,7 @@ class CLIPVisionEmbeddings(nn.Module):
     use_bias: bool
     patch_size: int
     position_embedding_type: str  # "absolute" or "sincos2d"
+    use_cls_token: bool
     dtype: Dtype
 
     @nn.compact
@@ -335,6 +336,14 @@ class CLIPVisionEmbeddings(nn.Module):
             raise ValueError(f"Unknown position embedding type {self.position_embedding_type}")
         embeddings = patch_embeds + position_embeds
         embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
+        if self.use_cls_token:
+            cls_token = self.param(
+                "cls_token",
+                nn.with_logical_partitioning(nn.initializers.zeros_init(), (None, None, "embed")),
+                (1, 1, self.hidden_size),
+            )
+            embeddings = jnp.concatenate([jnp.tile(cls_token, [batch_size, 1, 1]), embeddings], axis=1)
+            embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
         return embeddings
 
 
@@ -874,6 +883,7 @@ class CLIPVisionTransformer(nn.Module):
     force_scale: bool = False
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
+    use_cls_token: bool = False
     unroll: int = 100  # unroll scan layers
     gradient_checkpointing: bool = True
 
@@ -898,6 +908,7 @@ class CLIPVisionTransformer(nn.Module):
             use_bias=self.use_bias,
             patch_size=self.patch_size,
             position_embedding_type=self.position_embedding_type,
+            use_cls_token=self.use_cls_token,
             dtype=dtype,
             name="embeddings",
         )(pixel_values)
@@ -938,18 +949,22 @@ class CLIPVisionTransformer(nn.Module):
         last_hidden_state = encoder_outputs["last_hidden_state"]
         last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
-        # mean pool - jnp.mean -> leads to large memory consumption
-        pooled_output = jnp.mean(last_hidden_state, axis=1)
+        if self.use_cls_token:
+            pooled_output = last_hidden_state[:, 0, :]
 
-        # mean pool - for loop -> this works!
-        # length = last_hidden_state.shape[1]
-        # pooled_output = last_hidden_state[:, 0, :]
-        # for i in range(1, length):
-        #    pooled_output = pooled_output + last_hidden_state[:, i, :]
-        # pooled_output = pooled_output / length
+        else:
+            # mean pool - jnp.mean -> leads to large memory consumption
+            pooled_output = jnp.mean(last_hidden_state, axis=1)
 
-        # ensure correct sharding
-        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+            # mean pool - for loop -> this works!
+            # length = last_hidden_state.shape[1]
+            # pooled_output = last_hidden_state[:, 0, :]
+            # for i in range(1, length):
+            #    pooled_output = pooled_output + last_hidden_state[:, i, :]
+            # pooled_output = pooled_output / length
+
+            # ensure correct sharding
+            pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         pooled_output = norm(self.use_rmsnorm)(
             dtype=dtype,
