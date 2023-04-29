@@ -2,7 +2,7 @@ UUID=$(uuidgen | cut -c1-8)
 
 WANDB_NOTES=$(cat ~/instance_name) python train.py \
     --assert_TPU_available \
-    --unroll \
+    --unroll 1 \
     --output_dir gs://craiyon_models_us_central2/clip/$UUID \
     --config_name ../configs/small-patch16.json --dtype float32 \
     --key_image webp_256 \

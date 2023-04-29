@@ -64,6 +64,22 @@ def _convert_to_activation_function(fn_or_string: Union[str, Callable]) -> Calla
         raise ValueError("don't know how to convert %s to an activation function" % (fn_or_string,))
 
 
+# sincos2d position - Source: https://github.com/google-research/big_vision
+
+
+def posemb_sincos_2d(h, w, width, temperature=10_000.0, dtype=jnp.float32):
+    """Follows the MoCo v3 logic."""
+    y, x = jnp.mgrid[:h, :w]
+
+    assert width % 4 == 0, "Width must be mult of 4 for sincos posemb"
+    omega = jnp.arange(width // 4) / (width // 4 - 1)
+    omega = 1.0 / (temperature**omega)
+    y = jnp.einsum("m,d->md", y.flatten(), omega)
+    x = jnp.einsum("m,d->md", x.flatten(), omega)
+    pe = jnp.concatenate([jnp.sin(x), jnp.cos(x), jnp.sin(y), jnp.cos(y)], axis=1)
+    return jnp.asarray(pe, dtype)[None, :, :]
+
+
 # Rotary Embeddings
 
 
@@ -281,6 +297,7 @@ class CLIPVisionEmbeddings(nn.Module):
     hidden_size: int
     use_bias: bool
     patch_size: int
+    position_embedding_type: str  # "absolute" or "sincos2d"
     dtype: Dtype
 
     @nn.compact
@@ -304,13 +321,18 @@ class CLIPVisionEmbeddings(nn.Module):
         patch_embeds = jnp.reshape(patch_embeds, (batch_size, num_patches, channels))
         patch_embeds = nn.with_logical_constraint(patch_embeds, ("batch", "length", "embed"))
         # learnt position embeddings
-        position_embeds = self.param(
-            "position_embeds",
-            nn.with_logical_partitioning(
-                nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, "vocab", "embed")
-            ),
-            (1, num_patches, self.hidden_size),
-        )
+        if self.position_embedding_type == "absolute":
+            position_embeds = self.param(
+                "position_embeds",
+                nn.with_logical_partitioning(
+                    nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, "vocab", "embed")
+                ),
+                (1, num_patches, self.hidden_size),
+            )
+        elif self.position_embedding_type == "sincos2d":
+            position_embeds = posemb_sincos_2d(height, width, self.hidden_size, dtype=self.dtype)
+        else:
+            raise ValueError(f"Unknown position embedding type {self.position_embedding_type}")
         embeddings = patch_embeds + position_embeds
         embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
         return embeddings
@@ -845,6 +867,7 @@ class CLIPVisionTransformer(nn.Module):
     num_heads: int
     use_causal_mask: bool
     mlp_dim: int
+    position_embedding_type: str = "sincos2d"  # "absolute" or "sincos2d"
     dtype: str = "float32"
     activations: Sequence[Union[str, Callable]] = ("relu",)
     use_bias: bool = False
@@ -862,6 +885,10 @@ class CLIPVisionTransformer(nn.Module):
     ):
         dtype = getattr(jnp, self.dtype)
         batch, height, width, channels = pixel_values.shape
+        assert self.position_embedding_type in [
+            "absolute",
+            "sincos2d",
+        ], f"position_embedding_type {self.position_embedding_type} not supported."
         assert (
             height == self.image_size and width == self.image_size and channels == 3
         ), f"Input image size ({height}*{width}) doesn't match model ({self.image_size}*{self.image_size})."
@@ -870,6 +897,7 @@ class CLIPVisionTransformer(nn.Module):
             hidden_size=self.hidden_size,
             use_bias=self.use_bias,
             patch_size=self.patch_size,
+            position_embedding_type=self.position_embedding_type,
             dtype=dtype,
             name="embeddings",
         )(pixel_values)
@@ -914,11 +942,11 @@ class CLIPVisionTransformer(nn.Module):
         pooled_output = jnp.mean(last_hidden_state, axis=1)
 
         # mean pool - for loop -> this works!
-        #length = last_hidden_state.shape[1]
-        #pooled_output = last_hidden_state[:, 0, :]
-        #for i in range(1, length):
+        # length = last_hidden_state.shape[1]
+        # pooled_output = last_hidden_state[:, 0, :]
+        # for i in range(1, length):
         #    pooled_output = pooled_output + last_hidden_state[:, i, :]
-        #pooled_output = pooled_output / length
+        # pooled_output = pooled_output / length
 
         # ensure correct sharding
         pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
