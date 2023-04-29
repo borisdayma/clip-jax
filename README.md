@@ -1,6 +1,11 @@
 # CLIP-JAX
 
-This repository is used to train custom CLIP models using JAX.
+This repository is used to train custom [CLIP models](https://arxiv.org/abs/2103.00020) with JAX:
+
+- custom model architectures
+- custom sharding strategies
+- training with constrastive loss or [chunked sigmoid loss](https://arxiv.org/abs/2303.15343)
+- downstream fine-tuning
 
 ## Installation
 
@@ -12,23 +17,36 @@ Note: this package is currently under active development, install from source fo
 
 ## Usage
 
-1. Use [utils/prepare_dataset.ipynb](utils/prepare_dataset.ipynb) to prepare your dataset.
-1. Train the model with [training/train.py](training/train.py).
+### Download training data
 
-## TODO
+You can download training data from [DataComp](https://github.com/mlfoundations/datacomp):
 
-- [ ] Add guides: download LAION, train CLIP
-- [ ] Add pre-trained models
-- [ ] Add script for downstream tasks
+```bash
+# clone and install datacomp
 
-## Features
+# download data
+python download_upstream.py \
+    --scale small --data_dir gs://my_bucket/datacomp/small metadata_dir metadata \
+    --image_size 256 --resize_mode center_crop --skip_bbox_blurring \
+    --output_format tfrecord
+```
 
-- [x] Custom model architectures
-- [x] Custom sharding strategies
-- [x] Training with constrastive loss or [chunked sigmoid loss](https://arxiv.org/abs/2303.15343)
-- [ ] Downstream tasks
-  - [ ] Image classification with `CLIPVisionModelForImageClassification`
-  - [ ] Text encoder with `CLIPTextModelForFineTuning`
+Alternatively, you can use your own dataset. In that case you should use [img2dataset](https://github.com/rom1504/img2dataset) with `output_format="tfrecord"`.
+
+### Train a model
+
+TODO
+
+### Use a trained model
+
+TODO
+
+### Downstream tasks
+
+TODO:
+
+- [ ] Image classification with `CLIPVisionModelForImageClassification`
+- [ ] Text encoder with `CLIPTextModelForFineTuning`
 
 ## Acknowledgements
 
