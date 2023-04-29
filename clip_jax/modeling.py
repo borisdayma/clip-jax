@@ -912,14 +912,14 @@ class CLIPVisionTransformer(nn.Module):
         last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         # mean pool - jnp.mean -> leads to large memory consumption
-        # pooled_output = jnp.mean(last_hidden_state, axis=1)
+        pooled_output = jnp.mean(last_hidden_state, axis=1)
 
         # mean pool - for loop -> this works!
-        length = last_hidden_state.shape[1]
-        pooled_output = last_hidden_state[:, 0, :]
-        for i in range(1, length):
-            pooled_output = pooled_output + last_hidden_state[:, i, :]
-        pooled_output = pooled_output / length
+        #length = last_hidden_state.shape[1]
+        #pooled_output = last_hidden_state[:, 0, :]
+        #for i in range(1, length):
+        #    pooled_output = pooled_output + last_hidden_state[:, i, :]
+        #pooled_output = pooled_output / length
 
         # ensure correct sharding
         pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
