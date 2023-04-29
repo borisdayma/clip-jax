@@ -30,6 +30,12 @@ Note: this package is currently under active development, install from source fo
   - [ ] Image classification with `CLIPVisionModelForImageClassification`
   - [ ] Text encoder with `CLIPTextModelForFineTuning`
 
+## Acknowledgements
+
+- 🤗 Hugging Face for CLIP reference implementation and training scripts
+- Google [TPU Research Cloud (TRC) program](https://sites.research.google/trc/) for providing computing resources
+- [Weights & Biases](https://wandb.com/) for providing the infrastructure for experiment tracking and model management
+
 ## Citations
 
 ```bibtex
