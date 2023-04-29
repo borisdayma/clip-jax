@@ -30,14 +30,14 @@
     "unroll": 100,
     "gradient_checkpointing": true,
     "image_size": 256,
-    "hidden_size": 1536,
+    "hidden_size": 1024,
     "patch_size": 16,
-    "num_layers": 24,
+    "num_layers": 36,
     "use_rmsnorm": true,
     "ln_type": "normformer",
-    "num_heads": 24,
+    "num_heads": 16,
     "use_causal_mask": false,
-    "mlp_dim": 4608
+    "mlp_dim": 3072
   },
   "projection_dim": 1024,
   "logit_scale_init_value": 10.0,
