@@ -22,7 +22,7 @@
   },
   "vision_config": {
     "dtype": "float32",
-    "activations": ["relu", "linear"],
+    "activations": ["gelu", "linear"],
     "use_bias": false,
     "force_scale": false,
     "attention_dropout": 0.0,
