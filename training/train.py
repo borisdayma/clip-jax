@@ -124,6 +124,10 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Use Nesterov momentum for Distributed Shampoo."},
     )
+    clip_by_scaled_gradient_norm: float = field(
+        default=None,
+        metadata={"help": "Clip by scaled gradient norm (only useful when using RMSProp Grafting)."},
+    )
     optim_quantized: bool = field(
         default=False,
         metadata={"help": ("Whether to quantize optimizer (only supported with Distributed" " Shampoo).")},
@@ -839,7 +843,7 @@ def main():
             inverse_failure_threshold=0.1,
             moving_average_for_momentum=True,
             skip_preconditioning_dim_size_gt=training_args.skip_preconditioning_dim_size_gt,
-            clip_by_scaled_gradient_norm=None,
+            clip_by_scaled_gradient_norm=training_args.clip_by_scaled_gradient_norm,
             precision=jax.lax.Precision.HIGHEST,
             best_effort_memory_usage_reduction=training_args.optim_quantized,
             generate_training_metrics=False,
