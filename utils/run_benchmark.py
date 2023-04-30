@@ -7,18 +7,19 @@ from functools import partial
 from subprocess import call
 
 import cv2
-import google.cloud.storage
 import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
 import torchvision
+from flax.training import checkpoints
 from flax.training.common_utils import shard
 from torchvision.datasets import ImageNet
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from clip_jax import FlaxCLIPModel
+from clip_jax import CLIPModel
+from clip_jax.utils import load_config
 
 
 def load_dataset(folder="benchmark_data", transform=None, **kwargs):
@@ -1175,27 +1176,36 @@ if __name__ == "__main__":
     dl = torch.utils.data.DataLoader(ds, batch_size=1000, num_workers=0, shuffle=False)
 
     # load model and tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("my_tokenizer")
-    clip = FlaxCLIPModel.from_pretrained("borisd13/clip/model_artifact:latest")
+    tokenizer = AutoTokenizer.from_pretrained("openai/clip-vit-base-patch32")
+    model_path = "../training/output_model"
+    config = load_config(f"{model_path}/config.json")
+    model = CLIPModel(**config)
+    rng = jax.random.PRNGKey(0)
+    model_inputs = model.init_inputs(rng)
+    params = model.init(**model_inputs)["params"]
+    params = checkpoints.restore_checkpoint(model_path, target=params, prefix="model_")
 
     # prepare text weights
-    get_text_features = jax.jit(clip.get_text_features)
+    @jax.jit
+    def get_text_features(input_ids, attention_mask, params):
+        return model.apply(
+            {"params": params}, input_ids=input_ids, attention_mask=attention_mask, method=model.get_text_features
+        )
+
     txt_features = []
     for item in tqdm(ds.classes):
         texts = [(t.format(c=item)) for t in zero_shot_classification_template]
         txt_inputs = tokenizer(texts, padding="max_length", truncation=True, max_length=80, return_tensors="np")
         txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
-        features = get_text_features(**txt_inputs, params=clip._params)
-        features = features / jnp.linalg.norm(features, axis=-1, keepdims=True)
+        features = get_text_features(**txt_inputs, params=params)["text_embeds"]
         features = features.mean(axis=0)
-        features = features / jnp.linalg.norm(features, axis=-1, keepdims=True)
         txt_features.append(features)
     txt_features = jnp.asarray(txt_features)
 
     # evaluate a batch
     @partial(jax.pmap, axis_name="batch")
     def evaluate_batch(pixel_values, labels):
-        image_features = clip.get_image_features(pixel_values)
+        image_features = model.apply({"params": params}, pixel_values, method=model.get_image_features)["image_embeds"]
         image_features = image_features / jnp.linalg.norm(image_features, axis=-1, keepdims=True)
         similarity = jnp.matmul(image_features, txt_features.T)
         top_k = similarity.argsort(-1)[:, ::-1][:, :5]

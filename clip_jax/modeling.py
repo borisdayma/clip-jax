@@ -1055,7 +1055,50 @@ class CLIPModel(nn.Module):
         self.vision_config = {**default_fields, **self.vision_config}
         return super().__post_init__()
 
-    @nn.compact
+    def setup(self):
+        dtype = getattr(jnp, self.dtype)
+        self.logit_scale = self.param(
+            "logit_scale",
+            nn.with_logical_partitioning(nn.initializers.constant(self.logit_scale_init_value, dtype), (None,)),
+            (1,),
+            name="logit_scale",
+        )
+        self.logit_bias = self.param(
+            "logit_bias",
+            nn.with_logical_partitioning(nn.initializers.constant(self.logit_bias_init_value, dtype), (None,)),
+            (1,),
+            name="logit_bias",
+        )
+        text_config = unfreeze(self.text_config)
+        if self.dtype is not None:
+            text_config["dtype"] = self.dtype
+        self.text_model = CLIPTextTransformer(
+            **self.text_config,
+            name="text",
+        )
+        vision_config = unfreeze(self.vision_config)
+        if self.dtype is not None:
+            vision_config["dtype"] = self.dtype
+        dtype = getattr(jnp, self.dtype)
+        self.vision_model = CLIPVisionTransformer(
+            **vision_config,
+            name="vision",
+        )
+        self.text_projection = nn.Dense(
+            self.projection_dim,
+            dtype=dtype,
+            use_bias=False,
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
+            name="text_projection",
+        )
+        self.vision_projection = nn.Dense(
+            self.projection_dim,
+            dtype=dtype,
+            use_bias=False,
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
+            name="vision_projection",
+        )
+
     def __call__(
         self,
         input_ids,
@@ -1067,23 +1110,12 @@ class CLIPModel(nn.Module):
         text_features = self.get_text_features(input_ids, attention_mask, deterministic=deterministic)
         image_embeds, vision_model_output = image_features["image_embeds"], image_features["vision_model_output"]
         text_embeds, text_model_output = text_features["text_embeds"], text_features["text_model_output"]
-        dtype = getattr(jnp, self.dtype)
 
-        # cosine similarity as logits
-        logit_scale = jnp.exp(
-            self.param(
-                "logit_scale",
-                nn.with_logical_partitioning(nn.initializers.constant(self.logit_scale_init_value, dtype), (None,)),
-                (1,),
-            )
-        )
+        # temperature scaling
+        logit_scale = jnp.exp(self.logit_scale)
 
         # logit bias is only used for sigmoid loss
-        logit_bias = self.param(
-            "logit_bias",
-            nn.with_logical_partitioning(nn.initializers.constant(self.logit_bias_init_value, dtype), (None,)),
-            (1,),
-        )
+        logit_bias = self.logit_bias
 
         logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
         logits_per_image = logits_per_text.T
@@ -1105,28 +1137,14 @@ class CLIPModel(nn.Module):
         attention_mask,
         deterministic: bool = True,
     ):
-        text_config = unfreeze(self.text_config)
-        if self.dtype is not None:
-            text_config["dtype"] = self.dtype
-        dtype = getattr(jnp, self.dtype)
-
-        text_outputs = CLIPTextTransformer(
-            **text_config,
-            name="text",
-        )(
+        text_outputs = self.text_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             deterministic=deterministic,
         )
 
         text_embeds = text_outputs["pooled_output"]
-        text_embeds = nn.Dense(
-            self.projection_dim,
-            dtype=dtype,
-            use_bias=False,
-            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
-            name="text_projection",
-        )(text_embeds)
+        text_embeds = self.text_projection(text_embeds)
         text_embeds = normalize(text_embeds)
         return {"text_embeds": text_embeds, "text_model_output": text_outputs}
 
@@ -1135,26 +1153,12 @@ class CLIPModel(nn.Module):
         pixel_values,
         deterministic: bool = True,
     ):
-        vision_config = unfreeze(self.vision_config)
-        if self.dtype is not None:
-            vision_config["dtype"] = self.dtype
-        dtype = getattr(jnp, self.dtype)
-
-        vision_outputs = CLIPVisionTransformer(
-            **vision_config,
-            name="vision",
-        )(
+        vision_outputs = self.vision_model(
             pixel_values=pixel_values,
             deterministic=deterministic,
         )
         image_embeds = vision_outputs["pooled_output"]
-        image_embeds = nn.Dense(
-            self.projection_dim,
-            dtype=dtype,
-            use_bias=False,
-            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
-            name="vision_projection",
-        )(image_embeds)
+        image_embeds = self.vision_projection(image_embeds)
         image_embeds = normalize(image_embeds)
 
         return {"image_embeds": image_embeds, "vision_model_output": vision_outputs}
