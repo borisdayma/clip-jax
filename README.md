@@ -46,6 +46,7 @@ python train.py \
     --output_dir output_model \
     --config_name ../configs/small-patch16.json --dtype float32 \
     --do_train --train_folder gs://my_bucket/datacomp/small/shards \
+    --num_train_epochs 10 \
     --tokenizer_name openai/clip-vit-base-patch32 \
     --batch_size_per_node 4096 --gradient_accumulation_steps 1 \
     --learning_rate 0.00003 --warmup_steps 2000 --lr_offset 0 \
