@@ -35,11 +35,35 @@ Alternatively, you can use your own dataset. In that case you should use [img2da
 
 ### Train a model
 
-TODO
+Use [`training/train.py`](training/train.py) to train a model:
+
+Here is an example command to train a model on a TPU v3-8:
+
+```bash
+python train.py \
+    --assert_TPU_available \
+    --unroll 100 \
+    --output_dir output_model \
+    --config_name ../configs/small-patch16.json --dtype float32 \
+    --do_train --train_folder gs://my_bucket/datacomp/small/shards \
+    --tokenizer_name openai/clip-vit-base-patch32 \
+    --batch_size_per_node 4096 --gradient_accumulation_steps 1 \
+    --learning_rate 0.00003 --warmup_steps 2000 --lr_offset 0 \
+    --optim distributed_shampoo --beta1 0.9 --beta2 0.99 --weight_decay 0.0 \
+    --block_size_text 512 --block_size_vision 512 --nesterov \
+    --graft_type rmsprop_normalized --preconditioning_compute_steps 20 \
+    --mp_devices 1 --shard_shampoo_across 2d \
+    --activation_partitioning_dims 1 --parameter_partitioning_dims 1 \
+    --loss_type sigmoid \
+    --gradient_checkpointing \
+    --logging_steps 100 --eval_steps 500 --save_steps 5000
+```
 
 ### Use a trained model
 
 Refer to [`utils/demo.ipynb`](utils/demo.ipynb).
+
+TODO: update demo
 
 ### Downstream tasks
 
