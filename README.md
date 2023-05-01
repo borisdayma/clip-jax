@@ -42,10 +42,9 @@ Here is an example command to train a model on a TPU v3-8:
 ```bash
 python train.py \
     --assert_TPU_available \
-    --unroll 100 \
-    --output_dir output_model \
     --config_name ../configs/small-patch16.json --dtype float32 \
     --do_train --train_folder gs://my_bucket/datacomp/small/shards \
+    --output_dir gs://my_bucket/clip_model/$(date +"%Y%m%d%H%M%S") \
     --num_train_epochs 10 \
     --tokenizer_name openai/clip-vit-base-patch32 \
     --batch_size_per_node 4096 --gradient_accumulation_steps 1 \
@@ -57,6 +56,7 @@ python train.py \
     --activation_partitioning_dims 1 --parameter_partitioning_dims 1 \
     --loss_type sigmoid \
     --gradient_checkpointing \
+    --unroll 100 \
     --logging_steps 100 --eval_steps 500 --save_steps 5000
 ```
 
@@ -83,7 +83,7 @@ TODO:
 
 ```bibtex
 @misc{radford2021learning,
-      title={Learning Transferable Visual Models From Natural Language Supervision}, 
+      title={Learning Transferable Visual Models From Natural Language Supervision},
       author={Alec Radford and Jong Wook Kim and Chris Hallacy and Aditya Ramesh and Gabriel Goh and Sandhini Agarwal and Girish Sastry and Amanda Askell and Pamela Mishkin and Jack Clark and Gretchen Krueger and Ilya Sutskever},
       year={2021},
       eprint={2103.00020},
@@ -94,7 +94,7 @@ TODO:
 
 ```bibtex
 @misc{zhai2023sigmoid,
-      title={Sigmoid Loss for Language Image Pre-Training}, 
+      title={Sigmoid Loss for Language Image Pre-Training},
       author={Xiaohua Zhai and Basil Mustafa and Alexander Kolesnikov and Lucas Beyer},
       year={2023},
       eprint={2303.15343},
