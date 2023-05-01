@@ -207,11 +207,20 @@ class Dataset:
                     yield batch_group
 
 
-def logits_to_image(logits, mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0), format="rgb"):
-    logits = np.asarray(logits, dtype=np.float32)
+def logits_to_image(logits, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), format="rgb"):
     if format == "rgb":
         logits = (logits * np.asarray(std, dtype=np.float32)) + np.asarray(mean, dtype=np.float32)
-        logits = logits.clip(0.0, 1.0)
+        logits = np.asarray(logits * 255.0, dtype=np.uint8)
+        logits = logits.clip(0, 255)
     else:
         raise NotImplementedError("LAB not implemented")
     return logits
+
+
+def image_to_logits(image, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), format="rgb"):
+    image = np.asarray(image)
+    if format == "rgb":
+        image = (image / 255.0 - np.asarray(mean, dtype=np.float32)) / np.asarray(std, dtype=np.float32)
+    else:
+        raise NotImplementedError("LAB not implemented")
+    return image
