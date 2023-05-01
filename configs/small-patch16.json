@@ -18,7 +18,7 @@
     "num_heads": 8,
     "position_embedding_type": "rotary",
     "use_causal_mask": false,
-    "mlp_dim": 2048
+    "mlp_dim": 1024
   },
   "vision_config": {
     "position_embedding_type": "sincos2d",
