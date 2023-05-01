@@ -1323,18 +1323,17 @@ def main():
                 json.dump(clipConfig, f, indent=2)
         multihost_utils.sync_global_devices("save_config")
         # save model
-        if params is not None:
-            checkpoints.save_checkpoint_multiprocess(
-                training_args.output_dir,
-                params,
-                prefix="model_",
-                step=state.step,
-                overwrite=True,
-                keep=keep_checkpoints,
-                orbax_checkpointer=orbax_checkpointer,
-            )
+        params_dir = checkpoints.save_checkpoint_multiprocess(
+            training_args.output_dir,
+            params,
+            prefix="model_",
+            step=state.step,
+            overwrite=True,
+            keep=keep_checkpoints,
+            orbax_checkpointer=orbax_checkpointer,
+        )
         # save opt_state
-        checkpoints.save_checkpoint_multiprocess(
+        opt_state_dir = checkpoints.save_checkpoint_multiprocess(
             training_args.output_dir,
             opt_state,
             prefix="opt_state_",
@@ -1345,6 +1344,7 @@ def main():
         )
         # save config
         if jax.process_index() == 0:
+            # config
             artifact = wandb.Artifact(
                 name=f"config-{wandb.run.id}",
                 type="config",
@@ -1355,7 +1355,19 @@ def main():
             with artifact.new_file("state.json", mode="w", encoding="utf-8") as f:
                 json.dump(state.to_dict(), f)
             wandb.run.log_artifact(artifact)
-            # TODO: use artifact.add_reference(path) ref to save model and opt_state?
+            # model / opt_state
+            use_bucket = training_args.output_dir.startswith("gs://")
+            for item, item_dir in zip(["model", "opt_state"], [params_dir, opt_state_dir]):
+                artifact = wandb.Artifact(
+                    name=f"{item}-{wandb.run.id}",
+                    type=item,
+                    metadata={"output_dir": item_dir, **state.to_dict()},
+                )
+                if use_bucket:
+                    artifact.add_reference(item_dir)
+                else:
+                    artifact.add_dir(item_dir)
+                wandb.run.log_artifact(artifact)
 
         # update timing
         state.add_time("save", time.perf_counter() - start_save_time)
