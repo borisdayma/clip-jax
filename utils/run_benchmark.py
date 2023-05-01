@@ -1182,15 +1182,20 @@ if __name__ == "__main__":
     model = CLIPModel(**config)
     rng = jax.random.PRNGKey(0)
     model_inputs = model.init_inputs(rng)
-    params = model.init(**model_inputs)["params"]
+    # init to zeros
+    logical_shape = jax.eval_shape(model.init, **model_inputs)["params"]
+    params = jax.tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), logical_shape)
+    # restore checkpoint
     params = checkpoints.restore_checkpoint(model_path, target=params, prefix="model_")
 
     # prepare text weights
     @jax.jit
     def get_text_features(input_ids, attention_mask, params):
-        return model.apply(
+        text_embeds = model.apply(
             {"params": params}, input_ids=input_ids, attention_mask=attention_mask, method=model.get_text_features
         )["text_embeds"]
+        text_embeds = text_embeds / jnp.linalg.norm(text_embeds, axis=-1, keepdims=True)
+        return text_embeds
 
     txt_features = []
     for item in tqdm(ds.classes):

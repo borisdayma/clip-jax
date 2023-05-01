@@ -1109,6 +1109,10 @@ class CLIPModel(nn.Module):
         image_embeds, vision_model_output = image_features["image_embeds"], image_features["vision_model_output"]
         text_embeds, text_model_output = text_features["text_embeds"], text_features["text_model_output"]
 
+        # normalize
+        image_embeds = normalize(image_embeds)
+        text_embeds = normalize(text_embeds)
+
         # temperature scaling
         logit_scale = jnp.exp(self.logit_scale)
 
@@ -1143,7 +1147,6 @@ class CLIPModel(nn.Module):
 
         text_embeds = text_outputs["pooled_output"]
         text_embeds = self.text_projection(text_embeds)
-        text_embeds = normalize(text_embeds)
         return {"text_embeds": text_embeds, "text_model_output": text_outputs}
 
     def get_image_features(
@@ -1157,7 +1160,6 @@ class CLIPModel(nn.Module):
         )
         image_embeds = vision_outputs["pooled_output"]
         image_embeds = self.vision_projection(image_embeds)
-        image_embeds = normalize(image_embeds)
 
         return {"image_embeds": image_embeds, "vision_model_output": vision_outputs}
 
