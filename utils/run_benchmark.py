@@ -1190,14 +1190,20 @@ if __name__ == "__main__":
     def get_text_features(input_ids, attention_mask, params):
         return model.apply(
             {"params": params}, input_ids=input_ids, attention_mask=attention_mask, method=model.get_text_features
-        )
+        )["text_embeds"]
 
     txt_features = []
     for item in tqdm(ds.classes):
         texts = [(t.format(c=item)) for t in zero_shot_classification_template]
-        txt_inputs = tokenizer(texts, padding="max_length", truncation=True, max_length=80, return_tensors="np")
+        txt_inputs = tokenizer(
+            texts,
+            padding="max_length",
+            truncation=True,
+            max_length=config["text_config"]["max_length"],
+            return_tensors="np",
+        )
         txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
-        features = get_text_features(**txt_inputs, params=params)["text_embeds"]
+        features = get_text_features(**txt_inputs, params=params)
         features = features.mean(axis=0)
         txt_features.append(features)
     txt_features = jnp.asarray(txt_features)
