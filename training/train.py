@@ -676,10 +676,6 @@ def main():
     )
     params_spec = nn.logical_to_mesh(logical_spec, rules)
     data_spec = nn.logical_to_mesh(PartitionSpec("batch"), rules)
-    embed_spec = nn.logical_to_mesh(PartitionSpec("batch", "embed"), rules)
-    device_spec = PartitionSpec("data", "model")
-
-    embed_reshaped_spec = nn.logical_to_mesh(PartitionSpec("batch", None, "embed"), rules)
     scan_spec = PartitionSpec(None)
 
     # Orbax checkpointer
