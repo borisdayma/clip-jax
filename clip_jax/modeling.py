@@ -1059,12 +1059,12 @@ class CLIPModel(nn.Module):
         dtype = getattr(jnp, self.dtype)
         self.logit_scale = self.param(
             "logit_scale",
-            nn.with_logical_partitioning(nn.initializers.constant(self.logit_scale_init_value, dtype), (None,)),
+            nn.with_logical_partitioning(nn.initializers.constant(self.logit_scale_init_value), (None,)),
             (1,),
         )
         self.logit_bias = self.param(
             "logit_bias",
-            nn.with_logical_partitioning(nn.initializers.constant(self.logit_bias_init_value, dtype), (None,)),
+            nn.with_logical_partitioning(nn.initializers.constant(self.logit_bias_init_value), (None,)),
             (1,),
         )
         text_config = unfreeze(self.text_config)
