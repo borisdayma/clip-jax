@@ -1021,14 +1021,14 @@ def main():
         bs = text_embeds.shape[0]
         labels = 2 * np.eye(bs) - np.ones((bs, bs))
         logits = jnp.matmul(text_embeds, image_embeds.T) * logit_scale + logit_bias
-        return -jnp.mean(jax.nn.log_sigmoid(labels * logits))
+        return -jnp.sum(jax.nn.log_sigmoid(labels * logits))
 
     def mini_batch_negative_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias):
         """Only negative samples"""
         bs = text_embeds.shape[0]
         labels = -np.ones((bs, bs))
         logits = jnp.matmul(text_embeds, image_embeds.T) * logit_scale + logit_bias
-        return -jnp.mean(jax.nn.log_sigmoid(labels * logits))
+        return -jnp.sum(jax.nn.log_sigmoid(labels * logits))
 
     def sigmoid_loss(outputs):
         text_embeds = outputs["text_embeds"]
