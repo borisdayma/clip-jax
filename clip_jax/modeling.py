@@ -27,7 +27,7 @@ from flax.linen import combine_masks, dot_product_attention
 from flax.linen import partitioning as nn_partitioning
 from flax.linen.linear import DenseGeneral, DotGeneralT, PrecisionLike
 from flax.linen.module import Module, compact, merge_param
-from flax.linen.partitioning import remat, ScanIn
+from flax.linen.partitioning import ScanIn
 
 remat = nn_partitioning.remat
 
@@ -636,9 +636,9 @@ class CLIPEncoder(nn.Module):
         initializing = self.is_mutable_collection("params")
         params_spec = 0 if initializing else ScanIn(0)
         layer = (
-            remat(
+            nn.remat(
                 CLIPEncoderLayer,
-                static_argnums=(2,),
+                static_argnums=(-1,),
                 prevent_cse=not use_scan,
             )
             if self.gradient_checkpointing
