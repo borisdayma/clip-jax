@@ -23,14 +23,11 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
-from flax.core.frozen_dict import unfreeze
 from flax.linen import combine_masks, dot_product_attention
 from flax.linen import partitioning as nn_partitioning
-from flax.linen.dtypes import canonicalize_dtype
 from flax.linen.linear import DenseGeneral, DotGeneralT, PrecisionLike
 from flax.linen.module import Module, compact, merge_param
-from flax.linen.normalization import _canonicalize_axes
-from flax.linen.partitioning import remat
+from flax.linen.partitioning import remat, ScanIn
 
 remat = nn_partitioning.remat
 
@@ -636,12 +633,13 @@ class CLIPEncoder(nn.Module):
     ):
         # gradient checkpointing
         use_scan = True
+        initializing = self.is_mutable_collection("params")
+        params_spec = 0 if initializing else ScanIn(0)
         layer = (
             remat(
                 CLIPEncoderLayer,
                 static_argnums=(2,),
                 prevent_cse=not use_scan,
-                policy=jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
             )
             if self.gradient_checkpointing
             else CLIPEncoderLayer
@@ -649,7 +647,7 @@ class CLIPEncoder(nn.Module):
 
         hidden_states, _ = nn.scan(
             layer,
-            variable_axes={"params": 0, "cache": 0},
+            variable_axes={"params": params_spec, "cache": 0},
             split_rngs={"params": True, "dropout": True},
             in_axes=(nn.broadcast, nn.broadcast),
             length=self.num_layers,
