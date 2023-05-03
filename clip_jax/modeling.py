@@ -194,101 +194,10 @@ def generate_fixed_pos_embedding(features, length, min_timescale=1.0, max_timesc
     return jnp.sin(sinusoid_inp), jnp.cos(sinusoid_inp)
 
 
-# Adapted from flax.linen.normalization
-def _normalize(
-    mdl: Module,
-    x: Any,
-    mean: Any,
-    var: Any,
-    reduction_axes: Axes,
-    feature_axes: Axes,
-    dtype: Dtype,
-    param_dtype: Dtype,
-    epsilon: float,
-    use_bias: bool,
-    use_scale: bool,
-    bias_init: Callable,
-    scale_init: Callable,
-):
-    reduction_axes = _canonicalize_axes(x.ndim, reduction_axes)
-    feature_axes = _canonicalize_axes(x.ndim, feature_axes)
-    stats_shape = list(x.shape)
-    for axis in reduction_axes:
-        stats_shape[axis] = 1
-    if mean is not None:
-        mean = mean.reshape(stats_shape)
-    var = var.reshape(stats_shape)
-    feature_shape = [1] * x.ndim
-    reduced_feature_shape = []
-    for ax in feature_axes:
-        feature_shape[ax] = x.shape[ax]
-        reduced_feature_shape.append(x.shape[ax])
-    y = x - mean if mean is not None else x
-    mul = jax.lax.rsqrt(var + epsilon)
-    args = [x]
-    if use_scale:
-        scale = mdl.param("scale", scale_init, reduced_feature_shape, param_dtype).reshape(feature_shape)
-        mul *= scale
-        args.append(scale)
-    y *= mul
-    if use_bias:
-        bias = mdl.param("bias", bias_init, reduced_feature_shape, param_dtype).reshape(feature_shape)
-        y += bias
-        args.append(bias)
-    dtype = canonicalize_dtype(*args, dtype=dtype)
-    return jnp.asarray(y, dtype)
-
-
-class RMSNorm(nn.Module):
-    """RMSNorm, adapted from flax LayerNorm"""
-
-    epsilon: float = 1e-6
-    dtype: Optional[Dtype] = None
-    param_dtype: Dtype = jnp.float32
-    use_bias: bool = True
-    use_scale: bool = True
-    bias_init: Callable = nn.initializers.zeros_init
-    scale_init: Callable = nn.initializers.ones_init
-    reduction_axes: Axes = -1
-    feature_axes: Axes = -1
-    axis_name: Optional[str] = None
-    axis_index_groups: Any = None
-
-    @nn.compact
-    def __call__(self, x):
-        dtype = self.dtype or jnp.result_type(x)
-        # promote x to at least float32, this avoids half precision computation
-        # but preserves double or complex floating points
-        dtype = jnp.promote_types(dtype, jnp.float32)
-        x = jnp.asarray(x, dtype)
-        # use mean2 instead of variance (not centered)
-        var = jnp.mean(jax.lax.square(x), self.reduction_axes)
-        mean = None
-
-        if self.axis_name is not None:
-            var = jax.lax.pmean(var, axis_name=self.axis_name, axis_index_groups=self.axis_index_groups)
-
-        return _normalize(
-            self,
-            x,
-            mean,
-            var,
-            self.reduction_axes,
-            self.feature_axes,
-            self.dtype,
-            self.param_dtype,
-            self.epsilon,
-            self.use_bias,
-            self.use_scale,
-            self.bias_init,
-            self.scale_init,
-        )
-
-
 def norm(use_rmsnorm):
     """Normalization wrapper"""
     if use_rmsnorm:
-        return RMSNorm
+        return nn.RMSNorm
     else:
         return nn.LayerNorm
 
