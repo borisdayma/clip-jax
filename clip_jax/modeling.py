@@ -197,7 +197,8 @@ def generate_fixed_pos_embedding(features, length, min_timescale=1.0, max_timesc
 def norm(use_rmsnorm):
     """Normalization wrapper"""
     if use_rmsnorm:
-        return nn.RMSNorm
+        # no bias
+        return lambda use_bias, bias_init, *args, **kwargs: nn.RMSNorm(*args, **kwargs)
     else:
         return nn.LayerNorm
 
@@ -956,12 +957,18 @@ class CLIPModel(nn.Module):
         default_fields = dataclasses.fields(CLIPTextTransformer)
         default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
         default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
-        self.text_config = {**default_fields, **self.text_config}
+        text_config = {**default_fields, **self.text_config}
+        if self.dtype is not None:
+            text_config["dtype"] = self.dtype
+        self.text_config = text_config
         # add default fields vision_config
         default_fields = dataclasses.fields(CLIPVisionTransformer)
         default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
         default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
-        self.vision_config = {**default_fields, **self.vision_config}
+        vision_config = {**default_fields, **self.vision_config}
+        if self.dtype is not None:
+            vision_config["dtype"] = self.dtype
+        self.vision_config = vision_config
         return super().__post_init__()
 
     def setup(self):
@@ -976,19 +983,12 @@ class CLIPModel(nn.Module):
             nn.with_logical_partitioning(nn.initializers.constant(self.logit_bias_init_value), (None,)),
             (1,),
         )
-        text_config = unfreeze(self.text_config)
-        if self.dtype is not None:
-            text_config["dtype"] = self.dtype
         self.text_model = CLIPTextTransformer(
             **self.text_config,
             name="text",
         )
-        vision_config = unfreeze(self.vision_config)
-        if self.dtype is not None:
-            vision_config["dtype"] = self.dtype
-        dtype = getattr(jnp, self.dtype)
         self.vision_model = CLIPVisionTransformer(
-            **vision_config,
+            **self.vision_config,
             name="vision",
         )
         self.text_projection = nn.Dense(
