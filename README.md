@@ -75,6 +75,7 @@ TODO:
 
 ## Acknowledgements
 
+- [Lucas Beyer](https://twitter.com/giffmana) for helping with clarifications on the [Sigmoid Loss for Language Image Pre-Training](https://arxiv.org/abs/2303.15343) paper
 - 🤗 Hugging Face for CLIP reference implementation and training scripts
 - Google [TPU Research Cloud (TRC) program](https://sites.research.google/trc/) for providing computing resources
 - [Weights & Biases](https://wandb.com/) for providing the infrastructure for experiment tracking and model management
