@@ -1245,6 +1245,7 @@ if __name__ == "__main__":
     run = wandb.init(
         id=wandb_id,
         name=wandb_run_name,
+        resume="allow",
         entity=None,
         project="clip",
         job_type="eval",
