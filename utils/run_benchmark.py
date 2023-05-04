@@ -2,6 +2,7 @@
 Adapted from https://github.com/LAION-AI/CLIP_benchmark
 """
 
+import argparse
 import os
 from functools import partial
 from subprocess import call
@@ -22,6 +23,12 @@ from tqdm import tqdm
 from clip_jax import CLIPModel
 from clip_jax.tokenizer import AutoTokenizer
 from clip_jax.utils import load_config
+
+# parse arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("--tokenizer_name", type=str, default="openai/clip-vit-base-patch32")
+parser.add_argument("--train_run", required=True, type=str, help='wandb run id as "entity/clip/run_id"')
+args = parser.parse_args()
 
 
 def load_dataset(folder="benchmark_data", transform=None, **kwargs):
@@ -1178,12 +1185,12 @@ if __name__ == "__main__":
     dl = torch.utils.data.DataLoader(ds, batch_size=1000, num_workers=0, shuffle=False)
 
     # paths
-    tokenizer_path = "openai/clip-vit-base-patch32"
-    train_run = "entity/clip/run_id"
+    tokenizer_name = args.tokenizer_name
+    train_run = args.train_run
 
     # load tokenizer
     print("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
     # get model
     print("Loading model...")
