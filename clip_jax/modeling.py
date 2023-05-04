@@ -1084,6 +1084,10 @@ class CLIPModel(nn.Module):
         rngs = {"params": params_rng, "dropout": dropout_rng}
         return {"rngs": rngs, "input_ids": input_ids, "pixel_values": pixel_values, "attention_mask": attention_mask}
 
+    def init_weights(self, rng: jax.random.PRNGKey):
+        inputs = self.init_inputs(rng)
+        return self.init(**inputs)
+
 
 def normalize(x, eps=1e-7, safe_norm=True):
     if safe_norm:

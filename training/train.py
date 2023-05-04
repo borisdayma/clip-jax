@@ -28,7 +28,7 @@ from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.training import checkpoints
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import numpy as jnp
-from jax.experimental import PartitionSpec, multihost_utils
+from jax.experimental import multihost_utils
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.mesh_utils import create_device_mesh
 from jax.experimental.pjit import pjit, with_sharding_constraint
@@ -618,10 +618,9 @@ def main():
 
     # set rng
     rng = jax.random.PRNGKey(training_args.seed_model)
-    model_inputs = model.init_inputs(rng)
 
     # get PartitionSpec and shape for model params
-    logical_params = jax.eval_shape(lambda inputs: model.init(**inputs), model_inputs)["params"]
+    logical_params = jax.eval_shape(lambda rng: model.init_weights(rng), rng)["params"]
 
     # Parameter count
     num_params = {
@@ -709,10 +708,11 @@ def main():
 
     @partial(pjit, in_shardings=None, out_shardings=params_spec)
     def init_params():
-        params = model.init(**model_inputs)["params"]
-        if model_args.model_name_or_path is not None:
-            # init to 0 (faster?)
-            params = jax.tree_map(lambda x: jnp.zeros_like(x), params)
+        if model_args.model_name_or_path is None:
+            params = model.init_weights(rng)["params"]
+        else:
+            # init to 0 (faster)
+            params = jax.tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), logical_params)
         return params
 
     # Set params
