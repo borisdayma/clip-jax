@@ -1235,6 +1235,12 @@ if __name__ == "__main__":
     wandb_id = f"eval_{train_run.id}"
     wandb_run_name = f"Eval {train_run.name}"
 
+    # get last step logged
+    try:
+        last_step_logged = wandb_api.run(f"clip/{wandb_id}").summary.get("state/step", 0)
+    except:
+        last_step_logged = 0
+
     # start run
     run = wandb.init(
         id=wandb_id,
@@ -1243,7 +1249,7 @@ if __name__ == "__main__":
         project="clip",
         job_type="eval",
     )
-    last_step_logged = run.summary.get("state/step", 0)
+
     for step in available_steps:
         if step <= last_step_logged:
             continue
