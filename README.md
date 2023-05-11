@@ -27,7 +27,7 @@ You can download training data from [DataComp](https://github.com/mlfoundations/
 # download data
 python download_upstream.py \
     --scale small --data_dir gs://my_bucket/datacomp/small metadata_dir metadata \
-    --image_size 256 --resize_mode center_crop --skip_bbox_blurring \
+    --image_size 256 --resize_mode center_crop --skip_bbox_blurring --no_resize_only_if_bigger \
     --encode_format webp --output_format tfrecord
 ```
 
