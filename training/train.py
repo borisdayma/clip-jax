@@ -1008,22 +1008,21 @@ def main():
         return jnp.mean(log_normalizers - label_logits)
 
     def cross_entropy_loss(similarity):
-        # TODO: should we increase precision for large batch, jnp.float64 may have a minimal impact on memory/speed if similarity converted only here
+        # increase precision for large batches
+        similarity = similarity.astype(jnp.float64)
         loss = (cross_entropy(similarity, axis=0) + cross_entropy(similarity, axis=1)) / 2
         return loss
 
-    def mini_batch_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias):
+    def mini_batch_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias, negative_samples):
         """Positive samples are on the diagonal"""
         bs = text_embeds.shape[0]
-        labels = 2 * np.eye(bs) - np.ones((bs, bs))
+        if negative_samples:
+            labels = -np.ones((bs, bs))
+        else:
+            labels = 2 * np.eye(bs) - np.ones((bs, bs))
         logits = jnp.matmul(text_embeds, image_embeds.T) * logit_scale + logit_bias
-        return -jnp.mean(jax.nn.log_sigmoid(labels * logits))
-
-    def mini_batch_negative_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias):
-        """Only negative samples"""
-        bs = text_embeds.shape[0]
-        labels = -np.ones((bs, bs))
-        logits = jnp.matmul(text_embeds, image_embeds.T) * logit_scale + logit_bias
+        # increase precision for large batches
+        logits = logits.astype(jnp.float64)
         return -jnp.mean(jax.nn.log_sigmoid(labels * logits))
 
     def sigmoid_loss(outputs):
@@ -1042,7 +1041,7 @@ def main():
             axis_size = jax.lax.psum(1, axis_name="data")
 
             # calculate local device loss
-            loss = mini_batch_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias)
+            loss = mini_batch_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias, negative_samples=False)
 
             # add negative losses
             def add_negative_loss(i, carrys):
@@ -1052,7 +1051,9 @@ def main():
                     image_embeds, axis_name="data", perm=[(j, (j - 1) % axis_size) for j in range(axis_size)]
                 )
                 # add loss (all negative samples)
-                cumul_loss += mini_batch_negative_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias)
+                cumul_loss += mini_batch_sigmoid_loss(
+                    text_embeds, image_embeds, logit_scale, logit_bias, negative_samples=True
+                )
                 return cumul_loss, image_embeds
 
             loss, _ = jax.lax.fori_loop(0, axis_size - 1, add_negative_loss, (loss, image_embeds))
