@@ -23,8 +23,7 @@ import tensorflow as tf
 import tensorflow_io as tfio
 import transformers
 import wandb
-from flax.core import freeze, unfreeze
-from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
+from flax.core import FrozenDict, freeze, unfreeze
 from flax.training import checkpoints
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import numpy as jnp
