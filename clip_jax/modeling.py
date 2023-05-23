@@ -707,7 +707,7 @@ class CLIPTextTransformer(nn.Module):
         attention_mask,
         deterministic: bool = True,
     ):
-        dtype = getattr(jnp, self.dtype)
+        dtype = jnp.dtype(self.dtype)
         hidden_states = CLIPTextEmbeddings(
             hidden_size=self.hidden_size,
             vocab_size=self.vocab_size,
@@ -801,7 +801,7 @@ class CLIPVisionTransformer(nn.Module):
         pixel_values,
         deterministic: bool = True,
     ):
-        dtype = getattr(jnp, self.dtype)
+        dtype = jnp.dtype(self.dtype)
         batch, height, width, channels = pixel_values.shape
         assert self.position_embedding_type in [
             "absolute",
@@ -894,7 +894,18 @@ class CLIPVisionTransformer(nn.Module):
 class CLIPVisionModelForImageClassification(nn.Module):
     vision_config: Any
     num_labels: int
-    dtype: jnp.dtype = jnp.float32
+    dtype: str = "float32"
+
+    def __post_init__(self):
+        # add default fields vision_config
+        default_fields = dataclasses.fields(CLIPVisionTransformer)
+        default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
+        default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
+        vision_config = {**default_fields, **self.vision_config}
+        if self.dtype is not None:
+            vision_config["dtype"] = self.dtype
+        self.vision_config = vision_config
+        return super().__post_init__()
 
     @nn.compact
     def __call__(
@@ -902,23 +913,37 @@ class CLIPVisionModelForImageClassification(nn.Module):
         pixel_values=None,
         deterministic: bool = True,
     ):
-        outputs = CLIPVisionTransformer(**self.vision_config, dtype=self.dtype)(
+        dtype = jnp.dtype(self.dtype)
+        outputs = CLIPVisionTransformer(
+            **self.vision_config,
+            name="vision",
+        )(
             pixel_values=pixel_values,
             deterministic=deterministic,
         )
 
         logits = nn.Dense(
             self.num_labels,
-            dtype=self.dtype,
+            dtype=dtype,
             kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "classifier")),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros, ("classifier",)),
+            name="classifier",
         )(outputs["pooled_output"])
 
-        return dict(
-            logits=logits,
-            hidden_states=outputs["hidden_states"],
-            attentions=outputs["attentions"],
-        )
+        return dict(logits=logits)
+
+    def init_inputs(config, rng: jax.random.PRNGKey):
+        vision_config = config.vision_config
+        if isinstance(vision_config, dict):
+            vision_config = SimpleNamespace(**vision_config)
+        pixel_values = jnp.ones((1, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
+        params_rng, dropout_rng = jax.random.split(rng)
+        rngs = {"params": params_rng, "dropout": dropout_rng}
+        return {"rngs": rngs, "pixel_values": pixel_values}
+
+    def init_weights(self, rng: jax.random.PRNGKey):
+        inputs = self.init_inputs(rng)
+        return self.init(**inputs)
 
 
 class CLIPTextModelForFineTuning(nn.Module):
@@ -970,7 +995,7 @@ class CLIPModel(nn.Module):
         return super().__post_init__()
 
     def setup(self):
-        dtype = getattr(jnp, self.dtype)
+        dtype = jnp.dtype(self.dtype)
         self.logit_scale = self.param(
             "logit_scale",
             nn.with_logical_partitioning(nn.initializers.constant(self.logit_scale_init_value), (None,)),
