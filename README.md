@@ -64,11 +64,11 @@ python train.py \
 
 Refer to [`utils/demo.ipynb`](utils/demo.ipynb).
 
-TODO: update demo
+TODO: train a benchmark model and load it from the hub.
 
 ### Downstream tasks
 
-TODO:
+TODO: add demo's:
 
 - [ ] Image classification with `CLIPVisionModelForImageClassification`
 - [ ] Text encoder with `CLIPTextModelForFineTuning`
