@@ -2,23 +2,33 @@
 Adapted from https://github.com/LAION-AI/CLIP_benchmark
 """
 
+import argparse
 import os
 from functools import partial
 from subprocess import call
 
 import cv2
-import google.cloud.storage
 import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
 import torchvision
+import wandb
+from flax.jax_utils import replicate
+from flax.training import checkpoints
 from flax.training.common_utils import shard
 from torchvision.datasets import ImageNet
 from tqdm import tqdm
-from transformers import AutoTokenizer
 
-from clip_jax import FlaxCLIPModel
+from clip_jax import CLIPModel
+from clip_jax.tokenizer import AutoTokenizer
+from clip_jax.utils import load_config
+
+# parse arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("--tokenizer_name", type=str, default="openai/clip-vit-base-patch32")
+parser.add_argument("--train_run", required=True, type=str, help='wandb run id as "entity/clip/run_id"')
+args = parser.parse_args()
 
 
 def load_dataset(folder="benchmark_data", transform=None, **kwargs):
@@ -1174,28 +1184,42 @@ if __name__ == "__main__":
     ds = load_dataset(transform=transforms)
     dl = torch.utils.data.DataLoader(ds, batch_size=1000, num_workers=0, shuffle=False)
 
-    # load model and tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("my_tokenizer")
-    clip = FlaxCLIPModel.from_pretrained("borisd13/clip/model_artifact:latest")
+    # paths
+    tokenizer_name = args.tokenizer_name
+    train_run = args.train_run
 
-    # prepare text weights
-    get_text_features = jax.jit(clip.get_text_features)
-    txt_features = []
-    for item in tqdm(ds.classes):
-        texts = [(t.format(c=item)) for t in zero_shot_classification_template]
-        txt_inputs = tokenizer(texts, padding="max_length", truncation=True, max_length=80, return_tensors="np")
-        txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
-        features = get_text_features(**txt_inputs, params=clip._params)
-        features = features / jnp.linalg.norm(features, axis=-1, keepdims=True)
-        features = features.mean(axis=0)
-        features = features / jnp.linalg.norm(features, axis=-1, keepdims=True)
-        txt_features.append(features)
-    txt_features = jnp.asarray(txt_features)
+    # load tokenizer
+    print("Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+    # get model
+    print("Loading model...")
+    wandb_api = wandb.Api()
+    train_run = wandb_api.run(train_run)
+    model_path = train_run.config["output_dir"]
+
+    # model
+    config = load_config(f"{model_path}/config.json")
+    model = CLIPModel(**config)
+    rng = jax.random.PRNGKey(0)
+    model_inputs = model.init_inputs(rng)
+
+    # init to zeros
+    logical_shape = jax.eval_shape(model.init, **model_inputs)["params"]
+
+    # get text features
+    @jax.jit
+    def get_text_features(input_ids, attention_mask, params):
+        text_embeds = model.apply(
+            {"params": params}, input_ids=input_ids, attention_mask=attention_mask, method=model.get_text_features
+        )["text_embeds"]
+        text_embeds = text_embeds / jnp.linalg.norm(text_embeds, axis=-1, keepdims=True)
+        return text_embeds
 
     # evaluate a batch
     @partial(jax.pmap, axis_name="batch")
-    def evaluate_batch(pixel_values, labels):
-        image_features = clip.get_image_features(pixel_values)
+    def evaluate_batch(pixel_values, labels, txt_features, params):
+        image_features = model.apply({"params": params}, pixel_values, method=model.get_image_features)["image_embeds"]
         image_features = image_features / jnp.linalg.norm(image_features, axis=-1, keepdims=True)
         similarity = jnp.matmul(image_features, txt_features.T)
         top_k = similarity.argsort(-1)[:, ::-1][:, :5]
@@ -1204,24 +1228,88 @@ if __name__ == "__main__":
         acc_top_1, acc_top_5 = jax.lax.pmean(acc_top_1, "batch"), jax.lax.pmean(acc_top_5, "batch")
         return acc_top_1, acc_top_5
 
-    # calculate metrics
-    acc_top_1_all = []
-    acc_top_5_all = []
-    n_items = []
+    # available steps
+    available_steps = checkpoints.available_steps(model_path, prefix="model_")
 
-    for batch in tqdm(dl):
-        images, labels = batch
-        pixel_values = jnp.asarray(images)
-        labels = jnp.asarray(labels)
-        pixel_values = shard(pixel_values)
-        labels = shard(labels)
-        acc_top_1, acc_top_5 = evaluate_batch(pixel_values, labels)
-        acc_top_1_all.append(acc_top_1[0])
-        acc_top_5_all.append(acc_top_5[0])
-        n_items.append(len(images))
+    # unique wandb run per model
+    wandb_id = f"eval_{train_run.id}"
+    wandb_run_name = f"Eval {train_run.name}"
 
-    # weighted average
-    acc_top_1 = np.average(acc_top_1_all, weights=n_items)
-    acc_top_5 = np.average(acc_top_5_all, weights=n_items)
-    print(f"acc_top_1: {acc_top_1:.4f}")
-    print(f"acc_top_5: {acc_top_5:.4f}")
+    # get last step logged
+    try:
+        last_step_logged = wandb_api.run(f"clip/{wandb_id}").summary.get("state/step", 0)
+    except:
+        last_step_logged = 0
+
+    # start run
+    run = wandb.init(
+        id=wandb_id,
+        name=wandb_run_name,
+        resume="allow",
+        entity=None,
+        project="clip",
+        job_type="eval",
+    )
+
+    for step in available_steps:
+        if step <= last_step_logged:
+            continue
+
+        # reinit params (due to jit + pmap)
+        params = jax.tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), logical_shape)
+
+        # restore checkpoint
+        print(f"Restoring checkpoint at step {step}...")
+        params = checkpoints.restore_checkpoint(model_path, target=params, prefix="model_", step=step)
+
+        # get text features
+        txt_features = []
+        for item in tqdm(ds.classes):
+            texts = [(t.format(c=item)) for t in zero_shot_classification_template]
+            txt_inputs = tokenizer(
+                texts,
+                padding="max_length",
+                truncation=True,
+                max_length=config["text_config"]["max_length"],
+                return_tensors="np",
+            )
+            txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
+            features = get_text_features(**txt_inputs, params=params)
+            features = features.mean(axis=0)
+            txt_features.append(features)
+        txt_features = jnp.asarray(txt_features)
+
+        # calculate metrics
+        acc_top_1_all = []
+        acc_top_5_all = []
+        n_items = []
+
+        # replicate
+        params = replicate(params)
+        txt_features = replicate(txt_features)
+
+        for batch in tqdm(dl):
+            images, labels = batch
+            pixel_values = jnp.asarray(images)
+            labels = jnp.asarray(labels)
+            pixel_values = shard(pixel_values)
+            labels = shard(labels)
+            acc_top_1, acc_top_5 = evaluate_batch(pixel_values, labels, txt_features, params)
+            acc_top_1_all.append(acc_top_1[0])
+            acc_top_5_all.append(acc_top_5[0])
+            n_items.append(len(images))
+
+        # weighted average
+        acc_top_1 = np.average(acc_top_1_all, weights=n_items)
+        acc_top_5 = np.average(acc_top_5_all, weights=n_items)
+        print(f"acc_top_1: {acc_top_1:.4f}")
+        print(f"acc_top_5: {acc_top_5:.4f}")
+
+        # log metrics
+        run.log(
+            {
+                "state/step": step,
+                "eval/acc_top_1": acc_top_1,
+                "eval/acc_top_5": acc_top_5,
+            }
+        )

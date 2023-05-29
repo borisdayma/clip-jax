@@ -7,7 +7,6 @@ import jax
 import numpy as np
 import tensorflow as tf
 import tensorflow_io as tfio
-from einops import rearrange
 
 
 @dataclass
@@ -16,7 +15,7 @@ class Dataset:
     valid_folder: str = None
     train_batch_size: int = 64
     valid_batch_size: int = 64
-    image_size: int = 0  # no resizing if set to 0, (data should be at right dimensions)
+    image_size: int = 0  # crops image, no cropping if set to 0, (data should be at right dimensions)
     min_original_image_size: int = None
     max_original_aspect_ratio: float = None
     seed_dataset: int = None
@@ -25,14 +24,12 @@ class Dataset:
     key_caption: str = "caption"  # name of key containing captions
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
-    valid_batch_size_per_step: int = None  # used in multi-host
-    node_groups: int = 1  # used in multi-host (number of nodes reading the same data when mp>local_devices)
     _train: tf.data.Dataset = field(init=False)
     _valid: tf.data.Dataset = field(init=False)
     rng: tf.random.Generator = field(init=False)
     multi_hosts: bool = field(init=False)
-    valid_groups: int = field(init=False)  # number of groups for validation set (multi-host)
-    valid_group_number: int = field(init=False)  # group number to use for validation set (multi-host)
+    process_count: int = field(init=False)  # number of groups for validation set (multi-host)
+    process_index: int = field(init=False)  # group number to use for validation set (multi-host)
 
     def __post_init__(self):
         # verify valid args
@@ -45,22 +42,8 @@ class Dataset:
 
         # check if we are on multi-hosts
         self.multi_hosts = jax.process_count() > 1
-
-        # define valid groups (useful in multi-hosts)
-        if self.multi_hosts:
-            assert self.valid_batch_size_per_step % self.valid_batch_size == 0, (
-                f"valid_batch_size_per_step ({self.valid_batch_size_per_step}) "
-                f"should be a multiple of valid_batch_size ({self.valid_batch_size})"
-            )
-            self.valid_groups = self.valid_batch_size_per_step // self.valid_batch_size
-            self.valid_group_number = jax.process_index() // self.node_groups
-        else:
-            self.valid_groups = 1
-            self.valid_group_number = 0
-        assert self.valid_groups == jax.process_count() // self.node_groups, (
-            f"valid_groups ({self.valid_groups}) should be equal to "
-            f"jax.process_count() // self.node_groups ({jax.process_count() // self.node_groups})"
-        )
+        self.process_index = jax.process_index()
+        self.process_count = jax.process_count()
 
         # define parsing function
         features = {
@@ -148,12 +131,9 @@ class Dataset:
                 # sort files
                 files = sorted(files)
 
-                # keep only a subset of files
-                if self.multi_hosts and augment:
-                    files = files[self.valid_group_number :: self.valid_groups]
-
-                # shuffle files
+                # shuffle files and select subset
                 if augment:
+                    files = files[self.process_index :: self.process_count]
                     random.shuffle(files)
 
                 # load dataset
@@ -168,11 +148,11 @@ class Dataset:
                     ignore_order.deterministic = False
                     ds = ds.with_options(ignore_order)
 
-                if self.multi_hosts and augment:
-                    # repeat indefinitely
-                    ds = ds.repeat()
-                    # shuffle files
-                    ds = ds.shuffle(len(files))
+                    if self.multi_hosts:
+                        # repeat indefinitely
+                        ds = ds.repeat()
+                        # shuffle files
+                        ds = ds.shuffle(len(files))
 
                 # parse dataset
                 if self.min_original_image_size is None and self.max_original_aspect_ratio is None:
@@ -219,19 +199,28 @@ class Dataset:
         else:
             # we need to return only a subset of the validation set
             for i, batch in enumerate(self._valid.as_numpy_iterator()):
-                if i % self.valid_groups == self.valid_group_number:
+                if i % self.process_count == self.process_index:
                     # this is the batch to yield for this host
                     batch_group = batch
-                if i % self.valid_groups == (self.valid_groups - 1):
+                if i % self.process_count == (self.process_count - 1):
                     # all nodes have a batch
                     yield batch_group
 
 
-def logits_to_image(logits, mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0), format="rgb"):
-    logits = np.asarray(logits, dtype=np.float32)
+def logits_to_image(logits, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), format="rgb"):
     if format == "rgb":
         logits = (logits * np.asarray(std, dtype=np.float32)) + np.asarray(mean, dtype=np.float32)
-        logits = logits.clip(0.0, 1.0)
+        logits = np.asarray(logits * 255.0, dtype=np.uint8)
+        logits = logits.clip(0, 255)
     else:
         raise NotImplementedError("LAB not implemented")
     return logits
+
+
+def image_to_logits(image, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), format="rgb"):
+    image = np.asarray(image)
+    if format == "rgb":
+        image = (image / 255.0 - np.asarray(mean, dtype=np.float32)) / np.asarray(std, dtype=np.float32)
+    else:
+        raise NotImplementedError("LAB not implemented")
+    return image

@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The OpenAI Team Authors, The Google Flax Team Authors and The HuggingFace Inc. team.
+# Copyright 2023 The OpenAI Team Authors, The Google Flax Team Authors, The HuggingFace Inc. team, The Craiyon team
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,581 +13,616 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Callable, Iterable, Optional, Tuple, Union
+import dataclasses
+import functools
+import operator
+from types import SimpleNamespace
+from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
-import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
-from flax.linen import combine_masks, make_causal_mask
+import numpy as np
+from flax.linen import combine_masks, dot_product_attention
 from flax.linen import partitioning as nn_partitioning
-from flax.linen.attention import dot_product_attention_weights
-from flax.linen.dtypes import canonicalize_dtype
-from flax.linen.module import Module
-from flax.linen.normalization import _canonicalize_axes
-from flax.traverse_util import flatten_dict, unflatten_dict
-from jax import lax
-from transformers import AutoTokenizer
-from transformers.modeling_flax_outputs import (
-    FlaxBaseModelOutput,
-    FlaxBaseModelOutputWithPooling,
-    FlaxSequenceClassifierOutput,
-)
-from transformers.modeling_flax_utils import (
-    ACT2FN,
-    FlaxPreTrainedModel,
-    append_replace_return_docstrings,
-    overwrite_call_docstring,
-)
-from transformers.utils import ModelOutput, add_start_docstrings, logging
-
-from .configuration_clip import CLIPConfig, CLIPTextConfig, CLIPVisionConfig
-from .utils import PretrainedFromWandbMixin
+from flax.linen.linear import DenseGeneral, DotGeneralT, PrecisionLike
+from flax.linen.module import Module, compact, merge_param
+from flax.linen.partitioning import ScanIn
 
 remat = nn_partitioning.remat
 
 Axes = Union[int, Iterable[int]]
 
-logger = logging.get_logger(__name__)
 
-CLIP_START_DOCSTRING = r"""
+# Type annotations
+Array = jnp.ndarray
+Dtype = jnp.dtype
+PRNGKey = jnp.ndarray
+Shape = Iterable[int]
+Activation = Callable[..., Array]
+PaddingLike = Union[str, int, Sequence[Union[int, Tuple[int, int]]]]
+LaxPadding = Union[str, Sequence[Tuple[int, int]]]
+Axes = Union[int, Iterable[int]]
 
-    This model inherits from [`FlaxPreTrainedModel`]. Check the superclass documentation for the generic methods the
-    library implements for all its model (such as downloading, saving and converting weights from PyTorch models)
+# default initializers
+default_kernel_init = nn.initializers.lecun_normal()
 
-    This model is also a Flax Linen [flax.linen.Module](https://flax.readthedocs.io/en/latest/flax.linen.html#module)
-    subclass. Use it as a regular Flax linen Module and refer to the Flax documentation for all matter related to
-    general usage and behavior.
 
-    Finally, this model supports inherent JAX features such as:
+# Utility functions
+def _convert_to_activation_function(fn_or_string: Union[str, Callable]) -> Callable:
+    """Convert a string to an activation function."""
+    if fn_or_string == "linear":
+        return lambda x: x
+    elif isinstance(fn_or_string, str):
+        return getattr(nn, fn_or_string)
+    elif callable(fn_or_string):
+        return fn_or_string
+    else:
+        raise ValueError("don't know how to convert %s to an activation function" % (fn_or_string,))
 
-    - [Just-In-Time (JIT) compilation](https://jax.readthedocs.io/en/latest/jax.html#just-in-time-compilation-jit)
-    - [Automatic Differentiation](https://jax.readthedocs.io/en/latest/jax.html#automatic-differentiation)
-    - [Vectorization](https://jax.readthedocs.io/en/latest/jax.html#vectorization-vmap)
-    - [Parallelization](https://jax.readthedocs.io/en/latest/jax.html#parallelization-pmap)
 
-    Parameters:
-        config ([`CLIPConfig`]): Model configuration class with all the parameters of the model.
-            Initializing with a config file does not load the weights associated with the model, only the
-            configuration. Check out the [`~FlaxPreTrainedModel.from_pretrained`] method to load the model weights.
-        dtype (`jax.numpy.dtype`, *optional*, defaults to `jax.numpy.float32`):
-            The data type of the computation. Can be one of `jax.numpy.float32`, `jax.numpy.float16` (on GPUs) and
-            `jax.numpy.bfloat16` (on TPUs).
+# sincos2d position - Source: https://github.com/google-research/big_vision
 
-            This can be used to enable mixed-precision training or half-precision inference on GPUs or TPUs. If
-            specified all the computation will be performed with the given `dtype`.
 
-            **Note that this only specifies the dtype of the computation and does not influence the dtype of model
-            parameters.**
+def posemb_sincos_2d(h, w, width, temperature=10_000.0, dtype=jnp.float32):
+    """Follows the MoCo v3 logic."""
+    y, x = jnp.mgrid[:h, :w]
 
-            If you wish to change the dtype of the model parameters, see [`~FlaxPreTrainedModel.to_fp16`] and
-            [`~FlaxPreTrainedModel.to_bf16`].
-"""
+    assert width % 4 == 0, "Width must be mult of 4 for sincos posemb"
+    omega = jnp.arange(width // 4) / (width // 4 - 1)
+    omega = 1.0 / (temperature**omega)
+    y = jnp.einsum("m,d->md", y.flatten(), omega)
+    x = jnp.einsum("m,d->md", x.flatten(), omega)
+    pe = jnp.concatenate([jnp.sin(x), jnp.cos(x), jnp.sin(y), jnp.cos(y)], axis=1)
+    return jnp.asarray(pe, dtype)[None, :, :]
 
-CLIP_TEXT_INPUTS_DOCSTRING = r"""
+
+# Rotary Embeddings
+
+
+# source: https://github.com/google/flaxformer/blob/main/flaxformer/architectures/perceiver_ar/rotary_embedding.py
+def rotate_half(x: Array) -> Array:
+    """Helper that splits a tensor at last dim into half and rotate it."""
+    x1, x2 = jnp.split(x, 2, axis=-1)
+    x = jnp.concatenate([-x2, x1], axis=-1)
+    return x
+
+
+# source: https://github.com/google/flaxformer/blob/main/flaxformer/architectures/perceiver_ar/rotary_embedding.py
+@functools.partial(jax.jit, static_argnums=(4,))
+def apply_rotary_embedding(
+    q: Array,
+    k: Array,
+    cos: Array,
+    sin: Array,
+    decode: bool = False,
+    q_position_offset: Optional[Array] = None,
+    rotary_index: Optional[Array] = None,
+) -> Tuple[Array, Array]:
+    """Helper function to apply Rotary Embeddings, supports Q position offset."""
+    if len(k.shape) == 3:
+        # for multi query attention
+        k = jnp.expand_dims(k, 2)
+        multiquery = True
+    else:
+        multiquery = False
+
+    batch, qlen, qheads, d = q.shape
+    kbatch, klen, kheads, kd = k.shape
+    assert batch == kbatch, f"{batch} != {kbatch}"
+    assert d == kd, f"{d} != {kd}"
+
+    # cos: [len, d]
+    # sin: [len, d]
+    # rotary_index: [batch]
+    # q_position_offset: [batch]
+
+    if decode and qlen == 1 and rotary_index is not None:
+        # we check qlen == 1 so that we don't do this when initializing cache.
+        qcos = cos[rotary_index, :]
+        qsin = sin[rotary_index, :]
+        # qcos, qsin: [batch, d]
+        qcos = jax.lax.broadcast_in_dim(qcos, (batch, qlen, qheads, d), (0, 3))
+        qsin = jax.lax.broadcast_in_dim(qsin, (batch, qlen, qheads, d), (0, 3))
+        # qcos, qsin: [batch, qlen, qheads, d]
+    else:
+        if q_position_offset is None:
+            qcos, qsin = cos[:qlen, :], sin[:qlen, :]
+        else:
+            # If q_position_offset is specified, we'll slice per-example after
+            # broadcasting to batch size.
+            qcos, qsin = cos, sin
+
+        # qcos, qsin: [qlen, d]
+        qcos = jax.lax.broadcast_in_dim(qcos, (batch, qcos.shape[0], qheads, d), (1, 3))
+        qsin = jax.lax.broadcast_in_dim(qsin, (batch, qsin.shape[0], qheads, d), (1, 3))
+        # qcos, qsin: [batch, qlen, qheads, d]
+        if q_position_offset is not None:
+            qcos = jax.vmap(functools.partial(jax.lax.dynamic_slice_in_dim, slice_size=qlen, axis=0))(
+                qcos, q_position_offset
+            )
+            qsin = jax.vmap(functools.partial(jax.lax.dynamic_slice_in_dim, slice_size=qlen, axis=0))(
+                qsin, q_position_offset
+            )
+
+    kcos, ksin = cos[:klen, :], sin[:klen, :]
+    # kcos, ksin: [klen, d]
+    kcos = jax.lax.broadcast_in_dim(kcos, (batch, klen, kheads, d), (1, 3))
+    ksin = jax.lax.broadcast_in_dim(ksin, (batch, klen, kheads, d), (1, 3))
+    # kcos, ksin: [batch, klen, kheads, d]
+
+    out_q = (q * qcos) + (rotate_half(q) * qsin)
+    out_k = (k * kcos) + (rotate_half(k) * ksin)
+    if multiquery:
+        out_k = jnp.squeeze(out_k, 2)
+    return out_q, out_k
+
+
+# source: https://github.com/google/flaxformer/blob/main/flaxformer/components/embedding.py
+def generate_fixed_pos_embedding(features, length, min_timescale=1.0, max_timescale=10000.0):
+    """Generate Sin/Cos for Rotary Embeddings.
+    Generates sinusoids at (features//2) different timescales, where the
+    timescales form a gemetric series from min_timescale to max_timescale
+    (max_timescale is not included, but would be the next element in the series).
+    Sinusoids are evaluated at integer positions i in [0, length).
+    The outputs are computed as:
+      output_sin[i, j] = sin(i / timescale[j])
+      output_cos[i, j] = cos(i / timescale[j])
+    Finally, the outputs are tiled twice in the features dimension.
     Args:
-        input_ids (`numpy.ndarray` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
-            it.
-
-            Indices can be obtained using [`CLIPTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            [What are input IDs?](../glossary#input-ids)
-        attention_mask (`numpy.ndarray` of shape `(batch_size, sequence_length)`, *optional*):
-            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-            - 1 for tokens that are **not masked**,
-            - 0 for tokens that are **masked**.
-
-            [What are attention masks?](../glossary#attention-mask)
-        position_ids (`numpy.ndarray` of shape `(batch_size, sequence_length)`, *optional*):
-            Indices of positions of each input sequence tokens in the position embeddings. Selected in the range `[0,
-            config.max_position_embeddings - 1]`.
-
-            [What are position IDs?](../glossary#position-ids)
-        output_attentions (`bool`, *optional*):
-            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
-            tensors for more detail.
-        output_hidden_states (`bool`, *optional*):
-            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
-            more detail.
-        return_dict (`bool`, *optional*):
-            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-"""
-
-CLIP_VISION_INPUTS_DOCSTRING = r"""
-    Args:
-        pixel_values (`numpy.ndarray` of shape `(batch_size, num_channels, height, width)`):
-            Pixel values. Padding will be ignored by default should you provide it. Pixel values can be obtained using
-            [`CLIPFeatureExtractor`]. See [`CLIPFeatureExtractor.__call__`] for details.
-        output_attentions (`bool`, *optional*):
-            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
-            tensors for more detail.
-        output_hidden_states (`bool`, *optional*):
-            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
-            more detail.
-        return_dict (`bool`, *optional*):
-            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-"""
-
-CLIP_INPUTS_DOCSTRING = r"""
-    Args:
-        input_ids (`numpy.ndarray` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
-            it.
-
-            Indices can be obtained using [`CLIPTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            [What are input IDs?](../glossary#input-ids)
-        attention_mask (`numpy.ndarray` of shape `(batch_size, sequence_length)`, *optional*):
-            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-            - 1 for tokens that are **not masked**,
-            - 0 for tokens that are **masked**.
-
-            [What are attention masks?](../glossary#attention-mask)
-        position_ids (`numpy.ndarray` of shape `(batch_size, sequence_length)`, *optional*):
-            Indices of positions of each input sequence tokens in the position embeddings. Selected in the range `[0,
-            config.max_position_embeddings - 1]`.
-
-            [What are position IDs?](../glossary#position-ids)
-        pixel_values (`numpy.ndarray` of shape `(batch_size, num_channels, height, width)`):
-            Pixel values. Padding will be ignored by default should you provide it. Pixel values can be obtained using
-            [`CLIPFeatureExtractor`]. See [`CLIPFeatureExtractor.__call__`] for details.
-        output_attentions (`bool`, *optional*):
-            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
-            tensors for more detail.
-        output_hidden_states (`bool`, *optional*):
-            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
-            more detail.
-        return_dict (`bool`, *optional*):
-            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-"""
-
-
-def get_id_pos(mat, id):
+      features: an integer
+      length: an integer
+      min_timescale: an optional float
+      max_timescale: an optional float
+    Returns:
+      output_sin: a float32 Tensor with shape [length, features]
+      output_cos: a float32 Tensor with shape [length, features]
     """
-    Returns the position of the id in mat.
-    """
-    return jnp.where(mat == id, 1, 0).argmax(axis=-1)
-
-
-@flax.struct.dataclass
-class FlaxCLIPOutput(ModelOutput):
-    """
-    Args:
-        logits_per_image:(`jnp.ndarray` of shape `(image_batch_size, text_batch_size)`):
-            The scaled dot product scores between `image_embeds` and `text_embeds`. This represents the image-text
-            similarity scores.
-        logits_per_text:(`jnp.ndarray` of shape `(text_batch_size, image_batch_size)`):
-            The scaled dot product scores between `text_embeds` and `image_embeds`. This represents the text-image
-            similarity scores.
-        text_embeds(`jnp.ndarray` of shape `(batch_size, output_dim`):
-            The text embeddings obtained by applying the projection layer to the pooled output of
-            [`FlaxCLIPTextModel`].
-        image_embeds(`jnp.ndarray` of shape `(batch_size, output_dim`):
-            The image embeddings obtained by applying the projection layer to the pooled output of
-            [`FlaxCLIPVisionModel`].
-        text_model_output(`FlaxBaseModelOutputWithPooling`):
-            The output of the [`FlaxCLIPTextModel`].
-        vision_model_output(`FlaxBaseModelOutputWithPooling`):
-            The output of the [`FlaxCLIPVisionModel`].
-    """
-
-    logits_per_image: jnp.ndarray = None
-    logits_per_text: jnp.ndarray = None
-    text_embeds: jnp.ndarray = None
-    image_embeds: jnp.ndarray = None
-    text_model_output: FlaxBaseModelOutputWithPooling = None
-    vision_model_output: FlaxBaseModelOutputWithPooling = None
-
-    def to_tuple(self) -> Tuple[Any]:
-        return tuple(
-            self[k] if k not in ["text_model_output", "vision_model_output"] else getattr(self, k).to_tuple()
-            for k in self.keys()
-        )
-
-
-# Adapted from flax.linen.normalization
-def _normalize(
-    mdl: Module,
-    x: Any,
-    mean: Any,
-    var: Any,
-    reduction_axes: Axes,
-    feature_axes: Axes,
-    dtype: jnp.dtype,
-    param_dtype: jnp.dtype,
-    epsilon: float,
-    use_bias: bool,
-    use_scale: bool,
-    bias_init: Callable,
-    scale_init: Callable,
-):
-    reduction_axes = _canonicalize_axes(x.ndim, reduction_axes)
-    feature_axes = _canonicalize_axes(x.ndim, feature_axes)
-    stats_shape = list(x.shape)
-    for axis in reduction_axes:
-        stats_shape[axis] = 1
-    if mean is not None:
-        mean = mean.reshape(stats_shape)
-    var = var.reshape(stats_shape)
-    feature_shape = [1] * x.ndim
-    reduced_feature_shape = []
-    for ax in feature_axes:
-        feature_shape[ax] = x.shape[ax]
-        reduced_feature_shape.append(x.shape[ax])
-    y = x - mean if mean is not None else x
-    mul = lax.rsqrt(var + epsilon)
-    args = [x]
-    if use_scale:
-        scale = mdl.param("scale", scale_init, reduced_feature_shape, param_dtype).reshape(feature_shape)
-        mul *= scale
-        args.append(scale)
-    y *= mul
-    if use_bias:
-        bias = mdl.param("bias", bias_init, reduced_feature_shape, param_dtype).reshape(feature_shape)
-        y += bias
-        args.append(bias)
-    dtype = canonicalize_dtype(*args, dtype=dtype)
-    return jnp.asarray(y, dtype)
-
-
-class RMSNorm(nn.Module):
-    """RMSNorm, adapted from flax LayerNorm"""
-
-    epsilon: float = 1e-6
-    dtype: Optional[jnp.dtype] = None
-    param_dtype: jnp.dtype = jnp.float32
-    use_bias: bool = True
-    use_scale: bool = True
-    bias_init: Callable = jax.nn.initializers.zeros
-    scale_init: Callable = jax.nn.initializers.ones
-    reduction_axes: Axes = -1
-    feature_axes: Axes = -1
-
-    @nn.compact
-    def __call__(self, x):
-        dtype = self.dtype or jnp.result_type(x)
-        # promote x to at least float32, this avoids half precision computation
-        # but preserves double or complex floating points
-        dtype = jnp.promote_types(dtype, jnp.float32)
-        x = jnp.asarray(x, dtype)
-        # use mean2 instead of variance (not centered)
-        var = jnp.mean(lax.square(x), self.reduction_axes)
-        mean = None
-
-        return _normalize(
-            self,
-            x,
-            mean,
-            var,
-            self.reduction_axes,
-            self.feature_axes,
-            self.dtype,
-            self.param_dtype,
-            self.epsilon,
-            self.use_bias,
-            self.use_scale,
-            self.bias_init,
-            self.scale_init,
-        )
+    fraction = jnp.arange(0, features, 2, dtype=jnp.float32) / features
+    timescale = min_timescale * (max_timescale / min_timescale) ** fraction
+    rotational_frequency = 1.0 / timescale
+    # Must use high precision einsum here, since rounding off to a bfloat16 is
+    # catastrophic. bfloat16 rounds 257 to 256, but sin(257) is very different
+    # from sin(256).
+    sinusoid_inp = jnp.einsum(
+        "i , j -> i j", jnp.arange(length), rotational_frequency, precision=jax.lax.Precision.HIGHEST
+    )
+    sinusoid_inp = jnp.concatenate([sinusoid_inp, sinusoid_inp], axis=-1)
+    return jnp.sin(sinusoid_inp), jnp.cos(sinusoid_inp)
 
 
 def norm(use_rmsnorm):
+    """Normalization wrapper"""
     if use_rmsnorm:
-        return RMSNorm
+        # no bias
+        return lambda use_bias, bias_init, *args, **kwargs: nn.RMSNorm(*args, **kwargs)
     else:
         return nn.LayerNorm
 
 
-class FlaxCLIPVisionEmbeddings(nn.Module):
-    config: CLIPVisionConfig
-    dtype: jnp.dtype = jnp.float32
+class CLIPVisionEmbeddings(nn.Module):
+    hidden_size: int
+    use_bias: bool
+    patch_size: int
+    position_embedding_type: str  # "absolute" or "sincos2d"
+    use_cls_token: bool
+    dtype: Dtype
 
-    def setup(self):
-        embed_dim = self.config.hidden_size
-        image_size = self.config.image_size
-        patch_size = self.config.patch_size
-
-        self.patch_embedding = nn.Conv(
-            embed_dim,
-            kernel_size=(patch_size, patch_size),
-            strides=(patch_size, patch_size),
-            padding="VALID",
-            use_bias=False,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(),
-        )
-
-        self.num_patches = (image_size // patch_size) ** 2
-        self.position_embedding = nn.Embed(self.num_patches, embed_dim, embedding_init=jax.nn.initializers.normal())
-        self.position_ids = jnp.expand_dims(jnp.arange(0, self.num_patches, dtype="i4"), axis=0)
-
+    @nn.compact
     def __call__(self, pixel_values):
-        patch_embeds = self.patch_embedding(pixel_values)
+        patch_embeds = nn.Conv(
+            self.hidden_size,
+            kernel_size=(self.patch_size, self.patch_size),
+            strides=(self.patch_size, self.patch_size),
+            padding="VALID",
+            use_bias=self.use_bias,
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                nn.initializers.lecun_normal(), ("conv_height", "conv_width", "input_channels", "embed")
+            ),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+            name="patch_embeds",
+        )(pixel_values)
+        patch_embeds = nn.with_logical_constraint(patch_embeds, ("batch", "height", "width", "embed"))
         batch_size, height, width, channels = patch_embeds.shape
-        patch_embeds = jnp.reshape(patch_embeds, (batch_size, height * width, channels))
-        embeddings = patch_embeds + self.position_embedding(self.position_ids)
-        return embeddings
-
-
-class FlaxCLIPTextEmbeddings(nn.Module):
-    config: CLIPTextConfig
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self):
-        embed_dim = self.config.hidden_size
-
-        self.token_embedding = nn.Embed(
-            self.config.vocab_size,
-            embed_dim,
-            embedding_init=jax.nn.initializers.normal(),
-        )
-        self.position_embedding = nn.Embed(
-            self.config.max_position_embeddings,
-            embed_dim,
-            embedding_init=jax.nn.initializers.normal(),
-        )
-        self.position_ids = jnp.expand_dims(
-            jnp.arange(0, self.config.max_position_embeddings, dtype="i4"), axis=(0, 1)
-        )
-
-    def __call__(self, input_ids, position_ids):
-        input_embeds = self.token_embedding(input_ids.astype("i4"))
-        position_embeds = self.position_embedding(position_ids.astype("i4"))
-
-        embeddings = input_embeds + position_embeds
-        return embeddings
-
-
-class FlaxCLIPAttention(nn.Module):
-    config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self):
-        self.embed_dim = self.config.hidden_size
-        self.num_heads = self.config.num_attention_heads
-        self.head_dim = self.embed_dim // self.num_heads
-        if self.head_dim * self.num_heads != self.embed_dim:
-            raise ValueError(
-                "embed_dim must be divisible by num_heads (got `embed_dim`:"
-                f" {self.embed_dim} and `num_heads`: {self.num_heads})."
+        num_patches = height * width
+        patch_embeds = jnp.reshape(patch_embeds, (batch_size, num_patches, channels))
+        patch_embeds = nn.with_logical_constraint(patch_embeds, ("batch", "length", "embed"))
+        # learnt position embeddings
+        if self.position_embedding_type == "absolute":
+            position_embeds = self.param(
+                "position_embeds",
+                nn.with_logical_partitioning(
+                    nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, "vocab", "embed")
+                ),
+                (1, num_patches, self.hidden_size),
             )
-        self.scale = self.head_dim**-0.5
-        self.dropout = self.config.attention_dropout
-
-        self.k_proj = nn.Dense(
-            self.embed_dim,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-            use_bias=self.config.use_bias,
-        )
-        self.v_proj = nn.Dense(
-            self.embed_dim,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-            use_bias=self.config.use_bias,
-        )
-        self.q_proj = nn.Dense(
-            self.embed_dim,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-            use_bias=self.config.use_bias,
-        )
-        self.out_proj = nn.Dense(
-            self.embed_dim,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-            use_bias=self.config.use_bias,
-        )
-
-        if self.config.ln_type == "normformer":
-            self.layer_norm_end = norm(self.config.use_rmsnorm)(
-                epsilon=self.config.layer_norm_eps, dtype=self.dtype, use_bias=self.config.use_bias
-            )
-
-        self.causal = isinstance(self.config, CLIPTextConfig)
-        # causal mask does not seem interesting so we never use it
-        self.causal = False
-        if self.causal:
-            self.causal_mask = make_causal_mask(jnp.ones((1, self.config.max_position_embeddings), dtype="i4"))
-
-    def _split_heads(self, hidden_states):
-        return hidden_states.reshape(hidden_states.shape[:2] + (self.num_heads, self.head_dim))
-
-    def _merge_heads(self, hidden_states):
-        return hidden_states.reshape(hidden_states.shape[:2] + (self.embed_dim,))
-
-    def __call__(
-        self,
-        hidden_states,
-        attention_mask=None,
-        deterministic: bool = True,
-        output_attentions: bool = False,
-    ):
-        query = self.q_proj(hidden_states)
-        key = self.k_proj(hidden_states)
-        value = self.v_proj(hidden_states)
-
-        query = self._split_heads(query)
-        key = self._split_heads(key)
-        value = self._split_heads(value)
-
-        causal_attention_mask = None
-        if self.causal:
-            query_length, key_length = query.shape[1], key.shape[1]
-            causal_attention_mask = self.causal_mask[:, :, key_length - query_length : key_length, :key_length]
-
-        if attention_mask is not None and causal_attention_mask is not None:
-            attention_mask = jnp.expand_dims(attention_mask, axis=(-3, -2))
-            attention_mask = combine_masks(attention_mask, causal_attention_mask, dtype="i4")
-        elif causal_attention_mask is not None:
-            attention_mask = causal_attention_mask
-        elif attention_mask is not None:
-            attention_mask = jnp.expand_dims(attention_mask, axis=(-3, -2))
-
-        if attention_mask is not None:
-            attention_bias = lax.select(
-                attention_mask > 0,
-                jnp.full(attention_mask.shape, 0.0).astype(self.dtype),
-                jnp.full(attention_mask.shape, -1e4).astype(self.dtype),
-            )
+        elif self.position_embedding_type == "sincos2d":
+            position_embeds = posemb_sincos_2d(height, width, self.hidden_size, dtype=self.dtype)
         else:
-            attention_bias = None
-
-        dropout_rng = None
-        if not deterministic and self.dropout > 0.0:
-            dropout_rng = self.make_rng("dropout")
-
-        attn_weights = dot_product_attention_weights(
-            query,
-            key,
-            bias=attention_bias,
-            dropout_rng=dropout_rng,
-            dropout_rate=self.dropout,
-            deterministic=deterministic,
-            dtype=self.dtype,
-            precision=None,
-        )
-
-        attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value)
-        attn_output = self._merge_heads(attn_output)
-        attn_output = self.out_proj(attn_output)
-
-        if self.config.ln_type == "normformer":
-            attn_output = self.layer_norm_end(attn_output)
-
-        outputs = (attn_output, attn_weights) if output_attentions else (attn_output,)
-        return outputs
-
-
-class FlaxCLIPMLP(nn.Module):
-    config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self):
-        self.activation_fn = ACT2FN[self.config.hidden_act]
-        self.fc1 = nn.Dense(
-            self.config.intermediate_size,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-            use_bias=self.config.use_bias,
-        )
-        self.fc2 = nn.Dense(
-            self.config.hidden_size,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.01),
-            use_bias=self.config.use_bias,
-        )
-        if self.config.use_glu:
-            self.fc1_glu = nn.Dense(
-                self.config.intermediate_size,
-                dtype=self.dtype,
-                kernel_init=jax.nn.initializers.normal(0.01),
-                use_bias=self.config.use_bias,
+            raise ValueError(f"Unknown position embedding type {self.position_embedding_type}")
+        embeddings = patch_embeds + position_embeds
+        embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
+        if self.use_cls_token:
+            cls_token = self.param(
+                "cls_token",
+                nn.with_logical_partitioning(nn.initializers.zeros_init(), (None, None, "embed")),
+                (1, 1, self.hidden_size),
             )
-        if self.config.ln_type == "normformer":
-            self.layer_norm_mid = norm(self.config.use_rmsnorm)(
-                epsilon=self.config.layer_norm_eps,
+            embeddings = jnp.concatenate([jnp.tile(cls_token, [batch_size, 1, 1]), embeddings], axis=1)
+            embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
+        return embeddings
+
+
+class CLIPTextEmbeddings(nn.Module):
+    hidden_size: int
+    vocab_size: int
+    max_length: int
+    position_embedding_type: str  # "absolute" or "rotary"
+    dtype: Dtype
+
+    @nn.compact
+    def __call__(self, input_ids):
+        assert self.position_embedding_type in ["absolute", "rotary"]
+        embed_dim = self.hidden_size
+        embeddings = nn.Embed(
+            self.vocab_size,
+            embed_dim,
+            embedding_init=nn.with_logical_partitioning(
+                nn.initializers.normal(1 / np.sqrt(embed_dim)), ("vocab", "embed")
+            ),
+            name="embeddings",
+        )(input_ids.astype("i4"))
+        embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
+        if self.position_embedding_type == "absolute":
+            position_embeds = self.param(
+                "position_embeds",
+                nn.with_logical_partitioning(nn.initializers.normal(1 / np.sqrt(embed_dim)), (None, "vocab", "embed")),
+                (1, self.max_length, embed_dim),
+            )
+            embeddings += position_embeds
+            embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
+        return embeddings
+
+
+class MultiHeadDotProductAttention(Module):
+    """
+    Adapted from nn.MultiHeadDotProductAttention:
+    * - support use_rotary
+    """
+
+    num_heads: int
+    dtype: Optional[Dtype] = None
+    param_dtype: Dtype = jnp.float32
+    qkv_features: Optional[int] = None
+    out_features: Optional[int] = None
+    broadcast_dropout: bool = True
+    dropout_rate: float = 0.0
+    deterministic: Optional[bool] = None
+    precision: PrecisionLike = None
+    kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_kernel_init
+    bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = nn.initializers.zeros_init()
+    use_bias: bool = True
+    attention_fn: Callable[..., Array] = dot_product_attention
+    decode: bool = False
+    qkv_dot_general: DotGeneralT = jax.lax.dot_general
+    out_dot_general: DotGeneralT = jax.lax.dot_general
+    use_rotary: bool = False
+    max_length: Optional[int] = None  # required if use_rotary
+
+    @compact
+    def __call__(
+        self, inputs_q: Array, inputs_kv: Array, mask: Optional[Array] = None, deterministic: Optional[bool] = None
+    ):
+        """Applies multi-head dot product attention on the input data.
+
+        Projects the inputs into multi-headed query, key, and value vectors,
+        applies dot-product attention and project the results to an output vector.
+
+        Args:
+          inputs_q: input queries of shape
+            `[batch_sizes..., length, features]`.
+          inputs_kv: key/values of shape
+            `[batch_sizes..., length, features]`.
+          mask: attention mask of shape
+            `[batch_sizes..., num_heads, query_length, key/value_length]`.
+            Attention weights are masked out if their corresponding mask value
+            is `False`.
+          deterministic: if false, the attention weight is masked randomly
+            using dropout, whereas if true, the attention weights
+            are deterministic.
+
+        Returns:
+          output of shape `[batch_sizes..., length, features]`.
+        """
+        features = self.out_features or inputs_q.shape[-1]
+        qkv_features = self.qkv_features or inputs_q.shape[-1]
+        assert qkv_features % self.num_heads == 0, "Memory dimension must be divisible by number of heads."
+        head_dim = qkv_features // self.num_heads
+
+        with jax.profiler.TraceAnnotation("Attention_Block"):
+            dense = functools.partial(
+                DenseGeneral,
+                axis=-1,
                 dtype=self.dtype,
-                use_bias=self.config.use_bias,
-                use_scale=self.config.force_scale,
+                param_dtype=self.param_dtype,
+                features=(self.num_heads, head_dim),
+                kernel_init=nn.with_logical_partitioning(self.kernel_init, ("embed", "heads", "kv")),
+                bias_init=nn.with_logical_partitioning(self.bias_init, ("kv",)),
+                use_bias=self.use_bias,
+                precision=self.precision,
+                dot_general=self.qkv_dot_general,
+            )
+            # project inputs_q to multi-headed q/k/v
+            # dimensions are then [batch..., length, n_heads, n_features_per_head]
+            query, key, value = (
+                dense(name="query")(inputs_q),
+                dense(name="key")(inputs_kv),
+                dense(name="value")(inputs_kv),
             )
 
-    def __call__(self, hidden_states):
-        h1 = self.fc1(hidden_states)
-        h1 = self.activation_fn(h1)
-        if self.config.use_glu:
-            h2 = self.fc1_glu(hidden_states)
-            h1 = h1 * h2
-        if self.config.ln_type == "normformer":
-            h1 = self.layer_norm_mid(h1)
-        h1 = self.fc2(h1)
-        return h1
+            # ensure correct sharding
+            query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+            key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+            value = nn.with_logical_constraint(value, ("batch", "length", "heads", "kv"))
+
+            if self.use_rotary:
+                assert self.max_length is not None, "max_length must be specified for rotary embeddings."
+                # source: https://github.com/google-research/jestimator/blob/main/jestimator/models/rope/modeling.py
+                sin, cos = generate_fixed_pos_embedding(head_dim, self.max_length)
+                query, key = apply_rotary_embedding(query, key, cos, sin)
+
+                # ensure sharding
+                query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+                key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+
+            # During fast autoregressive decoding, we feed one position at a time,
+            # and cache the keys and values step by step.
+            if self.decode:
+                # detect if we're initializing by absence of existing cache data.
+                is_initialized = self.has_variable("cache", "cached_key")
+                cached_key = self.variable("cache", "cached_key", jnp.zeros, key.shape, key.dtype)
+                cached_value = self.variable("cache", "cached_value", jnp.zeros, value.shape, value.dtype)
+                cache_index = self.variable("cache", "cache_index", lambda: jnp.array(0, dtype=jnp.int32))
+                if is_initialized:
+                    *batch_dims, max_length, num_heads, depth_per_head = cached_key.value.shape
+                    # shape check of cached keys against query input
+                    expected_shape = tuple(batch_dims) + (1, num_heads, depth_per_head)
+                    if expected_shape != query.shape:
+                        raise ValueError(
+                            "Autoregressive cache shape error, "
+                            "expected query shape %s instead got %s." % (expected_shape, query.shape)
+                        )
+                    # update key, value caches with our new 1d spatial slices
+                    cur_index = cache_index.value
+                    indices = (0,) * len(batch_dims) + (cur_index, 0, 0)
+                    key = jax.lax.dynamic_update_slice(cached_key.value, key, indices)
+                    value = jax.lax.dynamic_update_slice(cached_value.value, value, indices)
+                    cached_key.value = key
+                    cached_value.value = value
+                    cache_index.value = cache_index.value + 1
+                    # causal mask for cached decoder self-attention:
+                    # our single query position should only attend to those key
+                    # positions that have already been generated and cached,
+                    # not the remaining zero elements.
+                    mask = combine_masks(
+                        mask,
+                        jnp.broadcast_to(jnp.arange(max_length) <= cur_index, tuple(batch_dims) + (1, 1, max_length)),
+                    )
+
+            dropout_rng = None
+            if self.dropout_rate > 0.0:  # Require `deterministic` only if using dropout.
+                m_deterministic = merge_param("deterministic", self.deterministic, deterministic)
+                if not m_deterministic:
+                    dropout_rng = self.make_rng("dropout")
+            else:
+                m_deterministic = True
+
+            # apply attention
+            x = self.attention_fn(
+                query,
+                key,
+                value,
+                mask=mask,
+                dropout_rng=dropout_rng,
+                dropout_rate=self.dropout_rate,
+                broadcast_dropout=self.broadcast_dropout,
+                deterministic=m_deterministic,
+                dtype=self.dtype,
+                precision=self.precision,
+            )  # pytype: disable=wrong-keyword-args
+            # back to the original inputs dimensions
+            out = DenseGeneral(
+                features=features,
+                axis=(-2, -1),
+                kernel_init=nn.with_logical_partitioning(self.kernel_init, ("heads", "kv", "embed")),
+                bias_init=nn.with_logical_partitioning(self.bias_init, ("embed",)),
+                use_bias=self.use_bias,
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                precision=self.precision,
+                dot_general=self.out_dot_general,
+                name="out",  # type: ignore[call-arg]
+            )(x)
+            return out
 
 
-class FlaxCLIPEncoderLayer(nn.Module):
-    config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: jnp.dtype = jnp.float32
+class CLIPMLP(nn.Module):
+    mlp_dim: int
+    ln_type: str  # "preln", "normformer"
+    activations: Sequence[Union[str, Callable]] = ("relu",)
+    mlp_dropout_rate: float = 0.0
+    dtype: Any = jnp.float32
+    use_bias: bool = False
+    force_scale: bool = False
+    use_rmsnorm: bool = True
 
-    def setup(self):
-        self.self_attn = FlaxCLIPAttention(self.config, dtype=self.dtype)
-        self.layer_norm1 = norm(self.config.use_rmsnorm)(
-            epsilon=self.config.layer_norm_eps,
-            dtype=self.dtype,
-            use_bias=self.config.use_bias,
-            use_scale=self.config.force_scale,
-        )
-        self.layer_norm2 = norm(self.config.use_rmsnorm)(
-            epsilon=self.config.layer_norm_eps,
-            dtype=self.dtype,
-            use_bias=self.config.use_bias,
-            use_scale=self.config.force_scale,
-        )
-        self.mlp = FlaxCLIPMLP(self.config, dtype=self.dtype)
+    @nn.compact
+    def __call__(self, inputs, deterministic: bool = False):
+        """Applies Transformer MlpBlock module."""
+        assert self.ln_type in ["normformer", "preln"], f"ln_type {self.ln_type} not supported."
+        # Iterate over specified MLP input activation functions.
+        # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
+        with jax.profiler.TraceAnnotation("MLP_Block"):
+            embed_dim = inputs.shape[-1]
+            if self.ln_type in ["normformer", "preln"]:
+                inputs = norm(self.use_rmsnorm)(
+                    dtype=self.dtype,
+                    use_bias=self.use_bias,
+                    use_scale=self.force_scale,
+                    scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+                    name="pre_mlp_norm",
+                )(inputs)
+                inputs = nn.with_logical_constraint(inputs, ("batch", "length", "embed"))
+            activations = []
+            for idx, act_fn in enumerate(self.activations):
+                dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
+                x = DenseGeneral(
+                    self.mlp_dim,
+                    dtype=self.dtype,
+                    use_bias=self.use_bias,
+                    kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "mlp")),
+                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("mlp",)),
+                    name=dense_name,
+                )(inputs)
+                x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+                x = _convert_to_activation_function(act_fn)(x)
+                x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+                activations.append(x)
+            # Take elementwise product of above intermediate activations.
+            x = functools.reduce(operator.mul, activations)
+            x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
 
+            # layer norm
+            if self.ln_type == "normformer":
+                x = norm(self.use_rmsnorm)(
+                    dtype=self.dtype,
+                    use_bias=self.use_bias,
+                    use_scale=self.force_scale,
+                    scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("mlp",)),
+                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp",)),
+                    name="mid_mlp_norm",
+                )(x)
+                x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+            # Apply dropout and final dense output projection.
+            x = nn.Dropout(rate=self.mlp_dropout_rate, broadcast_dims=(-2,), name="mlp_dropout")(
+                x, deterministic=deterministic
+            )  # Broadcast along length.
+            x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+            output = DenseGeneral(
+                embed_dim,
+                dtype=self.dtype,
+                use_bias=self.use_bias,
+                kernel_init=nn.with_logical_partitioning(default_kernel_init, ("mlp", "embed")),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("embed",)),
+                name="wo",
+            )(x)
+            output = nn.with_logical_constraint(output, ("batch", "length", "embed"))
+            return output
+
+
+class CLIPEncoderLayer(nn.Module):
+    use_rmsnorm: bool
+    ln_type: str  # "preln", "normformer"
+    num_heads: int
+    position_embedding_type: str  # "absolute", "rotary"
+    max_length: int
+    use_causal_mask: bool
+    mlp_dim: int
+    dtype: Dtype = jnp.float32
+    activations: Sequence[Union[str, Callable]] = ("relu",)
+    use_bias: bool = False
+    force_scale: bool = False
+    attention_dropout: float = 0.0
+    mlp_dropout_rate: float = 0.0
+
+    @nn.compact
     def __call__(
         self,
         hidden_states,
         attention_mask,
         deterministic: bool = True,
-        output_attentions: bool = False,
     ):
+        assert self.ln_type in ["normformer", "preln"], f"ln_type {self.ln_type} not supported."
+        assert self.position_embedding_type in ["absolute", "rotary"]
+        # Self attention
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         residual = hidden_states
-
-        hidden_states = self.layer_norm1(hidden_states)
-        attn_outputs = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
+        if self.ln_type in ["preln", "normformer"]:
+            hidden_states = norm(self.use_rmsnorm)(
+                dtype=self.dtype,
+                use_bias=self.use_bias,
+                use_scale=self.force_scale,
+                scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+                name="pre_attention_norm",
+            )(hidden_states)
+            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        # Reshape attention mask for direct use in attention heads
+        if attention_mask is not None:
+            attention_mask = nn.attention.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
+        hidden_states = MultiHeadDotProductAttention(
+            num_heads=self.num_heads,
+            dtype=self.dtype,
             deterministic=deterministic,
-            output_attentions=output_attentions,
-        )
-        hidden_states = attn_outputs[0]
+            use_bias=self.use_bias,
+            use_rotary=(self.position_embedding_type == "rotary"),
+            max_length=self.max_length,
+            dropout_rate=self.attention_dropout,
+            decode=self.use_causal_mask,
+            name="attention",
+        )(inputs_q=hidden_states, inputs_kv=hidden_states, mask=attention_mask, deterministic=deterministic)
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        if self.ln_type == "normformer":
+            hidden_states = norm(self.use_rmsnorm)(
+                dtype=self.dtype,
+                use_bias=self.use_bias,
+                use_scale=True,
+                scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+                name="post_attention_norm",
+            )(hidden_states)
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = residual + hidden_states
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
 
+        # MLP
         residual = hidden_states
-        hidden_states = self.layer_norm2(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = CLIPMLP(
+            mlp_dim=self.mlp_dim,
+            ln_type=self.ln_type,
+            activations=self.activations,
+            mlp_dropout_rate=self.mlp_dropout_rate,
+            use_bias=self.use_bias,
+            force_scale=self.force_scale,
+            use_rmsnorm=self.use_rmsnorm,
+            dtype=self.dtype,
+            name="mlp",
+        )(hidden_states)
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = residual + hidden_states
-
-        if self.config.use_scan:
-            return hidden_states, None
-
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += attn_outputs[1:]
-
-        return outputs
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        return hidden_states, None
 
 
-class FlaxCLIPLayerCollection(nn.Module):
-    config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: jnp.dtype = jnp.float32
+class CLIPEncoder(nn.Module):
+    num_layers: int
+    use_rmsnorm: bool
+    ln_type: str  # "preln", "normformer"
+    num_heads: int
+    position_embedding_type: str  # "absolute", "rotary"
+    max_length: int
+    use_causal_mask: bool
+    mlp_dim: int
+    dtype: Dtype = jnp.float32
+    activations: Sequence[Union[str, Callable]] = ("relu",)
+    use_bias: bool = False
+    force_scale: bool = False
+    attention_dropout: float = 0.0
+    mlp_dropout_rate: float = 0.0
+    unroll: int = 100  # unroll scan layers
+    gradient_checkpointing: bool = True
 
     @nn.compact
     def __call__(
@@ -595,971 +630,492 @@ class FlaxCLIPLayerCollection(nn.Module):
         hidden_states,
         attention_mask=None,
         deterministic: bool = True,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
     ):
-        all_attentions = () if output_attentions else None
-        all_hidden_states = () if output_hidden_states else None
-
         # gradient checkpointing
+        use_scan = True
+        initializing = self.is_mutable_collection("params")
+        params_spec = 0 if initializing else ScanIn(0)
         layer = (
-            remat(
-                FlaxCLIPEncoderLayer,
-                static_argnums=(2, 3),
-                prevent_cse=not self.config.use_scan,
+            nn.remat(
+                CLIPEncoderLayer,
+                static_argnums=(-1,),
+                prevent_cse=not use_scan,
             )
-            if self.config.gradient_checkpointing
-            else FlaxCLIPEncoderLayer
+            if self.gradient_checkpointing
+            else CLIPEncoderLayer
         )
 
-        if self.config.use_scan:
-            # keep it simple
-            assert (
-                not output_attentions and not output_hidden_states
-            ), "scan does not support output_attentions or output_hidden_states"
-            # FIXME: scan does not work:
-            # - check if first layer has a different dimension and need to be out of scan
-            # - potentially FlaxCLIPLayerCollection is compiled and loaded for both text and vision so may need 2 different names
-            # - use checkify for potential errors
-            hidden_states, _ = nn.scan(
-                layer,
-                variable_axes={"params": 0},
-                split_rngs={"params": True, "dropout": True},
-                in_axes=(nn.broadcast, nn.broadcast, nn.broadcast),
-                length=self.config.num_hidden_layers,
-            )(self.config, dtype=self.dtype, name="scanned")(
-                hidden_states, attention_mask, deterministic, output_attentions
-            )
-        else:
-            for i in range(self.config.num_hidden_layers):
-                if output_hidden_states:
-                    all_hidden_states += (hidden_states,)
-
-                layer_outputs = layer(self.config, dtype=self.dtype, name=str(i))(
-                    hidden_states,
-                    attention_mask,
-                    deterministic=deterministic,
-                    output_attentions=output_attentions,
-                )
-                hidden_states = layer_outputs[0]
-
-                if output_attentions:
-                    all_attentions += (layer_outputs[1],)
-
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
-        outputs = (hidden_states,)
-
-        if not return_dict:
-            return tuple(v for v in outputs if v is not None)
-
-        return FlaxBaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=all_hidden_states,
-            attentions=all_attentions,
-        )
-
-
-class FlaxCLIPEncoder(nn.Module):
-    config: Union[CLIPTextConfig, CLIPVisionConfig]
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self):
-        self.layers = FlaxCLIPLayerCollection(self.config, dtype=self.dtype)
-
-    def __call__(
-        self,
-        inputs_embeds,
-        attention_mask=None,
-        deterministic: bool = True,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
-    ):
-        return self.layers(
-            hidden_states=inputs_embeds,
-            attention_mask=attention_mask,
-            deterministic=deterministic,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-
-class FlaxCLIPTextTransformer(nn.Module):
-    config: CLIPTextConfig
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self):
-        self.embeddings = FlaxCLIPTextEmbeddings(self.config, dtype=self.dtype)
-        self.encoder = FlaxCLIPEncoder(self.config, dtype=self.dtype)
-        self.final_layer_norm = norm(self.config.use_rmsnorm)(
-            epsilon=self.config.layer_norm_eps,
+        hidden_states, _ = nn.scan(
+            layer,
+            variable_axes={"params": params_spec, "cache": 0},
+            split_rngs={"params": True, "dropout": True},
+            in_axes=(nn.broadcast, nn.broadcast),
+            length=self.num_layers,
+            unroll=self.unroll,
+            metadata_params={nn.PARTITION_NAME: "layer"},
+        )(
+            use_rmsnorm=self.use_rmsnorm,
+            ln_type=self.ln_type,
+            num_heads=self.num_heads,
+            position_embedding_type=self.position_embedding_type,
+            max_length=self.max_length,
+            use_causal_mask=self.use_causal_mask,
+            mlp_dim=self.mlp_dim,
             dtype=self.dtype,
-            use_bias=self.config.use_bias,
-            use_scale=self.config.force_scale,
+            activations=self.activations,
+            use_bias=self.use_bias,
+            force_scale=self.force_scale,
+            attention_dropout=self.attention_dropout,
+            mlp_dropout_rate=self.mlp_dropout_rate,
+            name="layers",
+        )(
+            hidden_states, attention_mask, deterministic
         )
 
+        return dict(
+            last_hidden_state=hidden_states,
+            # TODO: add hidden states (for down-stream tasks)
+        )
+
+
+class CLIPTextTransformer(nn.Module):
+    hidden_size: int
+    vocab_size: int
+    max_length: int
+    position_embedding_type: str  # "absolute" or "rotary"
+    num_layers: int
+    use_rmsnorm: bool
+    ln_type: str  # "preln", "normformer"
+    num_heads: int
+    use_causal_mask: bool
+    mlp_dim: int
+    dtype: Dtype = jnp.float32
+    activations: Sequence[Union[str, Callable]] = ("relu",)
+    use_bias: bool = False
+    force_scale: bool = False
+    attention_dropout: float = 0.0
+    mlp_dropout_rate: float = 0.0
+    unroll: int = 100  # unroll scan layers
+    gradient_checkpointing: bool = True
+    eos_token_id: int = -1
+    dtype: str = "float32"
+
+    @nn.compact
     def __call__(
         self,
         input_ids,
         attention_mask,
-        position_ids,
         deterministic: bool = True,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        dtype = jnp.dtype(self.dtype)
+        hidden_states = CLIPTextEmbeddings(
+            hidden_size=self.hidden_size,
+            vocab_size=self.vocab_size,
+            max_length=self.max_length,
+            position_embedding_type=self.position_embedding_type,
+            dtype=dtype,
+            name="embeddings",
+        )(input_ids=input_ids)
 
-        hidden_states = self.embeddings(input_ids=input_ids, position_ids=position_ids)
-
-        encoder_outputs = self.encoder(
-            inputs_embeds=hidden_states,
+        encoder_outputs = CLIPEncoder(
+            num_layers=self.num_layers,
+            use_rmsnorm=self.use_rmsnorm,
+            ln_type=self.ln_type,
+            num_heads=self.num_heads,
+            position_embedding_type=self.position_embedding_type,
+            max_length=self.max_length,
+            use_causal_mask=self.use_causal_mask,
+            mlp_dim=self.mlp_dim,
+            dtype=dtype,
+            activations=self.activations,
+            use_bias=self.use_bias,
+            force_scale=self.force_scale,
+            attention_dropout=self.attention_dropout,
+            mlp_dropout_rate=self.mlp_dropout_rate,
+            unroll=self.unroll,
+            gradient_checkpointing=self.gradient_checkpointing,
+            name="encoder",
+        )(
+            hidden_states=hidden_states,
             attention_mask=attention_mask,
             deterministic=deterministic,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
         )
-
-        last_hidden_state = encoder_outputs[0]
-        last_hidden_state = self.final_layer_norm(last_hidden_state)
+        last_hidden_state = encoder_outputs["last_hidden_state"]
+        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+        last_hidden_state = norm(self.use_rmsnorm)(
+            dtype=dtype,
+            use_bias=self.use_bias,
+            use_scale=self.force_scale,
+            scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+            name="final_norm",
+        )(last_hidden_state)
+        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
-        # take features from the BOS embedding instead of EOS (no causal mask anymore)
-        pooled_output = last_hidden_state[:, 0, :]
+        if not self.use_causal_mask:
+            # take features from the BOS embedding instead of EOS (no causal mask)
+            pooled_output = last_hidden_state[:, 0, :]
+        else:
+            # take features from the EOS embedding
 
-        if not return_dict:
-            return (last_hidden_state, pooled_output) + encoder_outputs[1:]
+            def _get_id_pos(mat, id):
+                return jnp.where(mat == id, 1, 0).argmax(axis=-1)
 
-        return FlaxBaseModelOutputWithPooling(
+            pooled_output = last_hidden_state[
+                jnp.arange(last_hidden_state.shape[0]), _get_id_pos(input_ids, self.eos_token_id)
+            ]
+        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+
+        return dict(
             last_hidden_state=last_hidden_state,
-            pooler_output=pooled_output,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
+            pooled_output=pooled_output,
+            # TODO: add hidden states (for down-stream tasks)
         )
 
 
-class FlaxCLIPVisionTransformer(nn.Module):
-    config: CLIPVisionConfig
-    dtype: jnp.dtype = jnp.float32
+class CLIPVisionTransformer(nn.Module):
+    image_size: int
+    hidden_size: int
+    patch_size: int
+    num_layers: int
+    use_rmsnorm: bool
+    ln_type: str  # "preln", "normformer"
+    num_heads: int
+    use_causal_mask: bool
+    mlp_dim: int
+    position_embedding_type: str = "sincos2d"  # "absolute" or "sincos2d"
+    dtype: str = "float32"
+    activations: Sequence[Union[str, Callable]] = ("relu",)
+    use_bias: bool = False
+    force_scale: bool = False
+    attention_dropout: float = 0.0
+    mlp_dropout_rate: float = 0.0
+    use_cls_token: bool = False
+    unroll: int = 100  # unroll scan layers
+    gradient_checkpointing: bool = True
 
-    def setup(self):
-        self.embeddings = FlaxCLIPVisionEmbeddings(self.config, dtype=self.dtype)
-        self.pre_layernorm = norm(self.config.use_rmsnorm)(
-            epsilon=self.config.layer_norm_eps,
-            dtype=self.dtype,
-            use_bias=self.config.use_bias,
-            use_scale=self.config.force_scale,
-        )
-        self.encoder = FlaxCLIPEncoder(self.config, dtype=self.dtype)
-        self.post_layernorm = norm(self.config.use_rmsnorm)(
-            epsilon=self.config.layer_norm_eps,
-            dtype=self.dtype,
-            use_bias=self.config.use_bias,
-            use_scale=self.config.force_scale,
+    @nn.compact
+    def __call__(
+        self,
+        pixel_values,
+        deterministic: bool = True,
+    ):
+        dtype = jnp.dtype(self.dtype)
+        batch, height, width, channels = pixel_values.shape
+        assert self.position_embedding_type in [
+            "absolute",
+            "sincos2d",
+        ], f"position_embedding_type {self.position_embedding_type} not supported."
+        assert (
+            height == self.image_size and width == self.image_size and channels == 3
+        ), f"Input image size ({height}*{width}) doesn't match model ({self.image_size}*{self.image_size})."
+        position_embedding_type = "absolute"  # for vision it makes more sense than rotary
+        hidden_states = CLIPVisionEmbeddings(
+            hidden_size=self.hidden_size,
+            use_bias=self.use_bias,
+            patch_size=self.patch_size,
+            position_embedding_type=self.position_embedding_type,
+            use_cls_token=self.use_cls_token,
+            dtype=dtype,
+            name="embeddings",
+        )(pixel_values)
+        hidden_states = norm(self.use_rmsnorm)(
+            dtype=dtype,
+            use_bias=self.use_bias,
+            use_scale=self.force_scale,
+            scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+            name="post_embed_norm",
+        )(hidden_states)
+        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        max_length = hidden_states.shape[1]
+        encoder_outputs = CLIPEncoder(
+            num_layers=self.num_layers,
+            use_rmsnorm=self.use_rmsnorm,
+            ln_type=self.ln_type,
+            num_heads=self.num_heads,
+            position_embedding_type=position_embedding_type,
+            max_length=max_length,
+            use_causal_mask=self.use_causal_mask,
+            mlp_dim=self.mlp_dim,
+            dtype=dtype,
+            activations=self.activations,
+            use_bias=self.use_bias,
+            force_scale=self.force_scale,
+            attention_dropout=self.attention_dropout,
+            mlp_dropout_rate=self.mlp_dropout_rate,
+            unroll=self.unroll,
+            gradient_checkpointing=self.gradient_checkpointing,
+            name="encoder",
+        )(
+            hidden_states=hidden_states,
+            deterministic=deterministic,
         )
 
+        # get last hidden state
+        last_hidden_state = encoder_outputs["last_hidden_state"]
+        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+
+        if self.use_cls_token:
+            pooled_output = last_hidden_state[:, 0, :]
+
+        else:
+            # mean pool - jnp.mean -> leads to large memory consumption
+            # pooled_output = jnp.mean(last_hidden_state, axis=1)
+
+            # mean pool - for loop -> this works!
+            length = last_hidden_state.shape[1]
+            pooled_output = last_hidden_state[:, 0, :]
+            for i in range(1, length):
+                pooled_output = pooled_output + last_hidden_state[:, i, :]
+            pooled_output = pooled_output / length
+
+            # ensure correct sharding
+            pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+
+        pooled_output = norm(self.use_rmsnorm)(
+            dtype=dtype,
+            use_bias=self.use_bias,
+            use_scale=self.force_scale,
+            scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+            name="final_norm",
+        )(pooled_output)
+        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+
+        return dict(
+            last_hidden_state=last_hidden_state,
+            pooled_output=pooled_output,
+            # TODO: add hidden states (for down-stream tasks)
+        )
+
+
+class CLIPVisionModelForImageClassification(nn.Module):
+    vision_config: Any
+    num_labels: int
+    dtype: str = "float32"
+
+    def __post_init__(self):
+        # add default fields vision_config
+        default_fields = dataclasses.fields(CLIPVisionTransformer)
+        default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
+        default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
+        vision_config = {**default_fields, **self.vision_config}
+        if self.dtype is not None:
+            vision_config["dtype"] = self.dtype
+        self.vision_config = vision_config
+        return super().__post_init__()
+
+    @nn.compact
     def __call__(
         self,
         pixel_values=None,
         deterministic: bool = True,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict: bool = True,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        hidden_states = self.embeddings(pixel_values)
-        hidden_states = self.pre_layernorm(hidden_states)
-
-        encoder_outputs = self.encoder(
-            inputs_embeds=hidden_states,
+        dtype = jnp.dtype(self.dtype)
+        outputs = CLIPVisionTransformer(
+            **self.vision_config,
+            name="vision",
+        )(
+            pixel_values=pixel_values,
             deterministic=deterministic,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
         )
 
-        last_hidden_state = encoder_outputs[0]
-        # average pool
-        pooled_output = last_hidden_state.mean(axis=1)
-        pooled_output = self.post_layernorm(pooled_output)
-
-        if not return_dict:
-            return (last_hidden_state, pooled_output) + encoder_outputs[1:]
-
-        return FlaxBaseModelOutputWithPooling(
-            last_hidden_state=last_hidden_state,
-            pooler_output=pooled_output,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
-        )
-
-
-class FlaxCLIPTextPreTrainedModel(FlaxPreTrainedModel):
-    config_class = CLIPTextConfig
-    module_class: nn.Module = None
-
-    def __init__(
-        self,
-        config: CLIPTextConfig,
-        input_shape=(1, 1),
-        seed: int = 0,
-        dtype: jnp.dtype = jnp.float32,
-        _do_init: bool = True,
-        **kwargs,
-    ):
-        module = self.module_class(config=config, dtype=dtype, **kwargs)
-        super().__init__(
-            config,
-            module,
-            input_shape=input_shape,
-            seed=seed,
+        logits = nn.Dense(
+            self.num_labels,
             dtype=dtype,
-            _do_init=_do_init,
-        )
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "classifier")),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros, ("classifier",)),
+            name="classifier",
+        )(outputs["pooled_output"])
 
-    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple, params: FrozenDict = None) -> FrozenDict:
-        # init input tensor
-        input_ids = jnp.zeros(input_shape, dtype="i4")
-        position_ids = jnp.broadcast_to(jnp.arange(jnp.atleast_2d(input_ids).shape[-1]), input_shape)
-        attention_mask = jnp.ones_like(input_ids)
+        return dict(logits=logits)
 
+    def init_inputs(config, rng: jax.random.PRNGKey):
+        vision_config = config.vision_config
+        if isinstance(vision_config, dict):
+            vision_config = SimpleNamespace(**vision_config)
+        pixel_values = jnp.ones((1, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
         params_rng, dropout_rng = jax.random.split(rng)
         rngs = {"params": params_rng, "dropout": dropout_rng}
+        return {"rngs": rngs, "pixel_values": pixel_values}
 
-        random_params = self.module.init(rngs, input_ids, attention_mask, position_ids)["params"]
+    def init_weights(self, rng: jax.random.PRNGKey):
+        inputs = self.init_inputs(rng)
+        return self.init(**inputs)
 
-        if params is not None:
-            random_params = flatten_dict(unfreeze(random_params))
-            params = flatten_dict(unfreeze(params))
-            for missing_key in self._missing_keys:
-                params[missing_key] = random_params[missing_key]
-            self._missing_keys = set()
-            return freeze(unflatten_dict(params))
-        else:
-            return random_params
 
+class CLIPTextModelForFineTuning(nn.Module):
+    text_config: Any
+    dtype: jnp.dtype = jnp.float32
+
+    @nn.compact
     def __call__(
         self,
-        input_ids,
+        input_ids=None,
         attention_mask=None,
-        position_ids=None,
-        params: dict = None,
-        dropout_rng: jax.random.PRNGKey = None,
-        train: bool = False,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+        deterministic: bool = True,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-
-        if position_ids is None:
-            position_ids = jnp.broadcast_to(jnp.arange(jnp.atleast_2d(input_ids).shape[-1]), input_ids.shape)
-
-        if attention_mask is None:
-            attention_mask = jnp.ones_like(input_ids)
-
-        # Handle any PRNG if needed
-        rngs = {}
-        if dropout_rng is not None:
-            rngs["dropout"] = dropout_rng
-
-        return self.module.apply(
-            {"params": params or self.params},
-            jnp.array(input_ids, dtype="i4"),
-            jnp.array(attention_mask, dtype="i4"),
-            jnp.array(position_ids, dtype="i4"),
-            not train,
-            output_attentions,
-            output_hidden_states,
-            return_dict,
-            rngs=rngs,
+        text_outputs = CLIPTextTransformer(**self.text_config, dtype=self.dtype)(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            deterministic=deterministic,
         )
 
+        # return penuultimate layer
+        return text_outputs["hidden_states"][-2]
 
-class FlaxCLIPVisionPreTrainedModel(FlaxPreTrainedModel):
-    config_class = CLIPVisionConfig
-    main_input_name = "pixel_values"
-    module_class: nn.Module = None
 
-    def __init__(
-        self,
-        config: CLIPVisionConfig,
-        input_shape: Optional[Tuple] = None,
-        seed: int = 0,
-        dtype: jnp.dtype = jnp.float32,
-        _do_init: bool = True,
-        **kwargs,
-    ):
-        if input_shape is None:
-            input_shape = (1, config.image_size, config.image_size, 3)
-        module = self.module_class(config=config, dtype=dtype, **kwargs)
-        super().__init__(
-            config,
-            module,
-            input_shape=input_shape,
-            seed=seed,
+class CLIPModel(nn.Module):
+    text_config: Any
+    vision_config: Any
+    projection_dim: int
+    logit_scale_init_value: float = 2.6592
+    logit_bias_init_value: float = 0.0
+    dtype: str = "float32"
+
+    def __post_init__(self):
+        # add default fields text_config
+        default_fields = dataclasses.fields(CLIPTextTransformer)
+        default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
+        default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
+        text_config = {**default_fields, **self.text_config}
+        if self.dtype is not None:
+            text_config["dtype"] = self.dtype
+        self.text_config = text_config
+        # add default fields vision_config
+        default_fields = dataclasses.fields(CLIPVisionTransformer)
+        default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
+        default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
+        vision_config = {**default_fields, **self.vision_config}
+        if self.dtype is not None:
+            vision_config["dtype"] = self.dtype
+        self.vision_config = vision_config
+        return super().__post_init__()
+
+    def setup(self):
+        dtype = jnp.dtype(self.dtype)
+        self.logit_scale = self.param(
+            "logit_scale",
+            nn.with_logical_partitioning(nn.initializers.constant(self.logit_scale_init_value), (None,)),
+            (1,),
+        )
+        self.logit_bias = self.param(
+            "logit_bias",
+            nn.with_logical_partitioning(nn.initializers.constant(self.logit_bias_init_value), (None,)),
+            (1,),
+        )
+        self.text_model = CLIPTextTransformer(
+            **self.text_config,
+            name="text",
+        )
+        self.vision_model = CLIPVisionTransformer(
+            **self.vision_config,
+            name="vision",
+        )
+        self.text_projection = nn.Dense(
+            self.projection_dim,
             dtype=dtype,
-            _do_init=_do_init,
+            use_bias=False,
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
+            name="text_projection",
         )
-
-    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple, params: FrozenDict = None) -> FrozenDict:
-        # init input tensor
-        pixel_values = jax.random.normal(rng, input_shape)
-
-        params_rng, dropout_rng = jax.random.split(rng)
-        rngs = {"params": params_rng, "dropout": dropout_rng}
-
-        random_params = self.module.init(rngs, pixel_values)["params"]
-
-        if params is not None:
-            random_params = flatten_dict(unfreeze(random_params))
-            params = flatten_dict(unfreeze(params))
-            for missing_key in self._missing_keys:
-                params[missing_key] = random_params[missing_key]
-            self._missing_keys = set()
-            return freeze(unflatten_dict(params))
-        else:
-            return random_params
-
-    def __call__(
-        self,
-        pixel_values,
-        params: dict = None,
-        dropout_rng: jax.random.PRNGKey = None,
-        train: bool = False,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-
-        # Handle any PRNG if needed
-        rngs = {}
-        if dropout_rng is not None:
-            rngs["dropout"] = dropout_rng
-
-        return self.module.apply(
-            {"params": params or self.params},
-            jnp.array(pixel_values, dtype=jnp.float32),
-            not train,
-            output_attentions,
-            output_hidden_states,
-            return_dict,
-            rngs=rngs,
-        )
-
-
-class FlaxCLIPPreTrainedModel(FlaxPreTrainedModel):
-    config_class = CLIPConfig
-    module_class: nn.Module = None
-
-    def __init__(
-        self,
-        config: CLIPConfig,
-        input_shape: Optional[Tuple] = None,
-        seed: int = 0,
-        dtype: jnp.dtype = jnp.float32,
-        _do_init: bool = True,
-        **kwargs,
-    ):
-        if input_shape is None:
-            input_shape = (
-                (1, 1),
-                (
-                    1,
-                    config.vision_config.image_size,
-                    config.vision_config.image_size,
-                    3,
-                ),
-            )
-        module = self.module_class(config=config, dtype=dtype, **kwargs)
-        super().__init__(
-            config,
-            module,
-            input_shape=input_shape,
-            seed=seed,
+        self.vision_projection = nn.Dense(
+            self.projection_dim,
             dtype=dtype,
-            _do_init=_do_init,
+            use_bias=False,
+            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
+            name="vision_projection",
         )
-
-    def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple, params: FrozenDict = None) -> FrozenDict:
-        # init input tensor
-        input_ids = jnp.zeros(input_shape[0], dtype="i4")
-        position_ids = jnp.broadcast_to(jnp.arange(jnp.atleast_2d(input_ids).shape[-1]), input_shape[0])
-        attention_mask = jnp.ones_like(input_ids)
-
-        pixel_values = jax.random.normal(rng, input_shape[1])
-
-        params_rng, dropout_rng = jax.random.split(rng)
-        rngs = {"params": params_rng, "dropout": dropout_rng}
-
-        random_params = self.module.init(rngs, input_ids, pixel_values, attention_mask, position_ids)["params"]
-
-        if params is not None:
-            random_params = flatten_dict(unfreeze(random_params))
-            params = flatten_dict(unfreeze(params))
-            for missing_key in self._missing_keys:
-                params[missing_key] = random_params[missing_key]
-            self._missing_keys = set()
-            return freeze(unflatten_dict(params))
-        else:
-            return random_params
-
-    def num_params(self, params=None):
-        if params is None:
-            params = self.params
-        num_params = jax.tree_util.tree_map(lambda param: param.size, flatten_dict(unfreeze(params))).values()
-        return sum(list(num_params))
-
-    def unscan(self, params):
-        if self.config.use_scan:
-            self.config.use_scan = False
-            params = flatten_dict(params)
-            scanned_keys = [k for k in params.keys() if "scanned" in k]
-            for k in scanned_keys:
-                v = params[k]
-                name_idx = k.index("scanned")
-                for i in range(len(v)):
-                    new_k = (
-                        *k[:name_idx],
-                        f"{i}",
-                        *k[name_idx + 1 :],
-                    )
-                    params[new_k] = v[i]
-                del params[k]
-            params = unflatten_dict(params)
-        return params
 
     def __call__(
         self,
         input_ids,
         pixel_values,
-        attention_mask=None,
-        position_ids=None,
-        params: dict = None,
-        dropout_rng: jax.random.PRNGKey = None,
-        train: bool = False,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+        attention_mask,
+        deterministic: bool = True,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+        image_features = self.get_image_features(pixel_values, deterministic=deterministic)
+        text_features = self.get_text_features(input_ids, attention_mask, deterministic=deterministic)
+        image_embeds, vision_model_output = image_features["image_embeds"], image_features["vision_model_output"]
+        text_embeds, text_model_output = text_features["text_embeds"], text_features["text_model_output"]
 
-        if position_ids is None:
-            position_ids = jnp.broadcast_to(jnp.arange(jnp.atleast_2d(input_ids).shape[-1]), input_ids.shape)
+        # normalize
+        image_embeds = normalize(image_embeds)
+        text_embeds = normalize(text_embeds)
 
-        if attention_mask is None:
-            attention_mask = jnp.ones_like(input_ids)
+        # temperature scaling
+        logit_scale = jnp.exp(self.logit_scale)
 
-        # Handle any PRNG if needed
-        rngs = {}
-        if dropout_rng is not None:
-            rngs["dropout"] = dropout_rng
+        # logit bias is only used for sigmoid loss
+        logit_bias = self.logit_bias
 
-        return self.module.apply(
-            {"params": params or self.params},
-            jnp.array(input_ids, dtype="i4"),
-            jnp.array(pixel_values, dtype=jnp.float32),
-            jnp.array(attention_mask, dtype="i4"),
-            jnp.array(position_ids, dtype="i4"),
-            not train,
-            output_attentions,
-            output_hidden_states,
-            return_dict,
-            rngs=rngs,
+        logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
+        logits_per_image = logits_per_text.T
+
+        return dict(
+            logits_per_image=logits_per_image,
+            logits_per_text=logits_per_text,
+            text_embeds=text_embeds,
+            image_embeds=image_embeds,
+            text_model_output=text_model_output,
+            vision_model_output=vision_model_output,
+            logit_scale=logit_scale,
+            logit_bias=logit_bias,
         )
 
     def get_text_features(
         self,
         input_ids,
-        attention_mask=None,
-        position_ids=None,
-        params: dict = None,
-        dropout_rng: jax.random.PRNGKey = None,
-        train=False,
+        attention_mask,
+        deterministic: bool = True,
     ):
-        r"""
-        Args:
-            input_ids (`numpy.ndarray` of shape `(batch_size, sequence_length)`):
-                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you
-                provide it.
-
-                Indices can be obtained using [`CLIPTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-                [`PreTrainedTokenizer.__call__`] for details.
-
-                [What are input IDs?](../glossary#input-ids)
-
-        Returns:
-            text_features (`jnp.ndarray` of shape `(batch_size, output_dim`): The text embeddings obtained by applying
-            the projection layer to the pooled output of [`FlaxCLIPTextModel`].
-
-        Examples:
-
-        ```python
-        >>> from transformers import CLIPTokenizer, FlaxCLIPModel
-
-        >>> model = FlaxCLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-        >>> tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-
-        >>> inputs = tokenizer(["a photo of a cat", "a photo of a dog"], padding=True, return_tensors="np")
-        >>> text_features = model.get_text_features(**inputs)
-        ```"""
-        if position_ids is None:
-            position_ids = jnp.broadcast_to(jnp.arange(jnp.atleast_2d(input_ids).shape[-1]), input_ids.shape)
-
-        if attention_mask is None:
-            attention_mask = jnp.ones_like(input_ids)
-
-        # Handle any PRNG if needed
-        rngs = {}
-        if dropout_rng is not None:
-            rngs["dropout"] = dropout_rng
-
-        def _get_features(module, input_ids, attention_mask, position_ids, deterministic):
-            text_outputs = module.text_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                deterministic=deterministic,
-            )
-            pooled_output = text_outputs[1]
-            text_features = module.text_projection(pooled_output)
-            return text_features
-
-        return self.module.apply(
-            {"params": params or self.params},
-            jnp.array(input_ids, dtype="i4"),
-            jnp.array(attention_mask, dtype="i4"),
-            jnp.array(position_ids, dtype="i4"),
-            not train,
-            method=_get_features,
-            rngs=rngs,
+        text_outputs = self.text_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            deterministic=deterministic,
         )
+
+        text_embeds = text_outputs["pooled_output"]
+        text_embeds = self.text_projection(text_embeds)
+        return {"text_embeds": text_embeds, "text_model_output": text_outputs}
 
     def get_image_features(
         self,
         pixel_values,
-        params: dict = None,
-        dropout_rng: jax.random.PRNGKey = None,
-        train=False,
-    ):
-        r"""
-        Args:
-            pixel_values (`numpy.ndarray` of shape `(batch_size, num_channels, height, width)`):
-                Pixel values. Padding will be ignored by default should you provide it. Pixel values can be obtained
-                using [`CLIPFeatureExtractor`]. See [`CLIPFeatureExtractor.__call__`] for details.
-
-        Returns:
-            image_features (`jnp.ndarray` of shape `(batch_size, output_dim`): The image embeddings obtained by
-            applying the projection layer to the pooled output of [`FlaxCLIPVisionModel`]
-
-        Examples:
-
-        ```python
-        >>> from PIL import Image
-        >>> import requests
-        >>> from transformers import CLIPProcessor, FlaxCLIPModel
-
-        >>> model = FlaxCLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-        >>> processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-
-        >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
-
-        >>> inputs = processor(images=image, return_tensors="np")
-
-        >>> image_features = model.get_image_features(**inputs)
-        ```"""
-
-        # Handle any PRNG if needed
-        rngs = {}
-        if dropout_rng is not None:
-            rngs["dropout"] = dropout_rng
-
-        def _get_features(module, pixel_values, deterministic):
-            vision_outputs = module.vision_model(pixel_values=pixel_values, deterministic=deterministic)
-            pooled_output = vision_outputs[1]  # pooled_output
-            image_features = module.visual_projection(pooled_output)
-            return image_features
-
-        return self.module.apply(
-            {"params": params or self.params},
-            jnp.array(pixel_values, dtype=jnp.float32),
-            not train,
-            method=_get_features,
-            rngs=rngs,
-        )
-
-
-class FlaxCLIPTextModule(nn.Module):
-    config: CLIPTextConfig
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self):
-        self.text_model = FlaxCLIPTextTransformer(self.config, dtype=self.dtype)
-
-    def __call__(
-        self,
-        input_ids,
-        attention_mask,
-        position_ids,
         deterministic: bool = True,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
     ):
-        return self.text_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            deterministic=deterministic,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-
-class FlaxCLIPTextModel(FlaxCLIPTextPreTrainedModel):
-    module_class = FlaxCLIPTextModule
-
-
-FLAX_CLIP_TEXT_MODEL_DOCSTRING = """
-    Returns:
-
-    Example:
-
-    ```python
-    >>> from transformers import CLIPTokenizer, FlaxCLIPTextModel
-
-    >>> model = FlaxCLIPTextModel.from_pretrained("openai/clip-vit-base-patch32")
-    >>> tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-
-    >>> inputs = tokenizer(["a photo of a cat", "a photo of a dog"], padding=True, return_tensors="np")
-
-    >>> outputs = model(**inputs)
-    >>> last_hidden_state = outputs.last_hidden_state
-    >>> pooler_output = outputs.pooler_output  # pooled (BOS token) states
-    ```
-"""
-
-overwrite_call_docstring(FlaxCLIPTextModel, CLIP_TEXT_INPUTS_DOCSTRING + FLAX_CLIP_TEXT_MODEL_DOCSTRING)
-append_replace_return_docstrings(
-    FlaxCLIPTextModel,
-    output_type=FlaxBaseModelOutputWithPooling,
-    config_class=CLIPTextConfig,
-)
-
-
-class FlaxCLIPVisionModule(nn.Module):
-    config: CLIPVisionConfig
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self):
-        self.vision_model = FlaxCLIPVisionTransformer(self.config, dtype=self.dtype)
-
-    def __call__(
-        self,
-        pixel_values,
-        deterministic: bool = True,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
-    ):
-        return self.vision_model(
-            pixel_values=pixel_values,
-            deterministic=deterministic,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-
-class FlaxCLIPVisionModel(PretrainedFromWandbMixin, FlaxCLIPVisionPreTrainedModel):
-    module_class = FlaxCLIPVisionModule
-
-
-FLAX_CLIP_VISION_MODEL_DOCSTRING = """
-    Returns:
-
-    Example:
-
-    ```python
-    >>> from PIL import Image
-    >>> import requests
-    >>> from transformers import CLIPProcessor, FlaxCLIPVisionModel
-
-    >>> model = FlaxCLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32")
-    >>> processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-
-    >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-    >>> image = Image.open(requests.get(url, stream=True).raw)
-
-    >>> inputs = processor(images=image, return_tensors="np")
-
-    >>> outputs = model(**inputs)
-    >>> last_hidden_state = outputs.last_hidden_state
-    >>> pooler_output = outputs.pooler_output  # pooled CLS states
-    ```
-"""
-
-overwrite_call_docstring(FlaxCLIPVisionModel, CLIP_VISION_INPUTS_DOCSTRING + FLAX_CLIP_VISION_MODEL_DOCSTRING)
-append_replace_return_docstrings(
-    FlaxCLIPVisionModel,
-    output_type=FlaxBaseModelOutputWithPooling,
-    config_class=CLIPVisionConfig,
-)
-
-
-class FlaxCLIPVisionModelForImageClassificationModule(nn.Module):
-    config: CLIPVisionConfig
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self):
-        self.vision_model = FlaxCLIPVisionTransformer(self.config, dtype=self.dtype)
-        self.classifier = nn.Dense(
-            self.config.num_labels,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.variance_scaling(
-                self.config.initializer_range**2, "fan_in", "truncated_normal"
-            ),
-        )
-
-    def __call__(
-        self,
-        pixel_values=None,
-        deterministic: bool = True,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-    ):
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        outputs = self.vision_model(
-            pixel_values,
-            deterministic=deterministic,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
-        )
-
-        logits = self.classifier(outputs.pooler_output)
-
-        if not return_dict:
-            output = (logits,) + outputs[2:]
-            return output
-
-        return FlaxSequenceClassifierOutput(
-            logits=logits,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
-
-
-class FlaxCLIPVisionModelForImageClassification(PretrainedFromWandbMixin, FlaxCLIPVisionPreTrainedModel):
-    module_class = FlaxCLIPVisionModelForImageClassificationModule
-
-
-class FlaxCLIPTextModelForFineTuningModule(nn.Module):
-    config: CLIPVisionConfig
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self):
-        self.text_model = FlaxCLIPTextTransformer(self.config, dtype=self.dtype)
-
-    def __call__(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        position_ids=None,
-        deterministic: bool = True,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-    ):
-        text_outputs = self.text_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            deterministic=deterministic,
-            output_attentions=False,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-
-        # return penuultimate layer
-        return text_outputs.hidden_states[-2]
-
-
-class FlaxCLIPTextModelForFineTuning(PretrainedFromWandbMixin, FlaxCLIPTextPreTrainedModel):
-    module_class = FlaxCLIPTextModelForFineTuningModule
-
-
-class FlaxCLIPModule(nn.Module):
-    config: CLIPConfig
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self):
-        text_config = self.config.text_config
-        vision_config = self.config.vision_config
-
-        self.projection_dim = self.config.projection_dim
-        self.text_embed_dim = text_config.hidden_size
-        self.vision_embed_dim = vision_config.hidden_size
-
-        self.text_model = FlaxCLIPTextTransformer(text_config, dtype=self.dtype)
-        self.vision_model = FlaxCLIPVisionTransformer(vision_config, dtype=self.dtype)
-
-        self.visual_projection = nn.Dense(
-            self.projection_dim,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.02),
-            use_bias=False,
-        )
-        self.text_projection = nn.Dense(
-            self.projection_dim,
-            dtype=self.dtype,
-            kernel_init=jax.nn.initializers.normal(0.02),
-            use_bias=False,
-        )
-
-        self.logit_scale = self.param(
-            "logit_scale", jax.nn.initializers.constant(self.config.logit_scale_init_value, self.dtype), []
-        )
-
-    def __call__(
-        self,
-        input_ids=None,
-        pixel_values=None,
-        attention_mask=None,
-        position_ids=None,
-        deterministic: bool = True,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-    ):
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-
         vision_outputs = self.vision_model(
             pixel_values=pixel_values,
             deterministic=deterministic,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
         )
+        image_embeds = vision_outputs["pooled_output"]
+        image_embeds = self.vision_projection(image_embeds)
 
-        text_outputs = self.text_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            deterministic=deterministic,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        return {"image_embeds": image_embeds, "vision_model_output": vision_outputs}
 
-        image_embeds = vision_outputs[1]
-        image_embeds = self.visual_projection(image_embeds)
+    def init_inputs(config, rng: jax.random.PRNGKey):
+        text_config = config.text_config
+        vision_config = config.vision_config
+        if isinstance(text_config, dict):
+            text_config = SimpleNamespace(**text_config)
+        if isinstance(vision_config, dict):
+            vision_config = SimpleNamespace(**vision_config)
+        input_ids = jnp.ones((1, text_config.max_length), dtype="i4")
+        attention_mask = jnp.ones((1, text_config.max_length), dtype="i4")
+        pixel_values = jnp.ones((1, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
+        params_rng, dropout_rng = jax.random.split(rng)
+        rngs = {"params": params_rng, "dropout": dropout_rng}
+        return {"rngs": rngs, "input_ids": input_ids, "pixel_values": pixel_values, "attention_mask": attention_mask}
 
-        text_embeds = text_outputs[1]
-        text_embeds = self.text_projection(text_embeds)
-
-        # normalize features
-        def normalize(x, epsilon=1e-6, legacy=False):
-            if legacy:
-                mean2 = jnp.sum(jnp.square(x), axis=-1, keepdims=True)
-                return x * lax.rsqrt(mean2 + epsilon)
-            else:
-                return x / jnp.linalg.norm(x, axis=-1, keepdims=True)
-
-        image_embeds = normalize(image_embeds)
-        text_embeds = normalize(text_embeds)
-
-        # cosine similarity as logits
-        logit_scale = jnp.exp(self.logit_scale)
-        logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
-        logits_per_image = logits_per_text.T
-
-        if not return_dict:
-            return (
-                logits_per_image,
-                logits_per_text,
-                text_embeds,
-                image_embeds,
-                text_outputs,
-                vision_outputs,
-            )
-
-        return FlaxCLIPOutput(
-            logits_per_image=logits_per_image,
-            logits_per_text=logits_per_text,
-            text_embeds=text_embeds,
-            image_embeds=image_embeds,
-            text_model_output=text_outputs,
-            vision_model_output=vision_outputs,
-        )
+    def init_weights(self, rng: jax.random.PRNGKey):
+        inputs = self.init_inputs(rng)
+        return self.init(**inputs)
 
 
-@add_start_docstrings(CLIP_START_DOCSTRING)
-class FlaxCLIPModel(PretrainedFromWandbMixin, FlaxCLIPPreTrainedModel):
-    module_class = FlaxCLIPModule
-
-
-FLAX_CLIP_MODEL_DOCSTRING = """
-    Returns:
-
-    Example:
-
-    ```python
-    >>> import jax
-    >>> from PIL import Image
-    >>> import requests
-    >>> from transformers import CLIPProcessor, FlaxCLIPModel
-
-    >>> model = FlaxCLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-    >>> processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-
-    >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-    >>> image = Image.open(requests.get(url, stream=True).raw)
-
-    >>> inputs = processor(
-    ...     text=["a photo of a cat", "a photo of a dog"], images=image, return_tensors="np", padding=True
-    ... )
-
-    >>> outputs = model(**inputs)
-    >>> logits_per_image = outputs.logits_per_image  # this is the image-text similarity score
-    >>> probs = jax.nn.softmax(logits_per_image, axis=1)  # we can take the softmax to get the label probabilities
-    ```
-"""
-
-overwrite_call_docstring(FlaxCLIPModel, CLIP_INPUTS_DOCSTRING + FLAX_CLIP_MODEL_DOCSTRING)
-append_replace_return_docstrings(FlaxCLIPModel, output_type=FlaxCLIPOutput, config_class=CLIPConfig)
-
-
-class AutoTokenizer(PretrainedFromWandbMixin, AutoTokenizer):
-    pass
+def normalize(x, eps=1e-7, safe_norm=True):
+    if safe_norm:
+        return x * jax.lax.rsqrt(jnp.sum(jax.lax.square(x), axis=-1, keepdims=True) + eps)
+    else:
+        return x / jnp.linalg.norm(x, axis=-1, keepdims=True)

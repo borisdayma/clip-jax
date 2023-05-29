@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2022 The Google Research Authors.
+# Copyright 2023 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -33,17 +33,28 @@ import enum
 import functools
 import itertools
 import logging
-from typing import Any, Callable, cast, List, NamedTuple, Optional, Sequence, Tuple, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+)
 
 import chex
-from flax import struct
 import jax
-from jax import lax
-from jax.experimental import pjit
-from jax.experimental.sparse import linalg
 import jax.numpy as jnp
 import numpy as np
 import optax
+from flax import struct
+from jax import lax
+from jax.experimental import pjit
+from jax.experimental.sparse import linalg
 
 from .quantization_utils import QuantizedValue
 
@@ -87,7 +98,6 @@ InversePthRootDiagnosticsSubtype = TypeVar("InversePthRootDiagnosticsSubtype", b
 @struct.dataclass
 class InversePthRootDiagnostics:
     """Diagnostics for inverse p-th root iterative procedure.
-
     Given an inverse pth root B = A^(-1/p), contains the average and
     maximum diagonal and off diagonal absolute entrywise errors between
     (B^p A) and I.
@@ -121,7 +131,6 @@ LOBPCGDiagnosticsSubtype = TypeVar("LOBPCGDiagnosticsSubtype", bound="LOBPCGDiag
 @struct.dataclass
 class LOBPCGDiagnostics:
     """Diagnostics for iterative LOBPCG eigenvalue routine.
-
     Contains consistency error for LOBPCG eigenvalue routine, which
     refers to |A v - lambda v| / (lambda + |A v|) for a proposed eigenpair
     (v, lambda). This metics dataclass retains consistency error
@@ -223,7 +232,7 @@ class LocalShardedParameterStats:
     diagonal_momentum: QuantizedValue  # Momentum for the diagonal preconditioner
     momentum: QuantizedValue  # Momentum for the shampoo preconditioner
     training_metrics: Union[TrainingMetrics, optax.MaskedNode]
-    index_start: np.int32 = struct.field(pytree_node=False)  # Index into global statistics array
+    index_start: Union[np.int32, int] = struct.field(pytree_node=False)  # Index into global statistics array
     sizes: Any = struct.field(pytree_node=False)  # Sizes of the statistics.
 
 
@@ -310,14 +319,11 @@ def power_iteration(
     padding_start=None,
 ):
     r"""Power iteration algorithm.
-
     The power iteration algorithm takes a symmetric PSD matrix `A`, and produces
     a scalar `\lambda` , which is the greatest (in absolute value) eigenvalue
     of `A`, and a vector v, which is the corresponding eigenvector of `A`.
-
     References:
       [Wikipedia, 2021](https://en.wikipedia.org/wiki/Power_iteration)
-
     Args:
       matrix: the symmetric PSD matrix.
       num_iters: Number of iterations.
@@ -328,7 +334,6 @@ def power_iteration(
         (best possible precision, slowest)
       padding_start: if set, assumes rows and columns after padding_start are
         zero.
-
     Returns:
       eigen vector, eigen value
     """
@@ -419,16 +424,12 @@ def matrix_inverse_pth_root(
     eigh=False,
 ):
     """Computes `matrix^(-1/p)`, where `p` is a positive integer.
-
     This function uses the Eigh or Coupled newton iterations algorithm for
     the computation of a matrix's inverse pth root.
-
-
     References:
       [Functions of Matrices, Theory and Computation,
        Nicholas J Higham, Pg 184, Eq 7.18](
        https://epubs.siam.org/doi/book/10.1137/1.9780898717778)
-
     Args:
       matrix: the symmetric PSD matrix whose power it to be computed
       p: exponent, for p a positive integer.
@@ -450,10 +451,8 @@ def matrix_inverse_pth_root(
         rows at the padding start.
       prev: previous iteration's solution, zero-padded (unused)
       eigh: If True, uses eigh for inverse-pth root computation.
-
     Returns:
       `(matrix + eps)^(-1/p)` and error metrics.
-
       Note `eps` is not added to zeroed out padding rows and
       columns. `eps` is just `ridge_epsilon` if
       `relative_matrix_epsilon` is set to `False`, otherwise, it is the
@@ -550,7 +549,6 @@ def matrix_inverse_pth_root(
         iters = 0
         error_ratio = 0.0
     else:
-
         retry_loop_error_threshold = 0.05
         num_tries = 6
         init_outer_state = tuple([0, identity, 1000.0, 100, 1.0, True])
@@ -646,10 +644,8 @@ def matrix_inverse_pth_root_eigh(
     prev=None,
 ):
     """Computes `matrix^(-1/p)`, where `p` is a positive integer.
-
     This function uses eigh for the computation of a matrix's inverse pth
     root.
-
     Args:
       matrix: the symmetric PSD matrix whose power it to be computed
       p: exponent, for p a positive integer.
@@ -664,10 +660,8 @@ def matrix_inverse_pth_root_eigh(
       padding_start: If the input matrix was padded, then zeros out columns and
         rows at the padding start.
       prev: previous iteration's solution, zero-padded (unused)
-
     Returns:
       `(matrix + eps)^(-1/p)` and error metrics.
-
       Note `eps` is not added to zeroed out padding rows and
       columns. `eps` is just `ridge_epsilon` if
       `relative_matrix_epsilon` is set to `False`, otherwise, it is the
@@ -724,15 +718,12 @@ def matrix_inverse_pth_root_eigh(
 
 def merge_small_dims(shape_to_merge, max_dim):
     """Merge small dimensions.
-
     If there are some small dimensions, we collapse them:
     e.g. [1, 2, 512, 1, 2048, 1, 3, 4] --> [1024, 2048, 12] if max_dim = 1024
          [1, 2, 768, 1, 2048] --> [2, 768, 2048]
-
     Args:
       shape_to_merge: Shape to merge small dimensions.
       max_dim: Maximal dimension of output shape used in merging.
-
     Returns:
       Merged shape.
     """
@@ -755,11 +746,9 @@ def merge_small_dims(shape_to_merge, max_dim):
 
 def pad_square_matrix(mat, max_size):
     """Pad a square matrix up to max_size.
-
     Args:
       mat: a matrix to pad.
       max_size: matrix size requested.
-
     Returns:
       Given M returns [[M, 0], [0, I]]
     """
@@ -782,11 +771,9 @@ def pad_square_matrix(mat, max_size):
 
 def pad_vector(vec, max_size):
     """Pad a vector to a max_size.
-
     Args:
       vec: a vector to pad.
       max_size: matrix size requested.
-
     Returns:
       Given V returns [V, 0]
     """
@@ -843,7 +830,7 @@ class BlockPartitioner:
 
         assert tensor.shape == self._shape
         tensors = [tensor]
-        for (i, indices) in self._splits:
+        for i, indices in self._splits:
             tensors_local = []
             for t in tensors:
                 tensors_local.extend(jnp.split(t, indices_or_sections=indices, axis=i))
@@ -853,7 +840,7 @@ class BlockPartitioner:
     def merge_partitions(self, partitions):
         """Merge partitions back to original shape."""
 
-        for (i, indices) in reversed(self._splits):
+        for i, indices in reversed(self._splits):
             n = len(indices) + 1
             partial_merged_tensors = []
             ind = 0
@@ -867,12 +854,10 @@ class BlockPartitioner:
 
 def gram_weighted_update(old_stats, g, axis, w1, w2, precision=None):
     """Updated statistics via weighted average with new Gram matrix.
-
       Returns w₁ R + w₂ Gᵀ G where R is `old_stats` and G is the matrix whose
       columns are the flattened slices of the tensor `g` along the given `axis`.
       (So, `old_stats` and the returned matrix have dimensions n x n where
       n = `g.shape[axis]`).
-
     Args:
       old_stats:  Old statistics.
       g:  Gradient tensor.
@@ -883,7 +868,6 @@ def gram_weighted_update(old_stats, g, axis, w1, w2, precision=None):
         a) lax.Precision.DEFAULT (better step time, but not precise) b)
         lax.Precision.HIGH (increased precision, slower) c) lax.Precision.HIGHEST
         (best possible precision, slowest)
-
     Returns:
       Weighted average of old and new statistics.
     """
@@ -904,7 +888,6 @@ class Preconditioner:
         preconditioner_type=PreconditionerType.ALL,
     ):
         """Initializes the preconditioner.
-
         Args:
           param: parameter to precondition.
           block_size: Block size used to split param.
@@ -931,7 +914,6 @@ class Preconditioner:
         precision=None,
     ):
         """Update statistics from gradients.
-
         Args:
           stats: Old statistics or its Cholesky factor if `cholesky` is True.
           grad: Gradient to compute statistics from.
@@ -943,7 +925,6 @@ class Preconditioner:
             a) lax.Precision.DEFAULT (better step time, but not precise) b)
             lax.Precision.HIGH (increased precision, slower) c)
             lax.Precision.HIGHEST (best possible precision, slowest)
-
         Returns:
           A list of updated gradient statistics for each partition.
         """
@@ -1015,11 +996,9 @@ class Preconditioner:
 
     def preconditioned_grad(self, grad, preconditioners):
         """Precondition the gradient.
-
         Args:
           grad: A gradient tensor to precondition.
           preconditioners: A list of preconditioners to apply.
-
         Returns:
           A preconditioned gradient.
         """
@@ -1179,19 +1158,15 @@ def distributed_shampoo(
     eigh=False,
 ):
     """Distributed Shampoo optimizer.
-
     Distributed Shampoo is a second-order preconditioned method (concretely, a
     variant of full-matrix Adagrad), that provides significant convergence and
     wall-clock time improvements compared to conventional first-order methods,
     and that has been shown to scale to large state-of-the-art deep learning
     models.
-
     References:
       Scalable Second Order Optimization for Deep Learning,
       Rohan Anil, Vineet Gupta, Tomer Koren, Kevin Regan, Yoram Singer
-
       Preprint: https://arxiv.org/abs/2002.09018
-
     Args:
       learning_rate: the step size used to update the parameters.
       block_size: Block size for large layers (if > 0). Preconditioning compute
@@ -1268,7 +1243,6 @@ def distributed_shampoo(
       reuse_preconditioner: If True, pass the previous derived preconditioner as a
         warm start to the next iteratin's inverse pth root computation.
       eigh: If True, and uses eigen decomposition for inverse-pth root.
-
     Returns:
       a GradientTransformation.
     """
@@ -1384,11 +1358,10 @@ def distributed_shampoo(
 
     def sharded_init_fn(params):
         """Returns optimizer state (for PJIT mode).
-
         Args:
           params: the parameters that should be updated.
         """
-        params_flat, treedef = jax.tree_flatten(params)
+        params_flat, treedef = jax.tree_util.tree_flatten(params)
         # Find max size to pad to.
         max_size = 0
         for param in params_flat:
@@ -1443,7 +1416,7 @@ def distributed_shampoo(
                 )
             )
 
-        local_stats = jax.tree_unflatten(treedef, local_stats_flat)
+        local_stats = jax.tree_util.tree_unflatten(treedef, local_stats_flat)
         to_pad = -len(padded_statistics) % num_devices_for_pjit
         if max_size == 0:
             to_pad = num_devices_for_pjit
@@ -1489,16 +1462,14 @@ def distributed_shampoo(
 
     def sharded_init_partition_spec_fn(params, params_partition_spec, partition_spec_for_statistics):
         """Returns a parallel state tree with PartitionSpec associated with state.
-
-
         Args:
           params: A pytree with params.
           params_partition_spec: A pytree with PartitionSpec for params.
           partition_spec_for_statistics: PartitionSpec for the statistics.
         """
         # Parallel lists of spec, and params.
-        param_pspec_flat, _ = jax.tree_flatten(params_partition_spec, is_leaf=lambda x: x is None)
-        params_flat, treedef = jax.tree_flatten(params)
+        param_pspec_flat, _ = jax.tree_util.tree_flatten(params_partition_spec, is_leaf=lambda x: x is None)
+        params_flat, treedef = jax.tree_util.tree_flatten(params)
         assert param_pspec_flat
         assert params_flat
         # Step is replicated across cores.
@@ -1528,9 +1499,30 @@ def distributed_shampoo(
 
             local_stats_flat.append(
                 LocalShardedParameterStats(
-                    QuantizedValue(param_pspec, [], [], jnp.float32, False, list(param.shape)),
-                    QuantizedValue(m1_pspec, [], m1_scale_pspec, qdtype, False, list(param.shape)),
-                    QuantizedValue(m2_pspec, [], m2_scale_pspec, qdtype, False, list(param.shape)),
+                    QuantizedValue(
+                        param_pspec,
+                        [],
+                        [],
+                        jnp.float32,
+                        False,  # pytype: disable=wrong-arg-types  # numpy-scalars
+                        list(param.shape),
+                    ),
+                    QuantizedValue(
+                        m1_pspec,
+                        [],
+                        m1_scale_pspec,
+                        qdtype,
+                        False,  # pytype: disable=wrong-arg-types  # numpy-scalars
+                        list(param.shape),
+                    ),
+                    QuantizedValue(
+                        m2_pspec,
+                        [],
+                        m2_scale_pspec,
+                        qdtype,
+                        False,  # pytype: disable=wrong-arg-types  # numpy-scalars
+                        list(param.shape),
+                    ),
                     init_training_metrics_pspec(
                         generate_training_metrics,
                     ),
@@ -1539,22 +1531,24 @@ def distributed_shampoo(
                 )
             )
 
-        local_stats = jax.tree_unflatten(treedef, local_stats_flat)
+        local_stats = jax.tree_util.tree_unflatten(treedef, local_stats_flat)
         global_stats = GlobalShardedParameterStats(
-            partition_spec_for_statistics, partition_spec_for_statistics, jax.sharding.PartitionSpec()
+            partition_spec_for_statistics,  # pytype: disable=wrong-arg-types  # numpy-scalars
+            partition_spec_for_statistics,
+            jax.sharding.PartitionSpec(),
         )
         count_pspec = jax.sharding.PartitionSpec()
-        return ShampooState(count=count_pspec, stats=ShardedShampooStats(global_stats, local_stats))
+        return ShampooState(  # pytype: disable=wrong-arg-types  # numpy-scalars
+            count=count_pspec, stats=ShardedShampooStats(global_stats, local_stats)
+        )
 
     def sharded_init_shape_and_dtype_fn(params):
         """Returns a parallel state tree with shape, dtype associated with state.
-
-
         Args:
           params: A pytree with params.
         """
         # Parallel lists of spec, and params.
-        params_flat, treedef = jax.tree_flatten(params)
+        params_flat, treedef = jax.tree_util.tree_flatten(params)
         assert params_flat
         # Step is replicated across cores.
         # None means cores.
@@ -1584,9 +1578,30 @@ def distributed_shampoo(
             diagonal_statistics_shape_and_dtype = [list(param.shape), param.dtype]
             local_stats_flat.append(
                 LocalShardedParameterStats(
-                    QuantizedValue(diagonal_statistics_shape_and_dtype, [], [], jnp.float32, False, list(param.shape)),
-                    QuantizedValue(m1_shape_and_dtype, [], m1_scale_shape_and_dtype, qdtype, False, list(param.shape)),
-                    QuantizedValue(m2_shape_and_dtype, [], m2_scale_shape_and_dtype, qdtype, False, list(param.shape)),
+                    QuantizedValue(
+                        diagonal_statistics_shape_and_dtype,
+                        [],
+                        [],  # pytype: disable=wrong-arg-types  # numpy-scalars
+                        jnp.float32,
+                        False,
+                        list(param.shape),
+                    ),
+                    QuantizedValue(
+                        m1_shape_and_dtype,
+                        [],
+                        m1_scale_shape_and_dtype,  # pytype: disable=wrong-arg-types  # numpy-scalars
+                        qdtype,
+                        False,
+                        list(param.shape),
+                    ),
+                    QuantizedValue(
+                        m2_shape_and_dtype,
+                        [],
+                        m2_scale_shape_and_dtype,  # pytype: disable=wrong-arg-types  # numpy-scalars
+                        qdtype,
+                        False,
+                        list(param.shape),
+                    ),
                     init_training_metrics_shapes(
                         len(sizes),
                         generate_training_metrics,
@@ -1596,7 +1611,7 @@ def distributed_shampoo(
                 )
             )
 
-        local_stats = jax.tree_unflatten(treedef, local_stats_flat)
+        local_stats = jax.tree_util.tree_unflatten(treedef, local_stats_flat)
         max_statistics_size = _max_statistics_size_from_params(params_flat)
         to_pad = -num_statistics % num_devices_for_pjit
         num_statistics += to_pad
@@ -1605,23 +1620,23 @@ def distributed_shampoo(
             max_statistics_size = block_size
         statistics_shape = [num_statistics, max_statistics_size, max_statistics_size]
         preconditioners_shape = [num_statistics, max_statistics_size, precond_dim(max_statistics_size)]
-        global_stats = GlobalShardedParameterStats(
+        global_stats = GlobalShardedParameterStats(  # pytype: disable=wrong-arg-types  # numpy-scalars
             [statistics_shape, jnp.float32], [preconditioners_shape, jnp.float32], [[num_statistics], jnp.int32]
         )
-        return ShampooState(count=[[], jnp.float32], stats=ShardedShampooStats(global_stats, local_stats))
+        return ShampooState(  # pytype: disable=wrong-arg-types  # numpy-scalars
+            count=[[], jnp.float32], stats=ShardedShampooStats(global_stats, local_stats)
+        )
 
     def sharded_update_fn(grads, state, params):
         """Transform the input gradient and update all statistics in sharded mode.
-
         Args:
           grads: the gradient tensors for the parameters.
           state: a named tuple containing the state of the optimizer
           params: the parameters that should be updated.
-
         Returns:
           A tuple containing the new parameters and the new optimizer state.
         """
-        params_flat, treedef = jax.tree_flatten(params)
+        params_flat, treedef = jax.tree_util.tree_flatten(params)
         grads_flat = treedef.flatten_up_to(grads)
 
         global_stats = state.stats.global_stats
@@ -1644,7 +1659,7 @@ def distributed_shampoo(
         )
         updates_flat, new_stats_flat = list(zip(*outputs)) if outputs else ((), ())
 
-        updates = jax.tree_unflatten(treedef, updates_flat)
+        updates = jax.tree_util.tree_unflatten(treedef, updates_flat)
         new_local_stats_flat = []
         for new_stat, local_stat in zip(new_stats_flat, local_stats_flat):
             new_local_stats_flat.append(
@@ -1733,7 +1748,7 @@ def distributed_shampoo(
 
         if generate_training_metrics:
             new_local_stats_flat = _add_metrics_into_local_stats(new_local_stats_flat, metrics, ~perform_step)
-        new_local_stats = jax.tree_unflatten(treedef, new_local_stats_flat)
+        new_local_stats = jax.tree_util.tree_unflatten(treedef, new_local_stats_flat)
         errors = metrics.inverse_pth_root_errors
         errors = errors.reshape((-1, 1, 1))
         predicate = jnp.logical_or(jnp.isnan(errors), errors >= inverse_failure_threshold).astype(
@@ -1885,7 +1900,6 @@ def distributed_shampoo(
         states, step, statistics, num_statistics_per_state, original_shapes, exponents, max_size, prev_preconditioners
     ):
         """Computes preconditioners for given statistics in states in PMAP mode.
-
         Args:
           states: A list of optimizer states.
           step: Current step number
@@ -1896,7 +1910,6 @@ def distributed_shampoo(
           exponents: Exponent power to use for inverse-pth roots.
           max_size: Maximum dim of the statistics to pad.
           prev_preconditioners: Previously available preconditioner.
-
         Returns:
           New optimizer states after computing the preconditioner.
         """
@@ -2047,11 +2060,9 @@ def distributed_shampoo(
         states, step, statistics, num_statistics_per_state, original_shapes, exponents, max_size, prev_preconditioners
     ):
         """Computes preconditioners for given statistics in states in PMAP mode.
-
         For quantization, each statistic is represented by three values:
           quantized matrix, diagonal, and bucket sizes, we run inverse pth-roots
           without ever recreating the original matrix in f32.
-
         Args:
           states: A list of optimizer states.
           step: Current step number
@@ -2062,7 +2073,6 @@ def distributed_shampoo(
           exponents: Exponent power to use for inverse-pth roots.
           max_size: Maximum dim of the statistics to pad.
           prev_preconditioners: Previously available preconditioner.
-
         Returns:
           New optimizer states after computing the preconditioner.
         """
@@ -2287,7 +2297,6 @@ def distributed_shampoo(
         states, step, statistics, num_statistics_per_state, original_shapes, exponents, max_size, prev_preconditioners
     ):
         """Computes preconditioners for given statistics in states in PJIT mode.
-
         Args:
           states: A list of optimizer states.
           step: Current step number
@@ -2298,7 +2307,6 @@ def distributed_shampoo(
           exponents: Exponent power to use for inverse-pth roots.
           max_size: Maximum dim of the statistics to pad.
           prev_preconditioners: Previously available preconditioner.
-
         Returns:
           New optimizer states after computing the preconditioner.
         """
@@ -2415,12 +2423,10 @@ def distributed_shampoo(
 
     def _compute_preconditioners(states, params, step):
         """Computes preconditioners for given statistics in states.
-
         Args:
           states: A list of optimizer states.
           params: A list of params.
           step: Current step number
-
         Returns:
           New optimizer states after computing the preconditioner.
         """
@@ -2494,7 +2500,6 @@ def distributed_shampoo(
         new_diagonal_statistics = state.diagonal_statistics.to_float()
 
         if graft_type == GraftingType.ADAGRAD or graft_type == GraftingType.ADAGRAD_NORMALIZED:
-
             scaled_grad = grad
             if graft_type == GraftingType.ADAGRAD_NORMALIZED:
                 scaled_grad = grad / (jnp.linalg.norm(grad) + _EPSILON)
@@ -2503,7 +2508,6 @@ def distributed_shampoo(
             adagrad_update = scaled_grad / (jnp.sqrt(new_diagonal_statistics) + diagonal_epsilon)
             grafting_update = adagrad_update
         elif graft_type == GraftingType.RMSPROP or graft_type == GraftingType.RMSPROP_NORMALIZED:
-
             scaled_grad = grad
             if graft_type == GraftingType.RMSPROP_NORMALIZED:
                 scaled_grad = grad / (jnp.linalg.norm(grad) + _EPSILON)
@@ -2556,7 +2560,7 @@ def distributed_shampoo(
         shampoo_update_with_wd = shampoo_update
         grafting_update_with_wd = grafting_update
 
-        if weight_decay != 0 and not decoupled_weight_decay:
+        if weight_decay != 0 and weight_decay is not None and not decoupled_weight_decay:
             shampoo_update_with_wd = shampoo_update + weight_decay * param
             grafting_update_with_wd = grafting_update + weight_decay * param
 
@@ -2579,7 +2583,7 @@ def distributed_shampoo(
         if nesterov:
             nesterov_momentum_update = w * wd_update + beta1 * momentum_update
 
-        if weight_decay != 0 and decoupled_weight_decay:
+        if weight_decay != 0 and weight_decay is not None and decoupled_weight_decay:
             nesterov_momentum_update = nesterov_momentum_update + lr * weight_decay * param
 
         momentum_multiplier = lr if decoupled_learning_rate else 1.0
@@ -2601,13 +2605,11 @@ def distributed_shampoo(
 
     def update_fn(grads, state, params):
         """Transform the input gradient and update all statistics.
-
         Args:
           grads: the gradient tensors for the parameters and any custom gradients
             for preconditioners.
           state: a named tuple containing the state of the optimizer
           params: the parameters that should be updated.
-
         Returns:
           A tuple containing the new parameters and the new optimizer state.
         """
@@ -2615,7 +2617,7 @@ def distributed_shampoo(
         if custom_preconditioner and isinstance(grads, tuple):
             grads, grads_custom = grads
 
-        params_flat, treedef = jax.tree_flatten(params)
+        params_flat, treedef = jax.tree_util.tree_flatten(params)
         stats_flat = treedef.flatten_up_to(state.stats)
         grads_flat = treedef.flatten_up_to(grads)
         stats_grads = grads_flat
@@ -2633,8 +2635,8 @@ def distributed_shampoo(
         )
         updates_flat, new_stats_flat = list(zip(*outputs)) if outputs else ((), ())
 
-        updates = jax.tree_unflatten(treedef, updates_flat)
-        new_stats = jax.tree_unflatten(treedef, new_stats_flat)
+        updates = jax.tree_util.tree_unflatten(treedef, updates_flat)
+        new_stats = jax.tree_util.tree_unflatten(treedef, new_stats_flat)
 
         new_state = ShampooState(count=state.count + 1, stats=new_stats)
         return updates, new_state

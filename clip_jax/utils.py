@@ -1,39 +1,18 @@
-import os
-import tempfile
+import json
 
-import wandb
+import fsspec
+import jax
+
+from .wandb_utils import maybe_use_artifact
 
 
-class PretrainedFromWandbMixin:
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        """
-        Initializes from a wandb artifact or delegates loading to the superclass.
-        """
-        with tempfile.TemporaryDirectory() as tmp_dir:  # avoid multiple artifact copies
-            if ":" in pretrained_model_name_or_path and not os.path.isdir(pretrained_model_name_or_path):
-                # wandb artifact
-                if wandb.run is not None:
-                    artifact = wandb.run.use_artifact(pretrained_model_name_or_path)
-                else:
-                    artifact = wandb.Api().artifact(pretrained_model_name_or_path)
-                pretrained_model_name_or_path = artifact.download(tmp_dir)
+def load_config(config_path):
+    """Load config from file."""
+    with maybe_use_artifact(config_path, "config.json") as json_path:
+        with fsspec.open(json_path, "r") as f:
+            config = json.load(f)
+    return config
 
-            return super(PretrainedFromWandbMixin, cls).from_pretrained(
-                pretrained_model_name_or_path, *model_args, **kwargs
-            )
 
-    @classmethod
-    def get_config_dict(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        with tempfile.TemporaryDirectory() as tmp_dir:  # avoid multiple artifact copies
-            if ":" in pretrained_model_name_or_path and not os.path.isdir(pretrained_model_name_or_path):
-                # wandb artifact
-                if wandb.run is not None:
-                    artifact = wandb.run.use_artifact(pretrained_model_name_or_path)
-                else:
-                    artifact = wandb.Api().artifact(pretrained_model_name_or_path)
-                pretrained_model_name_or_path = artifact.download(tmp_dir)
-
-            return super(PretrainedFromWandbMixin, cls).get_config_dict(
-                pretrained_model_name_or_path, *model_args, **kwargs
-            )
+def count_params(pytree):
+    return sum([x.size for x in jax.tree_util.tree_leaves(pytree)])
