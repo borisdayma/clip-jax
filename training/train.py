@@ -189,7 +189,7 @@ class TrainingArguments:
         metadata={"help": "The wandb entity to use (for teams)."},
     )
     wandb_project: str = field(
-        default="clip",
+        default="clip-jax",
         metadata={"help": "The name of the wandb project."},
     )
     wandb_job_type: str = field(
