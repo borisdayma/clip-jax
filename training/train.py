@@ -18,7 +18,7 @@ import jax.numpy as jnp
 import jaxlib
 import numpy as np
 import optax
-import orbax
+import orbax.checkpoint
 import tensorflow as tf
 import tensorflow_io as tfio
 import transformers
@@ -33,7 +33,7 @@ from jax.experimental.mesh_utils import create_device_mesh
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from scalable_shampoo.distributed_shampoo import GraftingType, distributed_shampoo
+from precondition.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
@@ -656,7 +656,7 @@ def main():
                     "jaxlib": jaxlib.__version__,
                     "flax": flax.__version__,
                     "optax": optax.__version__,
-                    "orbax": orbax.__version__,
+                    "orbax": orbax.checkpoint.__version__,
                     "numpy": np.__version__,
                     "tensorflow": tf.__version__,
                     "tensorflow-io": tfio.__version__,

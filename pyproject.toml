@@ -12,7 +12,7 @@ dependencies = [
     "flax",
     "jax",
     "numpy",
-    "orbax",
+    "orbax-checkpoint",
     "tensorflow-io[tensorflow-cpu]",
     "transformers",
 ]
@@ -22,6 +22,7 @@ dev = [
     "black[jupyter]",
     "isort",
     "optax",
+    "precondition-opt",
     "tqdm",
     "wandb",
 ]
