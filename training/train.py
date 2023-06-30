@@ -67,6 +67,10 @@ class TrainingArguments:
         },
     )
     no_cache: bool = field(default=False, metadata={"help": "Uses jax cache."})
+    cache_dir: str = field(
+        default="jax_cache",
+        metadata={"help": ("Location for jax cache.")},
+    )
     do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
     batch_size_per_node: Optional[int] = field(default=64, metadata={"help": "Batch size for training."})
@@ -548,7 +552,7 @@ def main():
 
     # Use jax cache
     if not training_args.no_cache:
-        cc.initialize_cache("jax_cache")
+        cc.initialize_cache(training_args.cache_dir)
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
