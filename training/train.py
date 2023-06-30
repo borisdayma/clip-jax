@@ -1167,7 +1167,7 @@ def main():
         new_params, new_opt_state = update_params(params, opt_state, grads)
 
         # get opt_state_step - TODO: only shampoo is supported at the moment
-        opt_state_step = opt_state["text"][0]
+        opt_state_step = new_opt_state["text"][0]
 
         # get metrics
         metrics = {
