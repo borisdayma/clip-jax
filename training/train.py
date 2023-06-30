@@ -6,6 +6,8 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field
 from functools import partial
+from huggingface_hub import create_repo, upload_folder
+from pathlib import Path
 from platform import python_version
 from pprint import pformat
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
@@ -195,6 +197,15 @@ class TrainingArguments:
     wandb_job_type: str = field(
         default="train",
         metadata={"help": "The name of the wandb job type."},
+    )
+
+    push_to_hub: bool = field(
+        default=False,
+        metadata={"help": "Push trained model to Hugging Face Hub."},
+    )
+    hub_token: str = field(
+        default=None,
+        metadata={"help": "The token to use to push to Hugging Face Hub."},
     )
 
     assert_TPU_available: bool = field(
@@ -587,6 +598,13 @@ def main():
             job_type=training_args.wandb_job_type,
             config=flat_args(model_args, data_args, training_args),
         )
+
+        # Initialize HF Hub repo
+        if training_args.push_to_hub:
+            repo_id = create_repo(
+                repo_id=Path(training_args.output_dir).name, exist_ok=True, token=training_args.hub_token
+            ).repo_id
+
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name)
@@ -1506,6 +1524,14 @@ def main():
             state.update(step=step, samples=samples, opt_state_step=opt_state_step)
             run_save_model(params, opt_state)
 
+        # push to hub
+        if jax.process_index() == 0 and training_args.push_to_hub:
+            upload_folder(
+                repo_id=repo_id,
+                folder_path=training_args.output_dir,
+                commit_message="End of training",
+                ignore_patterns=["step_*", "epoch_*"],
+            )
 
 if __name__ == "__main__":
     main()
