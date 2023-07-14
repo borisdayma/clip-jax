@@ -26,7 +26,7 @@ import numpy as np
 from flax.linen import combine_masks, dot_product_attention
 from flax.linen import partitioning as nn_partitioning
 from flax.linen.linear import DenseGeneral, DotGeneralT, PrecisionLike
-from flax.linen.module import Module, compact, merge_param
+from flax.linen.module import merge_param
 from flax.linen.partitioning import ScanIn
 
 remat = nn_partitioning.remat
@@ -205,7 +205,7 @@ class CLIPVisionEmbeddings(nn.Module):
     use_bias: bool
     patch_size: int
     position_embedding_type: str  # "absolute" or "sincos2d"
-    use_cls_token: bool
+    pool_type: str  # "tok", "gap", "map" per google-research/big_vision
     dtype: Dtype
 
     @nn.compact
@@ -243,7 +243,7 @@ class CLIPVisionEmbeddings(nn.Module):
             raise ValueError(f"Unknown position embedding type {self.position_embedding_type}")
         embeddings = patch_embeds + position_embeds
         embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
-        if self.use_cls_token:
+        if self.pool_type == "tok":
             cls_token = self.param(
                 "cls_token",
                 nn.with_logical_partitioning(nn.initializers.zeros_init(), (None, None, "embed")),
@@ -285,7 +285,7 @@ class CLIPTextEmbeddings(nn.Module):
         return embeddings
 
 
-class MultiHeadDotProductAttention(Module):
+class MultiHeadDotProductAttention(nn.Module):
     """
     Adapted from nn.MultiHeadDotProductAttention:
     * - support use_rotary
@@ -310,7 +310,7 @@ class MultiHeadDotProductAttention(Module):
     use_rotary: bool = False
     max_length: Optional[int] = None  # required if use_rotary
 
-    @compact
+    @nn.compact
     def __call__(
         self, inputs_q: Array, inputs_kv: Array, mask: Optional[Array] = None, deterministic: Optional[bool] = None
     ):
@@ -445,6 +445,62 @@ class MultiHeadDotProductAttention(Module):
                 name="out",  # type: ignore[call-arg]
             )(x)
             return out
+
+
+class MAPHead(nn.Module):
+    """
+    Multihead Attention Pooling
+    Adapted from google-reasearch/big_vision
+    """
+
+    mlp_dim: int
+    num_heads: int
+    ln_type: str
+    dtype: Any
+    use_bias: bool
+    force_scale: bool
+    use_rmsnorm: bool
+    activations: Sequence[Union[str, Callable]]
+    attention_dropout: float
+    mlp_dropout_rate: float
+
+    @nn.compact
+    def __call__(self, inputs, deterministic: bool = False):
+        batch, length, embed_dim = inputs.shape
+        probe = self.param(
+            "probe",
+            nn.with_logical_partitioning(nn.initializers.xavier_uniform(), (None, None, "embed")),
+            (1, 1, embed_dim),
+        )
+        probe = jnp.tiile(probe, [batch, 1, 1])
+        probe = nn.with_logical_constraint(probe, ("batch", None, "embed"))
+        x = MultiHeadDotProductAttention(
+            num_heads=self.num_heads,
+            dtype=self.dtype,
+            deterministic=deterministic,
+            use_bias=self.use_bias,
+            use_rotary=False,
+            max_length=None,
+            dropout_rate=self.attention_dropout,
+            decode=False,
+            name="attention",
+        )(inputs_q=probe, inputs_kv=x, mask=None, deterministic=deterministic)
+        x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
+        y = CLIPMLP(
+            mlp_dim=self.mlp_dim,
+            ln_type=self.ln_type,
+            activations=self.activations,
+            mlp_dropout_rate=self.mlp_dropout_rate,
+            use_bias=self.use_bias,
+            force_scale=self.force_scale,
+            use_rmsnorm=self.use_rmsnorm,
+            dtype=self.dtype,
+            name="mlp",
+        )(x, deterministic=deterministic)
+        y = nn.with_logical_constraint(y, ("batch", "length", "embed"))
+        x = x + y
+        x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
+        return x[:, 0]
 
 
 class CLIPMLP(nn.Module):
@@ -791,7 +847,7 @@ class CLIPVisionTransformer(nn.Module):
     force_scale: bool = False
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
-    use_cls_token: bool = False
+    pool_type: str  # "tok", "gap", "map" per google-research/big_vision
     unroll: int = 100  # unroll scan layers
     gradient_checkpointing: bool = True
 
@@ -816,7 +872,7 @@ class CLIPVisionTransformer(nn.Module):
             use_bias=self.use_bias,
             patch_size=self.patch_size,
             position_embedding_type=self.position_embedding_type,
-            use_cls_token=self.use_cls_token,
+            pool_type=self.pool_type,
             dtype=dtype,
             name="embeddings",
         )(pixel_values)
@@ -857,10 +913,10 @@ class CLIPVisionTransformer(nn.Module):
         last_hidden_state = encoder_outputs["last_hidden_state"]
         last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
-        if self.use_cls_token:
+        if self.pool_type == "tok":
             pooled_output = last_hidden_state[:, 0, :]
 
-        else:
+        elif self.pool_type == "gap":
             # mean pool - jnp.mean -> leads to large memory consumption
             # pooled_output = jnp.mean(last_hidden_state, axis=1)
 
@@ -871,8 +927,25 @@ class CLIPVisionTransformer(nn.Module):
                 pooled_output = pooled_output + last_hidden_state[:, i, :]
             pooled_output = pooled_output / length
 
-            # ensure correct sharding
-            pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+        elif self.pool_type == "map":
+            pooled_output = MAPHead(
+                num_heads=self.num_heads,
+                mlp_dim=self.mlp_dim,
+                ln_type=self.ln_type,
+                use_rmsnorm=self.use_rmsnorm,
+                use_bias=self.use_bias,
+                force_scale=self.force_scale,
+                activations=self.activations,
+                attention_dropout=self.attention_dropout,
+                mlp_dropout_rate=self.mlp_dropout_rate,
+                dtype=dtype,
+            )(last_hidden_state)
+
+        else:
+            raise ValueError(f"pool_type {self.pool_type} not supported.")
+
+        # ensure correct sharding
+        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         pooled_output = norm(self.use_rmsnorm)(
             dtype=dtype,
