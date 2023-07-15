@@ -203,12 +203,16 @@ class CLIPVisionEmbeddings(nn.Module):
     hidden_size: int
     use_bias: bool
     patch_size: int
-    position_embedding_type: str  # "absolute" or "sincos2d"
+    position_embedding_type: str  # "learnt" or "sincos2d"
+    position_embedding_shape: Optional[Tuple[int, int, int]]  # required if learnt
     pool_type: str  # "tok", "gap", "map" per google-research/big_vision
     dtype: Dtype
 
     @nn.compact
     def __call__(self, pixel_values):
+        assert self.position_embedding_type in ["learnt", "sincos2d"], f"Unknown position embedding type {self.position_embedding_type}"
+        if self.position_embedding_shape is not None:
+            assert self.position_embedding_type == "learnt", "position_embedding_shape only supported for learnt type."
         patch_embeds = nn.Conv(
             self.hidden_size,
             kernel_size=(self.patch_size, self.patch_size),
@@ -228,14 +232,24 @@ class CLIPVisionEmbeddings(nn.Module):
         patch_embeds = jnp.reshape(patch_embeds, (batch_size, num_patches, channels))
         patch_embeds = nn.with_logical_constraint(patch_embeds, ("batch", "length", "embed"))
         # learnt position embeddings
-        if self.position_embedding_type == "absolute":
+        if self.position_embedding_type == "learnt":
+            num_positions = num_patches
+            if self.position_embedding_shape is not None:
+                num_positions = self.position_embedding_shape[0] * self.position_embedding_shape[1]
             position_embeds = self.param(
                 "position_embeds",
                 nn.with_logical_partitioning(
                     nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, "vocab", "embed")
                 ),
-                (1, num_patches, self.hidden_size),
+                (1, num_positions, self.hidden_size),
             )
+            if num_positions != num_patches:
+                position_embeds = jnp.reshape(position_embeds, (1, self.position_embedding_shape[0], self.position_embedding_shape[1], self.hidden_size))
+                position_embeds = nn.with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
+                # interpolate
+                position_embeds = jax.image.resize(position_embeds, (height, width), method="linear")
+                position_embeds = nn.with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
+                position_embeds = jnp.reshape(position_embeds, (1, num_patches, self.hidden_size))
         elif self.position_embedding_type == "sincos2d":
             position_embeds = posemb_sincos_2d(height, width, self.hidden_size, dtype=self.dtype)
         else:
@@ -257,12 +271,12 @@ class CLIPTextEmbeddings(nn.Module):
     hidden_size: int
     vocab_size: int
     max_length: int
-    position_embedding_type: str  # "absolute" or "rotary"
+    position_embedding_type: str  # "learnt" or "rotary"
     dtype: Dtype
 
     @nn.compact
     def __call__(self, input_ids):
-        assert self.position_embedding_type in ["absolute", "rotary"]
+        assert self.position_embedding_type in ["learnt", "rotary"]
         embed_dim = self.hidden_size
         embeddings = nn.Embed(
             self.vocab_size,
@@ -273,7 +287,7 @@ class CLIPTextEmbeddings(nn.Module):
             name="embeddings",
         )(input_ids.astype("i4"))
         embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
-        if self.position_embedding_type == "absolute":
+        if self.position_embedding_type == "learnt":
             position_embeds = self.param(
                 "position_embeds",
                 nn.with_logical_partitioning(nn.initializers.normal(1 / np.sqrt(embed_dim)), (None, "vocab", "embed")),
@@ -609,7 +623,7 @@ class CLIPEncoderLayer(nn.Module):
     use_rmsnorm: bool
     ln_type: str  # "preln", "normformer"
     num_heads: int
-    position_embedding_type: str  # "absolute", "rotary"
+    position_embedding_type: str  # "learnt", "rotary"
     max_length: int
     use_causal_mask: bool
     mlp_dim: int
@@ -629,7 +643,7 @@ class CLIPEncoderLayer(nn.Module):
         deterministic: bool = True,
     ):
         assert self.ln_type in ["normformer", "preln"], f"ln_type {self.ln_type} not supported."
-        assert self.position_embedding_type in ["absolute", "rotary"]
+        assert self.position_embedding_type in ["learnt", "rotary"]
         # Self attention
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         residual = hidden_states
@@ -696,7 +710,7 @@ class CLIPEncoder(nn.Module):
     use_rmsnorm: bool
     ln_type: str  # "preln", "normformer"
     num_heads: int
-    position_embedding_type: str  # "absolute", "rotary"
+    position_embedding_type: str  # "learnt", "rotary"
     max_length: int
     use_causal_mask: bool
     mlp_dim: int
@@ -769,7 +783,7 @@ class CLIPTextTransformer(nn.Module):
     hidden_size: int
     vocab_size: int
     max_length: int
-    position_embedding_type: str  # "absolute" or "rotary"
+    position_embedding_type: str  # "learnt" or "rotary"
     num_layers: int
     use_rmsnorm: bool
     ln_type: str  # "preln", "normformer"
@@ -873,7 +887,8 @@ class CLIPVisionTransformer(nn.Module):
     num_heads: int
     use_causal_mask: bool
     mlp_dim: int
-    position_embedding_type: str = "sincos2d"  # "absolute" or "sincos2d"
+    position_embedding_type: str = "sincos2d"  # "learnt" or "sincos2d"
+    position_embedding_shape: Optional[Tuple[int, int]] = None  # e.g. (16, 16) for 256x256 images with patch 16
     dtype: str = "float32"
     activations: Sequence[Union[str, Callable]] = ("relu",)
     normalize_qk: bool = False
@@ -894,13 +909,12 @@ class CLIPVisionTransformer(nn.Module):
         dtype = jnp.dtype(self.dtype)
         batch, height, width, channels = pixel_values.shape
         assert self.position_embedding_type in [
-            "absolute",
+            "learnt",
             "sincos2d",
         ], f"position_embedding_type {self.position_embedding_type} not supported."
         assert (
             height == self.image_size and width == self.image_size and channels == 3
         ), f"Input image size ({height}*{width}) doesn't match model ({self.image_size}*{self.image_size})."
-        position_embedding_type = "absolute"  # for vision it makes more sense than rotary
         hidden_states = CLIPVisionEmbeddings(
             hidden_size=self.hidden_size,
             use_bias=self.use_bias,
@@ -925,7 +939,7 @@ class CLIPVisionTransformer(nn.Module):
             use_rmsnorm=self.use_rmsnorm,
             ln_type=self.ln_type,
             num_heads=self.num_heads,
-            position_embedding_type=position_embedding_type,
+            position_embedding_type=self.position_embedding_type,
             max_length=max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
