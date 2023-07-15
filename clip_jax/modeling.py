@@ -205,14 +205,18 @@ class CLIPVisionEmbeddings(nn.Module):
     patch_size: int
     position_embedding_type: str  # "learnt" or "sincos2d"
     position_embedding_shape: Optional[Tuple[int, int, int]]  # required if learnt
+    position_embedding_factorized: bool
     pool_type: str  # "tok", "gap", "map" per google-research/big_vision
     dtype: Dtype
 
     @nn.compact
     def __call__(self, pixel_values):
-        assert self.position_embedding_type in ["learnt", "sincos2d"], f"Unknown position embedding type {self.position_embedding_type}"
-        if self.position_embedding_shape is not None:
-            assert self.position_embedding_type == "learnt", "position_embedding_shape only supported for learnt type."
+        assert self.position_embedding_type in [
+            "learnt",
+            "sincos2d",
+        ], f"Unknown position embedding type {self.position_embedding_type}"
+        if self.position_embedding_shape is not None or self.position_embedding_factorized:
+            assert self.position_embedding_type == "learnt", f"Position embedding must be learnt."
         patch_embeds = nn.Conv(
             self.hidden_size,
             kernel_size=(self.patch_size, self.patch_size),
@@ -231,25 +235,62 @@ class CLIPVisionEmbeddings(nn.Module):
         num_patches = height * width
         patch_embeds = jnp.reshape(patch_embeds, (batch_size, num_patches, channels))
         patch_embeds = nn.with_logical_constraint(patch_embeds, ("batch", "length", "embed"))
-        # learnt position embeddings
         if self.position_embedding_type == "learnt":
             num_positions = num_patches
+            position_height, position_width = height, width
             if self.position_embedding_shape is not None:
                 num_positions = self.position_embedding_shape[0] * self.position_embedding_shape[1]
-            position_embeds = self.param(
-                "position_embeds",
-                nn.with_logical_partitioning(
-                    nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, "vocab", "embed")
-                ),
-                (1, num_positions, self.hidden_size),
-            )
-            if num_positions != num_patches:
-                position_embeds = jnp.reshape(position_embeds, (1, self.position_embedding_shape[0], self.position_embedding_shape[1], self.hidden_size))
-                position_embeds = nn.with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
-                # interpolate
-                position_embeds = jax.image.resize(position_embeds, (height, width), method="linear")
-                position_embeds = nn.with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
-                position_embeds = jnp.reshape(position_embeds, (1, num_patches, self.hidden_size))
+                position_height, position_width = self.position_embedding_shape[0], self.position_embedding_shape[1]
+            if self.position_embedding_factorized:
+                position_embeds_height = self.param(
+                    "position_embeds_height",
+                    nn.with_logical_partitioning(
+                        nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, "height", "embed")
+                    ),
+                    (1, position_height, self.hidden_size),
+                )
+                position_embeds_width = self.param(
+                    "position_embeds_width",
+                    nn.with_logical_partitioning(
+                        nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, "width", "embed")
+                    ),
+                    (1, position_width, self.hidden_size),
+                )
+                if position_height != height:
+                    # interpolate
+                    position_embeds_height = jax.image.resize(position_embeds, (height,), method="linear")
+                    position_embeds_height = nn.with_logical_constraint(
+                        position_embeds_height, ("batch", "height", "embed")
+                    )
+                if position_width != width:
+                    # interpolate
+                    position_embeds_width = jax.image.resize(position_embeds, (width,), method="linear")
+                    position_embeds_width = nn.with_logical_constraint(
+                        position_embeds_width, ("batch", "width", "embed")
+                    )
+                # make it 2d
+                position_embeds_height = position_embeds[:, :, None, :]
+                position_embeds_width = position_embeds[:, None, :, :]
+                position_embeds = position_embeds_height + position_embeds_width
+                assert position_embeds.shape == (batch_size, height, width, self.hidden_size)
+            else:
+                position_embeds = self.param(
+                    "position_embeds",
+                    nn.with_logical_partitioning(
+                        nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, "vocab", "embed")
+                    ),
+                    (1, num_positions, self.hidden_size),
+                )
+                if num_positions != num_patches:
+                    position_embeds = jnp.reshape(
+                        position_embeds,
+                        (1, self.position_embedding_shape[0], self.position_embedding_shape[1], self.hidden_size),
+                    )
+                    position_embeds = nn.with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
+                    # interpolate
+                    position_embeds = jax.image.resize(position_embeds, (height, width), method="linear")
+                    position_embeds = nn.with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
+                    position_embeds = jnp.reshape(position_embeds, (1, num_patches, self.hidden_size))
         elif self.position_embedding_type == "sincos2d":
             position_embeds = posemb_sincos_2d(height, width, self.hidden_size, dtype=self.dtype)
         else:
@@ -878,7 +919,6 @@ class CLIPTextTransformer(nn.Module):
 
 
 class CLIPVisionTransformer(nn.Module):
-    image_size: int
     hidden_size: int
     patch_size: int
     num_layers: int
@@ -889,6 +929,7 @@ class CLIPVisionTransformer(nn.Module):
     mlp_dim: int
     position_embedding_type: str = "sincos2d"  # "learnt" or "sincos2d"
     position_embedding_shape: Optional[Tuple[int, int]] = None  # e.g. (16, 16) for 256x256 images with patch 16
+    position_embedding_factorized: bool = False
     dtype: str = "float32"
     activations: Sequence[Union[str, Callable]] = ("relu",)
     normalize_qk: bool = False
@@ -908,18 +949,17 @@ class CLIPVisionTransformer(nn.Module):
     ):
         dtype = jnp.dtype(self.dtype)
         batch, height, width, channels = pixel_values.shape
-        assert self.position_embedding_type in [
-            "learnt",
-            "sincos2d",
-        ], f"position_embedding_type {self.position_embedding_type} not supported."
-        assert (
-            height == self.image_size and width == self.image_size and channels == 3
-        ), f"Input image size ({height}*{width}) doesn't match model ({self.image_size}*{self.image_size})."
+        if height == self.image_size and width == self.image_size and channels == 3:
+            print(
+                f"Warning: Input image size ({height}*{width}) doesn't match model ({self.image_size}*{self.image_size})."
+            )
         hidden_states = CLIPVisionEmbeddings(
             hidden_size=self.hidden_size,
             use_bias=self.use_bias,
             patch_size=self.patch_size,
             position_embedding_type=self.position_embedding_type,
+            position_embedding_shape=self.position_embedding_shape,
+            position_embedding_factorized=self.position_embedding_factorized,
             pool_type=self.pool_type,
             dtype=dtype,
             name="embeddings",
