@@ -23,9 +23,8 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
-from flax.linen import combine_masks, dot_product_attention
 from flax.linen import partitioning as nn_partitioning
-from flax.linen.linear import DenseGeneral, DotGeneralT, PrecisionLike
+from flax.linen.linear import DotGeneralT, PrecisionLike
 from flax.linen.module import merge_param
 from flax.linen.partitioning import ScanIn
 
@@ -288,7 +287,6 @@ class CLIPTextEmbeddings(nn.Module):
 class MultiHeadDotProductAttention(nn.Module):
     """
     Adapted from nn.MultiHeadDotProductAttention:
-    * - support use_rotary
     """
 
     num_heads: int
@@ -303,12 +301,16 @@ class MultiHeadDotProductAttention(nn.Module):
     kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_kernel_init
     bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = nn.initializers.zeros_init()
     use_bias: bool = True
-    attention_fn: Callable[..., Array] = dot_product_attention
+    attention_fn: Callable[..., Array] = nn.dot_product_attention
     decode: bool = False
     qkv_dot_general: DotGeneralT = jax.lax.dot_general
     out_dot_general: DotGeneralT = jax.lax.dot_general
+    # custom config
     use_rotary: bool = False
     max_length: Optional[int] = None  # required if use_rotary
+    embed_dim_name: str = "embed"
+    normalize_qk: bool = False
+    kernel_init_out: Optional[Callable[[PRNGKey, Shape, Dtype], Array]] = nn.initializers.zeros_init()
 
     @nn.compact
     def __call__(
@@ -342,12 +344,12 @@ class MultiHeadDotProductAttention(nn.Module):
 
         with jax.profiler.TraceAnnotation("Attention_Block"):
             dense = functools.partial(
-                DenseGeneral,
+                nn.DenseGeneral,
                 axis=-1,
                 dtype=self.dtype,
                 param_dtype=self.param_dtype,
                 features=(self.num_heads, head_dim),
-                kernel_init=nn.with_logical_partitioning(self.kernel_init, ("embed", "heads", "kv")),
+                kernel_init=nn.with_logical_partitioning(self.kernel_init, (self.embed_dim_name, "heads", "kv")),
                 bias_init=nn.with_logical_partitioning(self.bias_init, ("kv",)),
                 use_bias=self.use_bias,
                 precision=self.precision,
@@ -360,6 +362,25 @@ class MultiHeadDotProductAttention(nn.Module):
                 dense(name="key")(inputs_kv),
                 dense(name="value")(inputs_kv),
             )
+            if self.normalize_qk:
+                query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+                key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+                query = norm(use_rmsnorm=True)(
+                    dtype=self.dtype,
+                    use_bias=False,
+                    use_scale=True,
+                    scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("kv",)),
+                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("kv",)),
+                    name="norm_query",
+                )(query)
+                key = norm(use_rmsnorm=True)(
+                    dtype=self.dtype,
+                    use_bias=False,
+                    use_scale=True,
+                    scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("kv",)),
+                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("kv",)),
+                    name="norm_key",
+                )(key)
 
             # ensure correct sharding
             query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
@@ -371,6 +392,9 @@ class MultiHeadDotProductAttention(nn.Module):
                 # source: https://github.com/google-research/jestimator/blob/main/jestimator/models/rope/modeling.py
                 sin, cos = generate_fixed_pos_embedding(head_dim, self.max_length)
                 query, key = apply_rotary_embedding(query, key, cos, sin)
+                # convert to correct type
+                query = query.astype(self.dtype)
+                key = key.astype(self.dtype)
 
                 # ensure sharding
                 query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
@@ -405,7 +429,7 @@ class MultiHeadDotProductAttention(nn.Module):
                     # our single query position should only attend to those key
                     # positions that have already been generated and cached,
                     # not the remaining zero elements.
-                    mask = combine_masks(
+                    mask = nn.combine_masks(
                         mask,
                         jnp.broadcast_to(jnp.arange(max_length) <= cur_index, tuple(batch_dims) + (1, 1, max_length)),
                     )
@@ -432,11 +456,12 @@ class MultiHeadDotProductAttention(nn.Module):
                 precision=self.precision,
             )  # pytype: disable=wrong-keyword-args
             # back to the original inputs dimensions
-            out = DenseGeneral(
+            kernel_init_out = self.kernel_init_out if self.kernel_init_out is not None else self.kernel_init
+            out = nn.DenseGeneral(
                 features=features,
                 axis=(-2, -1),
-                kernel_init=nn.with_logical_partitioning(self.kernel_init, ("heads", "kv", "embed")),
-                bias_init=nn.with_logical_partitioning(self.bias_init, ("embed",)),
+                kernel_init=nn.with_logical_partitioning(kernel_init_out, ("heads", "kv", self.embed_dim_name)),
+                bias_init=nn.with_logical_partitioning(self.bias_init, (self.embed_dim_name,)),
                 use_bias=self.use_bias,
                 dtype=self.dtype,
                 param_dtype=self.param_dtype,
@@ -460,6 +485,7 @@ class MAPHead(nn.Module):
     use_bias: bool
     force_scale: bool
     use_rmsnorm: bool
+    normalize_qk: bool
     activations: Sequence[Union[str, Callable]]
     attention_dropout: float
     mlp_dropout_rate: float
@@ -483,6 +509,7 @@ class MAPHead(nn.Module):
             max_length=None,
             dropout_rate=self.attention_dropout,
             decode=False,
+            normalize_qk=self.normalize_qk,
             name="attention",
         )(inputs_q=probe, inputs_kv=x, mask=None, deterministic=deterministic)
         x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
@@ -534,12 +561,12 @@ class CLIPMLP(nn.Module):
             activations = []
             for idx, act_fn in enumerate(self.activations):
                 dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
-                x = DenseGeneral(
+                x = nn.DenseGeneral(
                     self.mlp_dim,
                     dtype=self.dtype,
                     use_bias=self.use_bias,
                     kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "mlp")),
-                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("mlp",)),
+                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp",)),
                     name=dense_name,
                 )(inputs)
                 x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
@@ -566,11 +593,11 @@ class CLIPMLP(nn.Module):
                 x, deterministic=deterministic
             )  # Broadcast along length.
             x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
-            output = DenseGeneral(
+            output = nn.DenseGeneral(
                 embed_dim,
                 dtype=self.dtype,
                 use_bias=self.use_bias,
-                kernel_init=nn.with_logical_partitioning(default_kernel_init, ("mlp", "embed")),
+                kernel_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp", "embed")),
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("embed",)),
                 name="wo",
             )(x)
@@ -588,6 +615,7 @@ class CLIPEncoderLayer(nn.Module):
     mlp_dim: int
     dtype: Dtype = jnp.float32
     activations: Sequence[Union[str, Callable]] = ("relu",)
+    normalize_qk: bool = False
     use_bias: bool = False
     force_scale: bool = False
     attention_dropout: float = 0.0
@@ -627,6 +655,7 @@ class CLIPEncoderLayer(nn.Module):
             max_length=self.max_length,
             dropout_rate=self.attention_dropout,
             decode=self.use_causal_mask,
+            normalize_qk=self.normalize_qk,
             name="attention",
         )(inputs_q=hidden_states, inputs_kv=hidden_states, mask=attention_mask, deterministic=deterministic)
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
@@ -673,6 +702,7 @@ class CLIPEncoder(nn.Module):
     mlp_dim: int
     dtype: Dtype = jnp.float32
     activations: Sequence[Union[str, Callable]] = ("relu",)
+    normalize_qk: bool = False
     use_bias: bool = False
     force_scale: bool = False
     attention_dropout: float = 0.0
@@ -719,6 +749,7 @@ class CLIPEncoder(nn.Module):
             mlp_dim=self.mlp_dim,
             dtype=self.dtype,
             activations=self.activations,
+            normalize_qk=self.normalize_qk,
             use_bias=self.use_bias,
             force_scale=self.force_scale,
             attention_dropout=self.attention_dropout,
@@ -747,6 +778,7 @@ class CLIPTextTransformer(nn.Module):
     mlp_dim: int
     dtype: Dtype = jnp.float32
     activations: Sequence[Union[str, Callable]] = ("relu",)
+    normalize_qk: bool = False
     use_bias: bool = False
     force_scale: bool = False
     attention_dropout: float = 0.0
@@ -784,6 +816,7 @@ class CLIPTextTransformer(nn.Module):
             mlp_dim=self.mlp_dim,
             dtype=dtype,
             activations=self.activations,
+            normalize_qk=self.normalize_qk,
             use_bias=self.use_bias,
             force_scale=self.force_scale,
             attention_dropout=self.attention_dropout,
@@ -843,6 +876,7 @@ class CLIPVisionTransformer(nn.Module):
     position_embedding_type: str = "sincos2d"  # "absolute" or "sincos2d"
     dtype: str = "float32"
     activations: Sequence[Union[str, Callable]] = ("relu",)
+    normalize_qk: bool = False
     use_bias: bool = False
     force_scale: bool = False
     attention_dropout: float = 0.0
@@ -897,6 +931,7 @@ class CLIPVisionTransformer(nn.Module):
             mlp_dim=self.mlp_dim,
             dtype=dtype,
             activations=self.activations,
+            normalize_qk=self.normalize_qk,
             use_bias=self.use_bias,
             force_scale=self.force_scale,
             attention_dropout=self.attention_dropout,
@@ -936,6 +971,7 @@ class CLIPVisionTransformer(nn.Module):
                 use_bias=self.use_bias,
                 force_scale=self.force_scale,
                 activations=self.activations,
+                normalize_qk=self.normalize_qk,
                 attention_dropout=self.attention_dropout,
                 mlp_dropout_rate=self.mlp_dropout_rate,
                 dtype=dtype,
