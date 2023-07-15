@@ -60,6 +60,27 @@ def _convert_to_activation_function(fn_or_string: Union[str, Callable]) -> Calla
         raise ValueError("don't know how to convert %s to an activation function" % (fn_or_string,))
 
 
+def _interpolate(idxs, values):
+    """
+    Interpolate values at given indices.
+
+    Args:
+        idxs: should be fractional, between 0 and 1
+        values: values to interpolate, assumed to be evenly spaced between 0 and 1
+    """
+    assert idxs.ndim == 1
+    assert values.ndim == 1
+    idxs = idxs * (values.shape[0] - 1)
+    idxs_floor = jnp.floor(idxs)
+    idxs_ceil = jnp.ceil(idxs)
+    idxs_frac = idxs - idxs_floor.astype(jnp.float32)
+    idxs_floor = idxs_floor.astype(jnp.int32)
+    idxs_ceil = idxs_ceil.astype(jnp.int32)
+    values_floor = jnp.take_along_axis(values, idxs_floor, axis=0)
+    values_ceil = jnp.take_along_axis(values, idxs_ceil, axis=0)
+    return (1 - idxs_frac) * values_floor + idxs_frac * values_ceil
+
+
 # sincos2d position - Source: https://github.com/google-research/big_vision
 
 
@@ -286,10 +307,14 @@ class CLIPVisionEmbeddings(nn.Module):
                         position_embeds,
                         (1, self.position_embedding_shape[0], self.position_embedding_shape[1], self.hidden_size),
                     )
-                    position_embeds = nn.with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
+                    position_embeds = nn.with_logical_constraint(
+                        position_embeds, ("batch", "height", "width", "embed")
+                    )
                     # interpolate
                     position_embeds = jax.image.resize(position_embeds, (height, width), method="linear")
-                    position_embeds = nn.with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
+                    position_embeds = nn.with_logical_constraint(
+                        position_embeds, ("batch", "height", "width", "embed")
+                    )
                     position_embeds = jnp.reshape(position_embeds, (1, num_patches, self.hidden_size))
         elif self.position_embedding_type == "sincos2d":
             position_embeds = posemb_sincos_2d(height, width, self.hidden_size, dtype=self.dtype)
