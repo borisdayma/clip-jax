@@ -7,6 +7,10 @@ This repository is used to train custom [CLIP models](https://arxiv.org/abs/2103
 - training with constrastive loss or [chunked sigmoid loss](https://arxiv.org/abs/2303.15343)
 - downstream fine-tuning
 
+TODO:
+
+- [ ] training with sequence packing per [NaViT](https://arxiv.org/abs/2307.06304)
+
 ## Installation
 
 ```bash
@@ -64,7 +68,9 @@ python train.py \
 
 Refer to [`utils/demo.ipynb`](utils/demo.ipynb).
 
-TODO: update demo
+TODO:
+
+- [ ] update demo
 
 ### Downstream tasks
 
@@ -99,6 +105,28 @@ TODO:
       author={Xiaohua Zhai and Basil Mustafa and Alexander Kolesnikov and Lucas Beyer},
       year={2023},
       eprint={2303.15343},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV}
+}
+```
+
+```bibtex
+@misc{zhai2022scaling,
+      title={Scaling Vision Transformers}, 
+      author={Xiaohua Zhai and Alexander Kolesnikov and Neil Houlsby and Lucas Beyer},
+      year={2022},
+      eprint={2106.04560},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV}
+}
+```
+
+```bibtex
+@misc{dehghani2023patch,
+      title={Patch n' Pack: NaViT, a Vision Transformer for any Aspect Ratio and Resolution}, 
+      author={Mostafa Dehghani and Basil Mustafa and Josip Djolonga and Jonathan Heek and Matthias Minderer and Mathilde Caron and Andreas Steiner and Joan Puigcerver and Robert Geirhos and Ibrahim Alabdulmohsin and Avital Oliver and Piotr Padlewski and Alexey Gritsenko and Mario Lučić and Neil Houlsby},
+      year={2023},
+      eprint={2307.06304},
       archivePrefix={arXiv},
       primaryClass={cs.CV}
 }
