@@ -68,7 +68,6 @@ def _interpolate(idxs, values):
         idxs: should be fractional, between 0 and 1
         values: values to interpolate, assumed to be evenly spaced between 0 and 1
     """
-    assert idxs.ndim == 1
     idxs = idxs * (values.shape[0] - 1)
     idxs_floor = jnp.floor(idxs)
     idxs_ceil = jnp.ceil(idxs)
@@ -77,7 +76,7 @@ def _interpolate(idxs, values):
     idxs_ceil = idxs_ceil.astype(jnp.int32)
     values_floor = jnp.take(values, idxs_floor, axis=0)
     values_ceil = jnp.take(values, idxs_ceil, axis=0)
-    idxs_frac = idxs_frac[:, None]
+    idxs_frac = idxs_frac[..., None]
     return (1 - idxs_frac) * values_floor + idxs_frac * values_ceil
 
 
