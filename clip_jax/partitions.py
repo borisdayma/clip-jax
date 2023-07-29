@@ -5,7 +5,11 @@ import threading
 import jax
 from flax.core.frozen_dict import freeze
 from flax.traverse_util import flatten_dict, unflatten_dict
-from jax.experimental import PartitionSpec as P
+
+try:
+    from jax.sharding import PartitionSpec as P
+except:
+    from jax.experimental import PartitionSpec as P
 
 # utils adapted from https://github.com/google-research/google-research/blob/master/flax_models/t5x/partitions.py
 # Sentinels
@@ -252,7 +256,6 @@ def logical_to_mesh_axes(
     array_dim_names,
     rules=None,
 ):
-
     result = _logical_to_mesh_axes(array_dim_names, rules)
     if result is None:
         return None
