@@ -961,7 +961,7 @@ class CLIPVisionTransformer(nn.Module):
     force_scale: bool = False
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
-    pool_type: str  # "tok", "gap", "map" per google-research/big_vision
+    pool_type: str = "map"  # "tok", "gap", "map" per google-research/big_vision
     unroll: int = 100  # unroll scan layers
     gradient_checkpointing: bool = True
 
