@@ -688,7 +688,7 @@ class CLIPEncoderLayer(nn.Module):
     use_rmsnorm: bool
     ln_type: str  # "preln", "normformer"
     num_heads: int
-    position_embedding_type: str  # "learnt", "rotary"
+    position_embedding_type: str  # "learnt", "rotary" or "sincos2d"
     max_length: int
     use_causal_mask: bool
     mlp_dim: int
@@ -708,7 +708,11 @@ class CLIPEncoderLayer(nn.Module):
         deterministic: bool = True,
     ):
         assert self.ln_type in ["normformer", "preln"], f"ln_type {self.ln_type} not supported."
-        assert self.position_embedding_type in ["learnt", "rotary"]
+        assert self.position_embedding_type in [
+            "learnt",
+            "rotary",
+            "sincos2d",
+        ], f"position_embedding_type {self.position_embedding_type} not supported."
         # Self attention
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         residual = hidden_states
@@ -943,6 +947,7 @@ class CLIPTextTransformer(nn.Module):
 
 
 class CLIPVisionTransformer(nn.Module):
+    image_size: int
     hidden_size: int
     patch_size: int
     num_layers: int
@@ -961,9 +966,12 @@ class CLIPVisionTransformer(nn.Module):
     force_scale: bool = False
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
-    pool_type: str = "map"  # "tok", "gap", "map" per google-research/big_vision
+    pool_type: str = "gap"  # "tok", "gap", "map" per google-research/big_vision
     unroll: int = 100  # unroll scan layers
     gradient_checkpointing: bool = True
+
+    # TODO: remove (legacy use)
+    use_cls_token: bool = False
 
     @nn.compact
     def __call__(
@@ -973,7 +981,7 @@ class CLIPVisionTransformer(nn.Module):
     ):
         dtype = jnp.dtype(self.dtype)
         batch, height, width, channels = pixel_values.shape
-        if height == self.image_size and width == self.image_size and channels == 3:
+        if not (height == self.image_size and width == self.image_size and channels == 3):
             print(
                 f"Warning: Input image size ({height}*{width}) doesn't match model ({self.image_size}*{self.image_size})."
             )
