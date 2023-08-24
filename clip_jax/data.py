@@ -94,7 +94,7 @@ class Dataset:
             img_decoded = tfio.image.decode_image(image)[..., :3]
             img_height, img_width = img_decoded.shape[:2]
             # resize image
-            if seed is not None and self.min_side is not None:
+            if self.min_side is not None:
                 # draw random side length
                 if self.min_side == self.max_side:
                     side_length = self.min_side
@@ -224,14 +224,19 @@ class Dataset:
                     ds = ds.map(_center_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 # batch, normalize and prefetch
-                ds = ds.batch(batch_size, drop_remainder=True)
+                if not (augment and self.pack_length > 0):
+                    # we may have variable size and aspect ratio so need manual packing
+                    ds = ds.batch(batch_size, drop_remainder=True)
                 ds = ds.map(_normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
                 setattr(self, dataset, ds)
 
     @property
     def train(self):
-        return self._train.as_numpy_iterator()
+        if self.pack_length > 0:
+            raise NotImplementedError("Packing not implemented")
+        else:
+            return self._train.as_numpy_iterator()
 
     @property
     def valid(self):
