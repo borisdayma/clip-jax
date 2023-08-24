@@ -15,7 +15,7 @@ class Dataset:
     valid_folder: str = None
     train_batch_size: int = 64
     valid_batch_size: int = 64
-    image_size: int = 0  # crops image, no cropping if set to 0, (data should be at right dimensions)
+    image_crop_size: int = 0  # crops image, no cropping if set to 0, (data should be at right dimensions)
     min_original_image_size: int = None
     max_original_aspect_ratio: float = None
     seed_dataset: int = None
@@ -24,6 +24,7 @@ class Dataset:
     key_caption: str = "caption"  # name of key containing captions
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
+    pack_length: int = 0  # if >0, pack multiple images per batch dimension per NaVit
     _train: tf.data.Dataset = field(init=False)
     _valid: tf.data.Dataset = field(init=False)
     rng: tf.random.Generator = field(init=False)
@@ -84,7 +85,9 @@ class Dataset:
             # create a new seed
             new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
             # apply random crop
-            return tf.image.stateless_random_crop(image, size=[self.image_size, self.image_size, 3], seed=new_seed)
+            return tf.image.stateless_random_crop(
+                image, size=[self.image_crop_size, self.image_crop_size, 3], seed=new_seed
+            )
 
         # augmentation wrapper
         def _augment_wrapper(image, caption):
@@ -94,7 +97,7 @@ class Dataset:
         # center crop (for validation)
         def _center_crop(image, caption):
             return (
-                tf.image.resize_with_crop_or_pad(image, self.image_size, self.image_size),
+                tf.image.resize_with_crop_or_pad(image, self.image_crop_size, self.image_crop_size),
                 caption,
             )
 
@@ -174,12 +177,12 @@ class Dataset:
 
                 if augment:
                     ds = ds.shuffle(1000)
-                    if self.image_size:
+                    if self.image_crop_size:
                         ds = ds.map(
                             _augment_wrapper,
                             num_parallel_calls=tf.data.experimental.AUTOTUNE,
                         )
-                elif self.image_size:
+                elif self.image_crop_size:
                     ds = ds.map(_center_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 # batch, normalize and prefetch

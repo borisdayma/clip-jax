@@ -381,7 +381,7 @@ class DataTrainingArguments:
     valid_folder: Optional[str] = field(
         default=None, metadata={"help": "Path to the root validation directory which contains tfrecords."}
     )
-    image_size: Optional[int] = field(
+    image_crop_size: Optional[int] = field(
         default=None,
         metadata={"help": "The dimension images need to be cropped to, if needed."},
     )
