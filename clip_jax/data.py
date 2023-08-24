@@ -18,6 +18,8 @@ class Dataset:
     image_crop_size: int = 0  # crops image, no cropping if set to 0, (data should be at right dimensions)
     min_original_image_size: int = None
     max_original_aspect_ratio: float = None
+    min_side: int = None  # resize image between min_side and max_side
+    max_side: int = None
     seed_dataset: int = None
     format: str = "rgb"  # rgb or lab
     key_image: str = "webp"  # name of key containing image
@@ -35,6 +37,12 @@ class Dataset:
     def __post_init__(self):
         # verify valid args
         assert self.format in ["rgb", "lab"], f"Invalid format: {self.format}"
+
+        # check side
+        assert (self.min_side is None and self.max_side is None) or (
+            self.min_side is not None and self.max_side is not None
+        ), "min_side and max_side must be both set or both not set"
+        assert self.min_side is None or self.min_side < self.max_side, "min_side must be smaller than max_side"
 
         # define rng
         if self.seed_dataset is None:
@@ -81,7 +89,32 @@ class Dataset:
             # we can combine parsing functions into one
             return _parse_image(*_parse_function(example_proto))
 
-        def _augment(image, seed):
+        def _augment_resize(image, seed):
+            # decode image
+            img_decoded = tfio.image.decode_image(image)[..., :3]
+            img_height, img_width = img_decoded.shape[:2]
+            # resize image
+            if seed is not None and self.min_side is not None:
+                # draw random side length
+                if self.min_side == self.max_side:
+                    side_length = self.min_side
+                else:
+                    side_length = tf.random.uniform([], self.min_side, self.max_side, dtype=tf.int32, seed=seed)
+                # resize image such that smallest side is side_length
+                scale_factor = tf.cast(side_length, tf.float32) / tf.cast(
+                    tf.minimum(img_height, img_width), tf.float32
+                )
+                img_decoded = tf.image.resize(
+                    img_decoded, tf.cast(scale_factor * tf.cast([img_height, img_width], tf.float32), tf.int32)
+                )
+            return img_decoded
+
+        # augmentation wrapper
+        def _augment_resize_wrapper(image, caption):
+            seed = self.rng.make_seeds(2)[0]
+            return _augment_resize(image, seed), caption
+
+        def _augment_crop(image, seed):
             # create a new seed
             new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
             # apply random crop
@@ -90,9 +123,9 @@ class Dataset:
             )
 
         # augmentation wrapper
-        def _augment_wrapper(image, caption):
+        def _augment_crop_wrapper(image, caption):
             seed = self.rng.make_seeds(2)[0]
-            return _augment(image, seed), caption
+            return _augment_crop(image, seed), caption
 
         # center crop (for validation)
         def _center_crop(image, caption):
@@ -177,9 +210,14 @@ class Dataset:
 
                 if augment:
                     ds = ds.shuffle(1000)
+                    if self.min_side is not None:
+                        ds = ds.map(
+                            _augment_resize_wrapper,
+                            num_parallel_calls=tf.data.experimental.AUTOTUNE,
+                        )
                     if self.image_crop_size:
                         ds = ds.map(
-                            _augment_wrapper,
+                            _augment_crop_wrapper,
                             num_parallel_calls=tf.data.experimental.AUTOTUNE,
                         )
                 elif self.image_crop_size:
