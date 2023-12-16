@@ -15,7 +15,8 @@ class Dataset:
     valid_folder: str = None
     train_batch_size: int = 64
     valid_batch_size: int = 64
-    image_size: int = 0  # crops image, no cropping if set to 0, (data should be at right dimensions)
+    image_crop_size: int = None  # crops image, no cropping if set to 0, (data should be at right dimensions)
+    image_crop_resize: int = None  # resize cropped image to a fixed size
     min_original_image_size: int = None
     max_original_aspect_ratio: float = None
     seed_dataset: int = None
@@ -80,21 +81,30 @@ class Dataset:
             # we can combine parsing functions into one
             return _parse_image(*_parse_function(example_proto))
 
-        def _augment(image, seed):
+        def _augment_crop(image, seed):
             # create a new seed
             new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
             # apply random crop
-            return tf.image.stateless_random_crop(image, size=[self.image_size, self.image_size, 3], seed=new_seed)
+            return tf.image.stateless_random_crop(
+                image, size=[self.image_crop_size, self.image_crop_size, 3], seed=new_seed
+            )
 
         # augmentation wrapper
-        def _augment_wrapper(image, caption):
+        def _augment_crop_wrapper(image, caption):
             seed = self.rng.make_seeds(2)[0]
-            return _augment(image, seed), caption
+            return _augment_crop(image, seed), caption
 
         # center crop (for validation)
         def _center_crop(image, caption):
             return (
-                tf.image.resize_with_crop_or_pad(image, self.image_size, self.image_size),
+                tf.image.resize_with_crop_or_pad(image, self.image_crop_size, self.image_crop_size),
+                caption,
+            )
+
+        def _resize(image, caption):
+            # NOTE: area as we will typically be downsampling
+            return (
+                tf.image.resize(image, [self.image_crop_size, self.image_crop_size], method="area"),
                 caption,
             )
 
@@ -174,13 +184,17 @@ class Dataset:
 
                 if augment:
                     ds = ds.shuffle(1000)
-                    if self.image_size:
+                    if self.image_crop_size:
                         ds = ds.map(
-                            _augment_wrapper,
+                            _augment_crop_wrapper,
                             num_parallel_calls=tf.data.experimental.AUTOTUNE,
                         )
-                elif self.image_size:
+                elif self.image_crop_size:
                     ds = ds.map(_center_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+                # resize
+                if self.image_crop_resize:
+                    ds = ds.map(_resize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 # batch, normalize and prefetch
                 ds = ds.batch(batch_size, drop_remainder=True)
