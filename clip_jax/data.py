@@ -15,18 +15,16 @@ class Dataset:
     valid_folder: str = None
     train_batch_size: int = 64
     valid_batch_size: int = 64
-    image_crop_size: int = 0  # crops image, no cropping if set to 0, (data should be at right dimensions)
+    image_crop_size: int = None  # crops image, no cropping if set to 0, (data should be at right dimensions)
+    image_crop_resize: int = None  # resize cropped image to a fixed size
     min_original_image_size: int = None
     max_original_aspect_ratio: float = None
-    min_side: int = None  # resize image between min_side and max_side
-    max_side: int = None
     seed_dataset: int = None
     format: str = "rgb"  # rgb or lab
     key_image: str = "webp"  # name of key containing image
     key_caption: str = "caption"  # name of key containing captions
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
-    pack_length: int = 0  # if >0, pack multiple images per batch dimension per NaVit
     _train: tf.data.Dataset = field(init=False)
     _valid: tf.data.Dataset = field(init=False)
     rng: tf.random.Generator = field(init=False)
@@ -37,12 +35,6 @@ class Dataset:
     def __post_init__(self):
         # verify valid args
         assert self.format in ["rgb", "lab"], f"Invalid format: {self.format}"
-
-        # check side
-        assert (self.min_side is None and self.max_side is None) or (
-            self.min_side is not None and self.max_side is not None
-        ), "min_side and max_side must be both set or both not set"
-        assert self.min_side is None or self.min_side < self.max_side, "min_side must be smaller than max_side"
 
         # define rng
         if self.seed_dataset is None:
@@ -89,31 +81,6 @@ class Dataset:
             # we can combine parsing functions into one
             return _parse_image(*_parse_function(example_proto))
 
-        def _augment_resize(image, seed):
-            # decode image
-            img_decoded = tfio.image.decode_image(image)[..., :3]
-            img_height, img_width = img_decoded.shape[:2]
-            # resize image
-            if self.min_side is not None:
-                # draw random side length
-                if self.min_side == self.max_side:
-                    side_length = self.min_side
-                else:
-                    side_length = tf.random.uniform([], self.min_side, self.max_side, dtype=tf.int32, seed=seed)
-                # resize image such that smallest side is side_length
-                scale_factor = tf.cast(side_length, tf.float32) / tf.cast(
-                    tf.minimum(img_height, img_width), tf.float32
-                )
-                img_decoded = tf.image.resize(
-                    img_decoded, tf.cast(scale_factor * tf.cast([img_height, img_width], tf.float32), tf.int32)
-                )
-            return img_decoded
-
-        # augmentation wrapper
-        def _augment_resize_wrapper(image, caption):
-            seed = self.rng.make_seeds(2)[0]
-            return _augment_resize(image, seed), caption
-
         def _augment_crop(image, seed):
             # create a new seed
             new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
@@ -131,6 +98,13 @@ class Dataset:
         def _center_crop(image, caption):
             return (
                 tf.image.resize_with_crop_or_pad(image, self.image_crop_size, self.image_crop_size),
+                caption,
+            )
+
+        def _resize(image, caption):
+            # NOTE: area as we will typically be downsampling
+            return (
+                tf.image.resize(image, [self.image_crop_size, self.image_crop_size], method="area"),
                 caption,
             )
 
@@ -210,11 +184,6 @@ class Dataset:
 
                 if augment:
                     ds = ds.shuffle(1000)
-                    if self.min_side is not None:
-                        ds = ds.map(
-                            _augment_resize_wrapper,
-                            num_parallel_calls=tf.data.experimental.AUTOTUNE,
-                        )
                     if self.image_crop_size:
                         ds = ds.map(
                             _augment_crop_wrapper,
@@ -223,20 +192,19 @@ class Dataset:
                 elif self.image_crop_size:
                     ds = ds.map(_center_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
+                # resize
+                if self.image_crop_resize:
+                    ds = ds.map(_resize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
                 # batch, normalize and prefetch
-                if not (augment and self.pack_length > 0):
-                    # we may have variable size and aspect ratio so need manual packing
-                    ds = ds.batch(batch_size, drop_remainder=True)
+                ds = ds.batch(batch_size, drop_remainder=True)
                 ds = ds.map(_normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
                 setattr(self, dataset, ds)
 
     @property
     def train(self):
-        if self.pack_length > 0:
-            raise NotImplementedError("Packing not implemented")
-        else:
-            return self._train.as_numpy_iterator()
+        return self._train.as_numpy_iterator()
 
     @property
     def valid(self):
