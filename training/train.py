@@ -385,6 +385,10 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "The dimension images need to be cropped to, if needed."},
     )
+    image_crop_resize: Optional[int] = field(
+        default=None,
+        metadata={"help": "The dimension cropped images need to be resized to, if needed."},
+    )
     min_original_image_size: Optional[int] = field(
         default=None,
         metadata={"help": ("The minimum size (resolution) of each original image from training" " set.")},
