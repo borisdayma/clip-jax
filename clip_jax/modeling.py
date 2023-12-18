@@ -224,7 +224,7 @@ class CLIPVisionEmbeddings(nn.Module):
     use_bias: bool
     patch_size: int
     position_embedding_type: str  # "learnt" or "sincos2d"
-    position_embedding_shape: Optional[Tuple[int, int, int]]  # required if learnt
+    position_embedding_shape: Optional[Tuple[int, int, int]]
     position_embedding_factorized: bool
     pool_type: str  # "tok", "gap", "map" per google-research/big_vision
     dtype: Dtype
@@ -577,7 +577,7 @@ class MAPHead(nn.Module):
             nn.with_logical_partitioning(nn.initializers.xavier_uniform(), (None, None, "embed")),
             (1, 1, embed_dim),
         )
-        probe = jnp.tiile(probe, [batch, 1, 1])
+        probe = jnp.tile(probe, [batch, 1, 1])
         probe = nn.with_logical_constraint(probe, ("batch", None, "embed"))
         x = MultiHeadDotProductAttention(
             num_heads=self.num_heads,
