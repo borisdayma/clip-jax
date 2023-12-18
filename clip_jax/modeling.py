@@ -849,6 +849,7 @@ class CLIPEncoder(nn.Module):
 
 
 class CLIPTextTransformer(nn.Module):
+    is_decoder: bool  # for Cappa
     hidden_size: int
     vocab_size: int
     max_length: int
@@ -996,14 +997,6 @@ class CLIPVisionTransformer(nn.Module):
             dtype=dtype,
             name="embeddings",
         )(pixel_values)
-        hidden_states = norm(self.use_rmsnorm)(
-            dtype=dtype,
-            use_bias=self.use_bias,
-            use_scale=self.force_scale,
-            scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
-            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
-            name="post_embed_norm",
-        )(hidden_states)
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         max_length = hidden_states.shape[1]
         encoder_outputs = CLIPEncoder(
