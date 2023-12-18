@@ -869,7 +869,9 @@ class CLIPTextTransformer(nn.Module):
     mlp_dropout_rate: float = 0.0
     unroll: int = 100  # unroll scan layers
     gradient_checkpointing: bool = True
-    eos_token_id: int = -1
+    eos_token_id: int = None
+    mask_token_id: int = None
+    masked_pred_prob: float = 0.75  # recommended by Cappa
     dtype: str = "float32"
 
     @nn.compact
@@ -877,8 +879,45 @@ class CLIPTextTransformer(nn.Module):
         self,
         input_ids,
         attention_mask,
+        encoder_hidden_states=None,
         deterministic: bool = True,
     ):
+        if self.is_decoder:
+            assert encoder_hidden_states is not None
+            assert self.mask_token_id is not None
+        else:
+            assert encoder_hidden_states is None
+        if self.use_causal_mask:
+            assert self.eos_token_id is not None
+
+        # decoder mode
+        if self.is_decoder and not deterministic:
+            # randomly mask tokens in some instances, adapted from google-research/big_vision
+            if self.masked_pred_prob > 0.0:
+
+                def _add_random_masks(a):
+                    # Generate random mask
+                    masking_ratio = 1  # NOTE: masking all tokens is the best per Cappa
+                    n_masked = int(masking_ratio * a.shape[1])
+                    mask_locations = jnp.zeros(a.shape[:2], dtype=jnp.int32)
+                    mask_locations = mask_locations.at[:, :n_masked].set(1)
+                    mask_locations = jax.random.permutation(
+                        self.make_rng("dropout"), mask_locations, axis=1, independent=True
+                    )
+                    # Replace mask locations with mask token index (=vocab_size)
+                    a_masked = jnp.where(mask_locations, self.mask_token_id, a)
+                    return a_masked
+
+                def where(mask, x, y):
+                    mask = mask.reshape((-1,) + (1,) * (x.ndim - 1))
+                    return jnp.where(mask, x, y)
+
+                do_masked_pred = jax.random.uniform(self.make_rng("dropout"), (len(y),)) < self.masked_pred_prob
+                y = where(do_masked_pred, _add_random_masks(y), y)  # contrarily to Cappa, we don't shift right
+                decoder_mask = where(do_masked_pred, jnp.ones_like(decoder_mask), decoder_mask)
+
+            raise NotImplementedError("TODO: implement decoder mode")
+
         dtype = jnp.dtype(self.dtype)
         hidden_states = CLIPTextEmbeddings(
             hidden_size=self.hidden_size,
