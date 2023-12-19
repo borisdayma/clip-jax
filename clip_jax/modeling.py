@@ -1015,9 +1015,6 @@ class CLIPVisionTransformer(nn.Module):
     registers: int = 0  # number of registers per "vision transformers need registers"
     gradient_checkpointing: bool = True
 
-    # TODO: remove (legacy use)
-    use_cls_token: bool = False
-
     @nn.compact
     def __call__(
         self,
