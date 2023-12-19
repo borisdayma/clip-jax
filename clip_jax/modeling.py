@@ -891,29 +891,22 @@ class CLIPTextTransformer(nn.Module):
             assert self.eos_token_id is not None
 
         # decoder mode
+        # src: adapted from google-research/big_vision
         if self.is_decoder and not deterministic:
-            # randomly mask tokens in some instances, adapted from google-research/big_vision
+            # randomly mask tokens in some instances
             if self.masked_pred_prob > 0.0:
 
                 def _add_random_masks(a):
                     # Generate random mask
-                    masking_ratio = 1  # NOTE: masking all tokens is the best per Cappa
-                    n_masked = int(masking_ratio * a.shape[1])
-                    mask_locations = jnp.zeros(a.shape[:2], dtype=jnp.int32)
-                    mask_locations = mask_locations.at[:, :n_masked].set(1)
-                    mask_locations = jax.random.permutation(
-                        self.make_rng("dropout"), mask_locations, axis=1, independent=True
-                    )
-                    # Replace mask locations with mask token index (=vocab_size)
-                    a_masked = jnp.where(mask_locations, self.mask_token_id, a)
-                    return a_masked
+                    # NOTE: masking all tokens is the best per Cappa
+                    return jnp.ones_like(a) * self.mask_token_id
 
                 def where(mask, x, y):
                     mask = mask.reshape((-1,) + (1,) * (x.ndim - 1))
                     return jnp.where(mask, x, y)
 
                 do_masked_pred = jax.random.uniform(self.make_rng("dropout"), (len(y),)) < self.masked_pred_prob
-                y = where(do_masked_pred, _add_random_masks(y), y)  # contrarily to Cappa, we don't shift right
+                y = where(do_masked_pred, _add_random_masks(y), y)
                 decoder_mask = where(do_masked_pred, jnp.ones_like(decoder_mask), decoder_mask)
 
             raise NotImplementedError("TODO: implement decoder mode")
