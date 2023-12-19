@@ -227,6 +227,7 @@ class CLIPVisionEmbeddings(nn.Module):
     position_embedding_shape: Optional[Tuple[int, int, int]]
     position_embedding_factorized: bool
     pool_type: str  # "tok", "gap", "map" per google-research/big_vision
+    registers: int
     dtype: Dtype
 
     @nn.compact
@@ -328,6 +329,16 @@ class CLIPVisionEmbeddings(nn.Module):
                 (1, 1, self.hidden_size),
             )
             embeddings = jnp.concatenate([jnp.tile(cls_token, [batch_size, 1, 1]), embeddings], axis=1)
+            embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
+        if self.registers:
+            registers = self.param(
+                "registers",
+                nn.with_logical_partitioning(
+                    nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, None, "embed")
+                ),
+                (1, self.registers, self.hidden_size),
+            )
+            embeddings = jnp.concatenate([embeddings, jnp.tile(registers, [batch_size, 1, 1])], axis=1)
             embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
         return embeddings
 
@@ -1001,6 +1012,7 @@ class CLIPVisionTransformer(nn.Module):
     mlp_dropout_rate: float = 0.0
     pool_type: str = "gap"  # "tok", "gap", "map" per google-research/big_vision
     unroll: int = 100  # unroll scan layers
+    registers: int = 0  # number of registers per "vision transformers need registers"
     gradient_checkpointing: bool = True
 
     # TODO: remove (legacy use)
@@ -1026,6 +1038,7 @@ class CLIPVisionTransformer(nn.Module):
             position_embedding_shape=self.position_embedding_shape,
             position_embedding_factorized=self.position_embedding_factorized,
             pool_type=self.pool_type,
+            registers=self.registers,
             dtype=dtype,
             name="embeddings",
         )(pixel_values)
@@ -1058,6 +1071,11 @@ class CLIPVisionTransformer(nn.Module):
         # get last hidden state
         last_hidden_state = encoder_outputs["last_hidden_state"]
         last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+
+        # remove registers
+        if self.registers:
+            last_hidden_state = last_hidden_state[:, : -self.registers]
+            last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         if self.pool_type == "tok":
             pooled_output = last_hidden_state[:, 0, :]
