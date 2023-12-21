@@ -581,8 +581,8 @@ class MAPHead(nn.Module):
     mlp_dropout_rate: float
 
     @nn.compact
-    def __call__(self, inputs, deterministic: bool = False):
-        batch, length, embed_dim = inputs.shape
+    def __call__(self, x, deterministic: bool = False):
+        batch, length, embed_dim = x.shape
         probe = self.param(
             "probe",
             nn.with_logical_partitioning(nn.initializers.xavier_uniform(), (None, None, "embed")),
@@ -902,7 +902,6 @@ class CLIPEncoder(nn.Module):
 
 
 class CLIPTextTransformer(nn.Module):
-    is_decoder: bool  # for Cappa
     hidden_size: int
     vocab_size: int
     max_length: int
@@ -925,6 +924,7 @@ class CLIPTextTransformer(nn.Module):
     eos_token_id: int = None
     mask_token_id: int = None
     masked_pred_prob: float = 0.75  # recommended by Cappa
+    is_decoder: bool = False  # for Cappa
     dtype: str = "float32"
 
     @nn.compact
@@ -1359,11 +1359,13 @@ class CLIPModel(nn.Module):
         self,
         input_ids,
         attention_mask,
+        encoder_hidden_states: Optional[jnp.ndarray] = None,
         deterministic: bool = True,
     ):
         text_outputs = self.text_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            encoder_hidden_states=encoder_hidden_states,
             deterministic=deterministic,
         )
 

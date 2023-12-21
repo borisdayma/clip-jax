@@ -238,3 +238,10 @@ def image_to_logits(image, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), format="rg
     else:
         raise NotImplementedError("LAB not implemented")
     return image
+
+
+def shift_tokens_left(logits, pad_token_id):
+    shifted_logits = np.zeros_like(logits)
+    shifted_logits[:, :-1] = logits[:, 1:]
+    shifted_logits[:, -1] = pad_token_id
+    return shifted_logits
