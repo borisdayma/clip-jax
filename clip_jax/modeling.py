@@ -958,9 +958,11 @@ class CLIPTextTransformer(nn.Module):
                     mask = mask.reshape((-1,) + (1,) * (x.ndim - 1))
                     return jnp.where(mask, x, y)
 
-                do_masked_pred = jax.random.uniform(self.make_rng("dropout"), (len(y),)) < self.masked_pred_prob
-                y = where(do_masked_pred, _add_random_masks(y), y)
-                decoder_mask = where(do_masked_pred, jnp.ones_like(decoder_mask), decoder_mask)
+                do_masked_pred = (
+                    jax.random.uniform(self.make_rng("dropout"), (len(input_ids),)) < self.masked_pred_prob
+                )
+                input_ids = where(do_masked_pred, _add_random_masks(input_ids), input_ids)
+                attention_mask = where(do_masked_pred, jnp.ones_like(attention_mask), attention_mask)
 
             raise NotImplementedError("TODO: implement decoder mode")
 
