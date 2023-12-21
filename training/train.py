@@ -38,7 +38,7 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from clip_jax import CLIPModel
-from clip_jax.data import Dataset
+from clip_jax.data import Dataset, shift_tokens_left
 from clip_jax.partitions import logical_axis_rules
 from clip_jax.tokenizer import AutoTokenizer
 from clip_jax.utils import count_params, load_config
@@ -1007,6 +1007,16 @@ def main():
         return new_params, new_opt_state
 
     # Define loss
+    def encoder_decoder_loss(logits, labels, label_mask):
+        """Cross entropy for language models"""
+        one_hot = jax.nn.one_hot(labels, logits.shape[-1])
+        loss = optax.softmax_cross_entropy(logits, one_hot)
+        loss = loss * label_mask
+        # normalize
+        loss /= jnp.sum(label_mask, axis=-1, keepdims=True)
+        loss = jnp.mean(loss)
+        return loss
+
     def cross_entropy(logits, axis):
         logits_max = jnp.max(logits, axis=axis, keepdims=True)
         logits -= jax.lax.stop_gradient(logits_max)
@@ -1077,6 +1087,11 @@ def main():
         rngs = {"dropout": dropout_rng} if train else None
         outputs = model_fn.apply({"params": params}, rngs=rngs, deterministic=not train, **minibatch)
         with jax.profiler.TraceAnnotation("Compute_Loss"):
+            if model.text_config["is_decoder"]:
+                logits = outputs["text_model_output"]
+                labels = minibatch["labels"]
+                label_mask = minibatch["label_mask"]
+                loss = encoder_decoder_loss(logits, labels, label_mask)
             if training_args.loss_type == "cross_entropy":
                 logits = outputs["logits_per_text"]
                 loss = cross_entropy_loss(logits)
@@ -1276,6 +1291,10 @@ def main():
             )
             # keep only input_ids and attention_mask
             txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
+            # add labels for decoder
+            if model.text_config["is_decoder"]:
+                txt_inputs["labels"] = shift_tokens_left(txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id)
+                txt_inputs["label_mask"] = shift_tokens_left(txt_inputs["attention_mask"], pad_token_id=0)
             batch = {"pixel_values": batch[0], **txt_inputs}
 
             # convert to jax arrays
@@ -1426,6 +1445,12 @@ def main():
                 )
                 # keep only input_ids and attention_mask
                 txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
+                # add labels for decoder
+                if model.text_config["is_decoder"]:
+                    txt_inputs["labels"] = shift_tokens_left(
+                        txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id
+                    )
+                    txt_inputs["label_mask"] = shift_tokens_left(txt_inputs["attention_mask"], pad_token_id=0)
                 batch = {"pixel_values": batch[0], **txt_inputs}
 
                 # reshape batch

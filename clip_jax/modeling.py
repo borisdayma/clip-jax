@@ -1293,20 +1293,21 @@ class CLIPModel(nn.Module):
             **self.vision_config,
             name="vision",
         )
-        self.text_projection = nn.Dense(
-            self.projection_dim,
-            dtype=dtype,
-            use_bias=False,
-            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
-            name="text_projection",
-        )
-        self.vision_projection = nn.Dense(
-            self.projection_dim,
-            dtype=dtype,
-            use_bias=False,
-            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
-            name="vision_projection",
-        )
+        if not self.text_config["is_decoder"]:
+            self.text_projection = nn.Dense(
+                self.projection_dim,
+                dtype=dtype,
+                use_bias=False,
+                kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
+                name="text_projection",
+            )
+            self.vision_projection = nn.Dense(
+                self.projection_dim,
+                dtype=dtype,
+                use_bias=False,
+                kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
+                name="vision_projection",
+            )
 
     def __call__(
         self,
@@ -1327,18 +1328,21 @@ class CLIPModel(nn.Module):
         )
         text_embeds, text_model_output = text_features["text_embeds"], text_features["text_model_output"]
 
-        # normalize
-        image_embeds = normalize(image_embeds)
-        text_embeds = normalize(text_embeds)
-
         # temperature scaling
         logit_scale = jnp.exp(self.logit_scale)
 
         # logit bias is only used in chunked sigmoid loss
         logit_bias = self.logit_bias
 
-        logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
-        logits_per_image = logits_per_text.T
+        # normalize
+        if not is_decoder:
+            image_embeds = normalize(image_embeds)
+            text_embeds = normalize(text_embeds)
+            logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
+            logits_per_image = logits_per_text.T
+        else:
+            logits_per_text = None
+            logits_per_image = None
 
         return dict(
             logits_per_image=logits_per_image,
@@ -1364,7 +1368,7 @@ class CLIPModel(nn.Module):
         )
 
         text_embeds = text_outputs["pooled_output"]
-        text_embeds = self.text_projection(text_embeds)
+        text_embeds = self.text_projection(text_embeds) if not self.text_config["is_decoder"] else None
         return {"text_embeds": text_embeds, "text_model_output": text_outputs}
 
     def get_image_features(
@@ -1377,7 +1381,7 @@ class CLIPModel(nn.Module):
             deterministic=deterministic,
         )
         image_embeds = vision_outputs["pooled_output"]
-        image_embeds = self.vision_projection(image_embeds)
+        image_embeds = self.vision_projection(image_embeds) if not self.text_config["is_decoder"] else None
 
         return {"image_embeds": image_embeds, "vision_model_output": vision_outputs}
 
