@@ -716,6 +716,7 @@ class CLIPEncoderLayer(nn.Module):
         self,
         hidden_states,
         attention_mask,
+        encoder_hidden_states,
         deterministic: bool = True,
     ):
         assert self.ln_type in ["normformer", "preln"], f"ln_type {self.ln_type} not supported."
@@ -724,6 +725,7 @@ class CLIPEncoderLayer(nn.Module):
             "rotary",
             "sincos2d",
         ], f"position_embedding_type {self.position_embedding_type} not supported."
+
         # Self attention
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         residual = hidden_states
@@ -765,6 +767,45 @@ class CLIPEncoderLayer(nn.Module):
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = residual + hidden_states
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+
+        # Cross-attention
+        if encoder_hidden_states is not None:
+            residual = hidden_states
+            if self.ln_type in ["preln", "normformer"]:
+                hidden_states = norm(self.use_rmsnorm)(
+                    dtype=self.dtype,
+                    use_bias=self.use_bias,
+                    use_scale=self.force_scale,
+                    scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+                    name="pre_cross_attention_norm",
+                )(hidden_states)
+                hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+            hidden_states = MultiHeadDotProductAttention(
+                num_heads=self.num_heads,
+                dtype=self.dtype,
+                deterministic=deterministic,
+                use_bias=self.use_bias,
+                use_rotary=False,  # don't apply on cross-attention
+                max_length=self.max_length,
+                dropout_rate=self.attention_dropout,
+                decode=False,
+                normalize_qk=self.normalize_qk,
+                name="cross_attention",
+            )(inputs_q=hidden_states, inputs_kv=encoder_hidden_states, deterministic=deterministic)
+            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+            if self.ln_type == "normformer":
+                hidden_states = norm(self.use_rmsnorm)(
+                    dtype=self.dtype,
+                    use_bias=self.use_bias,
+                    use_scale=True,
+                    scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+                    bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+                    name="post_attention_norm",
+                )(hidden_states)
+            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+            hidden_states = residual + hidden_states
+            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
 
         # MLP
         residual = hidden_states
@@ -809,6 +850,7 @@ class CLIPEncoder(nn.Module):
         self,
         hidden_states,
         attention_mask=None,
+        encoder_hidden_states=None,
         deterministic: bool = True,
     ):
         # gradient checkpointing
@@ -829,7 +871,7 @@ class CLIPEncoder(nn.Module):
             layer,
             variable_axes={"params": params_spec, "cache": 0},
             split_rngs={"params": True, "dropout": True},
-            in_axes=(nn.broadcast, nn.broadcast),
+            in_axes=(nn.broadcast, nn.broadcast, nn.broadcast),
             length=self.num_layers,
             unroll=self.unroll,
             metadata_params={nn.PARTITION_NAME: "layer"},
@@ -850,7 +892,7 @@ class CLIPEncoder(nn.Module):
             mlp_dropout_rate=self.mlp_dropout_rate,
             name="layers",
         )(
-            hidden_states, attention_mask, deterministic
+            hidden_states, attention_mask, encoder_hidden_states, deterministic
         )
 
         return dict(
@@ -954,10 +996,12 @@ class CLIPTextTransformer(nn.Module):
         )(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
+            encoder_hidden_states=encoder_hidden_states,
             deterministic=deterministic,
         )
         last_hidden_state = encoder_outputs["last_hidden_state"]
         last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+
         last_hidden_state = norm(self.use_rmsnorm)(
             dtype=dtype,
             use_bias=self.use_bias,
@@ -1272,8 +1316,15 @@ class CLIPModel(nn.Module):
         deterministic: bool = True,
     ):
         image_features = self.get_image_features(pixel_values, deterministic=deterministic)
-        text_features = self.get_text_features(input_ids, attention_mask, deterministic=deterministic)
         image_embeds, vision_model_output = image_features["image_embeds"], image_features["vision_model_output"]
+
+        is_decoder = self.text_config["is_decoder"]
+        text_features = self.get_text_features(
+            input_ids,
+            attention_mask,
+            encoder_hidden_states=vision_model_output if is_decoder else None,
+            deterministic=deterministic,
+        )
         text_embeds, text_model_output = text_features["text_embeds"], text_features["text_model_output"]
 
         # normalize
@@ -1283,7 +1334,7 @@ class CLIPModel(nn.Module):
         # temperature scaling
         logit_scale = jnp.exp(self.logit_scale)
 
-        # logit bias is only used for sigmoid loss
+        # logit bias is only used in chunked sigmoid loss
         logit_bias = self.logit_bias
 
         logits_per_text = jnp.matmul(text_embeds, image_embeds.T) * logit_scale
