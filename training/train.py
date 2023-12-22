@@ -1088,7 +1088,7 @@ def main():
         outputs = model_fn.apply({"params": params}, rngs=rngs, deterministic=not train, **minibatch)
         with jax.profiler.TraceAnnotation("Compute_Loss"):
             if model.text_config["is_decoder"]:
-                logits = outputs["text_model_output"]
+                logits = outputs["text_model_output"]["last_hidden_state"]
                 labels = minibatch["labels"]
                 label_mask = minibatch["label_mask"]
                 loss = encoder_decoder_loss(logits, labels, label_mask)

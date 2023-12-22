@@ -801,7 +801,7 @@ class CLIPEncoderLayer(nn.Module):
                     use_scale=True,
                     scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
                     bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
-                    name="post_attention_norm",
+                    name="post_cross_attention_norm",
                 )(hidden_states)
             hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
             hidden_states = residual + hidden_states
@@ -938,6 +938,7 @@ class CLIPTextTransformer(nn.Module):
         if self.is_decoder:
             assert encoder_hidden_states is not None
             assert self.mask_token_id is not None
+            assert self.use_causal_mask
         else:
             assert encoder_hidden_states is None
         if self.use_causal_mask:
@@ -1015,19 +1016,32 @@ class CLIPTextTransformer(nn.Module):
         last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
-        if not self.use_causal_mask:
-            # take features from the BOS embedding instead of EOS (no causal mask)
-            pooled_output = last_hidden_state[:, 0, :]
+        if self.is_decoder:
+            # dense to vocab
+            last_hidden_state = nn.Dense(
+                self.vocab_size,
+                dtype=dtype,
+                kernel_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed", "vocab")),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("vocab",)),
+                name="logits",
+            )(last_hidden_state)
+            last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "vocab"))
+            pooled_output = None
+
         else:
-            # take features from the EOS embedding
+            if not self.use_causal_mask:
+                # take features from the BOS embedding instead of EOS (no causal mask)
+                pooled_output = last_hidden_state[:, 0, :]
+            else:
+                # take features from the EOS embedding
 
-            def _get_id_pos(mat, id):
-                return jnp.where(mat == id, 1, 0).argmax(axis=-1)
+                def _get_id_pos(mat, id):
+                    return jnp.where(mat == id, 1, 0).argmax(axis=-1)
 
-            pooled_output = last_hidden_state[
-                jnp.arange(last_hidden_state.shape[0]), _get_id_pos(input_ids, self.eos_token_id)
-            ]
-        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+                pooled_output = last_hidden_state[
+                    jnp.arange(last_hidden_state.shape[0]), _get_id_pos(input_ids, self.eos_token_id)
+                ]
+            pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         return dict(
             last_hidden_state=last_hidden_state,
@@ -1056,7 +1070,7 @@ class CLIPVisionTransformer(nn.Module):
     force_scale: bool = False
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
-    pool_type: str = "gap"  # "tok", "gap", "map" per google-research/big_vision
+    pool_type: str = None  # "tok", "gap", "map", None per google-research/big_vision
     unroll: int = 100  # unroll scan layers
     registers: int = 0  # number of registers per "vision transformers need registers"
     gradient_checkpointing: bool = True
@@ -1120,6 +1134,17 @@ class CLIPVisionTransformer(nn.Module):
             last_hidden_state = last_hidden_state[:, : -self.registers]
             last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
+        # layernorm
+        last_hidden_state = norm(self.use_rmsnorm)(
+            dtype=dtype,
+            use_bias=self.use_bias,
+            use_scale=self.force_scale,
+            scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+            name="final_norm",
+        )(last_hidden_state)
+        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "embed"))
+
         if self.pool_type == "tok":
             pooled_output = last_hidden_state[:, 0, :]
 
@@ -1149,21 +1174,11 @@ class CLIPVisionTransformer(nn.Module):
                 dtype=dtype,
             )(last_hidden_state)
 
+        elif self.pool_type is None:
+            pooled_output = None
+
         else:
             raise ValueError(f"pool_type {self.pool_type} not supported.")
-
-        # ensure correct sharding
-        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
-
-        pooled_output = norm(self.use_rmsnorm)(
-            dtype=dtype,
-            use_bias=self.use_bias,
-            use_scale=self.force_scale,
-            scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
-            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
-            name="final_norm",
-        )(pooled_output)
-        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         return dict(
             last_hidden_state=last_hidden_state,
@@ -1276,6 +1291,8 @@ class CLIPModel(nn.Module):
         return super().__post_init__()
 
     def setup(self):
+        if self.text_config["is_decoder"]:
+            assert self.vision_config["pool_type"] is None, "pool_type must be None for decoder mode"
         dtype = jnp.dtype(self.dtype)
         self.logit_scale = self.param(
             "logit_scale",
@@ -1295,7 +1312,9 @@ class CLIPModel(nn.Module):
             **self.vision_config,
             name="vision",
         )
-        if not self.text_config["is_decoder"]:
+        if (not self.text_config["is_decoder"]) and (
+            self.text_config["hidden_size"] != self.vision_config["hidden_size"]
+        ):
             self.text_projection = nn.Dense(
                 self.projection_dim,
                 dtype=dtype,
@@ -1310,6 +1329,9 @@ class CLIPModel(nn.Module):
                 kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "embed_proj")),
                 name="vision_projection",
             )
+        else:
+            self.text_projection = None
+            self.vision_projection = None
 
     def __call__(
         self,
@@ -1325,7 +1347,7 @@ class CLIPModel(nn.Module):
         text_features = self.get_text_features(
             input_ids,
             attention_mask,
-            encoder_hidden_states=vision_model_output if is_decoder else None,
+            encoder_hidden_states=vision_model_output["last_hidden_state"] if is_decoder else None,
             deterministic=deterministic,
         )
         text_embeds, text_model_output = text_features["text_embeds"], text_features["text_model_output"]
@@ -1372,7 +1394,9 @@ class CLIPModel(nn.Module):
         )
 
         text_embeds = text_outputs["pooled_output"]
-        text_embeds = self.text_projection(text_embeds) if not self.text_config["is_decoder"] else None
+        if self.text_projection is not None:
+            text_embeds = self.text_projection(text_embeds)
+
         return {"text_embeds": text_embeds, "text_model_output": text_outputs}
 
     def get_image_features(
@@ -1385,7 +1409,8 @@ class CLIPModel(nn.Module):
             deterministic=deterministic,
         )
         image_embeds = vision_outputs["pooled_output"]
-        image_embeds = self.vision_projection(image_embeds) if not self.text_config["is_decoder"] else None
+        if self.vision_projection is not None:
+            image_embeds = self.vision_projection(image_embeds)
 
         return {"image_embeds": image_embeds, "vision_model_output": vision_outputs}
 
