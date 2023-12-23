@@ -1092,7 +1092,7 @@ def main():
                 labels = minibatch["labels"]
                 label_mask = minibatch["label_mask"]
                 loss = encoder_decoder_loss(logits, labels, label_mask)
-            if training_args.loss_type == "cross_entropy":
+            elif training_args.loss_type == "cross_entropy":
                 logits = outputs["logits_per_text"]
                 loss = cross_entropy_loss(logits)
             elif training_args.loss_type == "sigmoid":
