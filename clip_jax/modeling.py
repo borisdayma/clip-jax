@@ -739,9 +739,6 @@ class CLIPEncoderLayer(nn.Module):
                 name="pre_attention_norm",
             )(hidden_states)
             hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
-        # Reshape attention mask for direct use in attention heads
-        if attention_mask is not None:
-            attention_mask = nn.attention.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
         hidden_states = MultiHeadDotProductAttention(
             num_heads=self.num_heads,
             dtype=self.dtype,
@@ -933,6 +930,7 @@ class CLIPTextTransformer(nn.Module):
         input_ids,
         attention_mask,
         encoder_hidden_states=None,
+        decode=False,
         deterministic: bool = True,
     ):
         if self.is_decoder:
@@ -965,8 +963,6 @@ class CLIPTextTransformer(nn.Module):
                 input_ids = where(do_masked_pred, _add_random_masks(input_ids), input_ids)
                 attention_mask = where(do_masked_pred, jnp.ones_like(attention_mask), attention_mask)
 
-            raise NotImplementedError("TODO: implement decoder mode")
-
         dtype = jnp.dtype(self.dtype)
         hidden_states = CLIPTextEmbeddings(
             hidden_size=self.hidden_size,
@@ -976,6 +972,14 @@ class CLIPTextTransformer(nn.Module):
             dtype=dtype,
             name="embeddings",
         )(input_ids=input_ids)
+
+        # attention mask
+        if self.use_causal_mask:
+            if attention_mask is not None:
+                print("Warning: attention_mask will be ignored when use_causal_mask is True.")
+            attention_mask = None if decode else nn.make_causal_mask(input_ids)
+        elif attention_mask is not None:
+            attention_mask = nn.attention.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
 
         encoder_outputs = CLIPEncoder(
             num_layers=self.num_layers,
