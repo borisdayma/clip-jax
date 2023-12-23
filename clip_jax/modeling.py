@@ -703,6 +703,7 @@ class CLIPEncoderLayer(nn.Module):
     max_length: int
     use_causal_mask: bool
     mlp_dim: int
+    decode: bool
     dtype: Dtype = jnp.float32
     activations: Sequence[Union[str, Callable]] = ("relu",)
     normalize_qk: bool = False
@@ -747,7 +748,7 @@ class CLIPEncoderLayer(nn.Module):
             use_rotary=(self.position_embedding_type == "rotary"),
             max_length=self.max_length,
             dropout_rate=self.attention_dropout,
-            decode=self.use_causal_mask,
+            decode=self.decode,
             normalize_qk=self.normalize_qk,
             name="attention",
         )(inputs_q=hidden_states, inputs_kv=hidden_states, mask=attention_mask, deterministic=deterministic)
@@ -837,6 +838,7 @@ class CLIPEncoder(nn.Module):
     normalize_qk: bool = False
     use_bias: bool = False
     force_scale: bool = False
+    decode: bool = False
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
     unroll: int = 100  # unroll scan layers
@@ -887,6 +889,7 @@ class CLIPEncoder(nn.Module):
             force_scale=self.force_scale,
             attention_dropout=self.attention_dropout,
             mlp_dropout_rate=self.mlp_dropout_rate,
+            decode=self.decode,
             name="layers",
         )(
             hidden_states, attention_mask, encoder_hidden_states, deterministic
@@ -999,6 +1002,7 @@ class CLIPTextTransformer(nn.Module):
             mlp_dropout_rate=self.mlp_dropout_rate,
             unroll=self.unroll,
             gradient_checkpointing=self.gradient_checkpointing,
+            decode=decode,
             name="encoder",
         )(
             hidden_states=hidden_states,
