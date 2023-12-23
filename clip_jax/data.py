@@ -104,7 +104,7 @@ class Dataset:
         def _resize(image, caption):
             # NOTE: area as we will typically be downsampling
             return (
-                tf.image.resize(image, [self.image_crop_size, self.image_crop_size], method="area"),
+                tf.image.resize(image, [self.image_crop_resize, self.image_crop_resize], method="area"),
                 caption,
             )
 
