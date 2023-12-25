@@ -33,7 +33,7 @@ from jax.experimental.mesh_utils import create_device_mesh
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from precondition.distributed_shampoo import GraftingType, distributed_shampoo
+from precondition_local.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
