@@ -23,7 +23,7 @@ import tensorflow as tf
 import tensorflow_io as tfio
 import transformers
 import wandb
-from flax.core import FrozenDict, freeze, unfreeze
+from flax.core import FrozenDict
 from flax.training import checkpoints
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import numpy as jnp
@@ -33,12 +33,12 @@ from jax.experimental.mesh_utils import create_device_mesh
 from jax.experimental.pjit import pjit, with_sharding_constraint
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from precondition.distributed_shampoo import GraftingType, distributed_shampoo
+from precondition_local.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from clip_jax import CLIPModel
-from clip_jax.data import Dataset
+from clip_jax.data import Dataset, shift_tokens_left
 from clip_jax.partitions import logical_axis_rules
 from clip_jax.tokenizer import AutoTokenizer
 from clip_jax.utils import count_params, load_config
@@ -427,7 +427,7 @@ def flat_args(model_args, data_args, training_args):
 def split_scanned_params(data):
     """Split params between scanned and non-scanned"""
     # NOTE: technically this is not needed with Adam (and could be slower) but is required with shampoo
-    flat = flatten_dict(unfreeze(data))
+    flat = flatten_dict(data)
     split = {"text": {}, "vision": {}, "scanned_text": {}, "scanned_vision": {}}
     for k, v in flat.items():
         if "layers" in k:
@@ -443,15 +443,15 @@ def split_scanned_params(data):
     # remove empty keys
     split = {k: v for k, v in split.items() if v}
     for k, v in split.items():
-        split[k] = freeze(unflatten_dict(v))
+        split[k] = unflatten_dict(v)
     return split
 
 
 def unsplit_scanned_params(data):
     flat = {}
     for k in data.keys():
-        flat.update(flatten_dict(unfreeze(data[k])))
-    return freeze(unflatten_dict(flat))
+        flat.update(flatten_dict(data[k]))
+    return unflatten_dict(flat)
 
 
 @dataclass
@@ -897,6 +897,8 @@ def main():
 
         # utility functions for Adam
         def _adam_opt_state_spec_per_leaf(x, spec):
+            raise NotImplementedError
+            # TODO: no use of FrozenDict anymore so this needs to be updated
             if isinstance(x, FrozenDict):
                 # variables with same structure as params
                 return spec
@@ -1000,13 +1002,23 @@ def main():
         new_params = unsplit_scanned_params(new_params)
         # merge with non-trainable params
         # NOTE: this is only for future compatibility if we want to train only certain parameters
-        params, new_params = flatten_dict(unfreeze(params)), flatten_dict(unfreeze(new_params))
+        params, new_params = flatten_dict(params), flatten_dict(new_params)
         params.update(new_params)
-        new_params = freeze(unflatten_dict(params))
+        new_params = unflatten_dict(params)
 
         return new_params, new_opt_state
 
     # Define loss
+    def encoder_decoder_loss(logits, labels, label_mask):
+        """Cross entropy for language models"""
+        one_hot = jax.nn.one_hot(labels, logits.shape[-1])
+        loss = optax.softmax_cross_entropy(logits, one_hot)
+        loss = loss * label_mask
+        # normalize
+        loss /= jnp.sum(label_mask, axis=-1, keepdims=True)
+        loss = jnp.mean(loss)
+        return loss
+
     def cross_entropy(logits, axis):
         logits_max = jnp.max(logits, axis=axis, keepdims=True)
         logits -= jax.lax.stop_gradient(logits_max)
@@ -1075,9 +1087,14 @@ def main():
 
     def compute_loss(params, minibatch, dropout_rng, model_fn, train):
         rngs = {"dropout": dropout_rng} if train else None
+        labels = minibatch.pop("labels", None)
+        label_mask = minibatch.pop("label_mask", None)
         outputs = model_fn.apply({"params": params}, rngs=rngs, deterministic=not train, **minibatch)
         with jax.profiler.TraceAnnotation("Compute_Loss"):
-            if training_args.loss_type == "cross_entropy":
+            if model.text_config["is_decoder"]:
+                logits = outputs["text_model_output"]["last_hidden_state"]
+                loss = encoder_decoder_loss(logits, labels, label_mask)
+            elif training_args.loss_type == "cross_entropy":
                 logits = outputs["logits_per_text"]
                 loss = cross_entropy_loss(logits)
             elif training_args.loss_type == "sigmoid":
@@ -1196,7 +1213,7 @@ def main():
         if training_args.log_norm_steps:
 
             def norm(val):
-                return unfreeze(jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), val))
+                return jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), val)
 
             gradients_norm = maybe_fn(norm, grads, training_args.log_norm_steps)
             params_norm = maybe_fn(norm, params, training_args.log_norm_steps)
@@ -1276,6 +1293,10 @@ def main():
             )
             # keep only input_ids and attention_mask
             txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
+            # add labels for decoder
+            if model.text_config["is_decoder"]:
+                txt_inputs["labels"] = shift_tokens_left(txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id)
+                txt_inputs["label_mask"] = shift_tokens_left(txt_inputs["attention_mask"], pad_token_id=0)
             batch = {"pixel_values": batch[0], **txt_inputs}
 
             # convert to jax arrays
@@ -1426,6 +1447,12 @@ def main():
                 )
                 # keep only input_ids and attention_mask
                 txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
+                # add labels for decoder
+                if model.text_config["is_decoder"]:
+                    txt_inputs["labels"] = shift_tokens_left(
+                        txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id
+                    )
+                    txt_inputs["label_mask"] = shift_tokens_left(txt_inputs["attention_mask"], pad_token_id=0)
                 batch = {"pixel_values": batch[0], **txt_inputs}
 
                 # reshape batch

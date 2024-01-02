@@ -104,7 +104,7 @@ class Dataset:
         def _resize(image, caption):
             # NOTE: area as we will typically be downsampling
             return (
-                tf.image.resize(image, [self.image_crop_size, self.image_crop_size], method="area"),
+                tf.image.resize(image, [self.image_crop_resize, self.image_crop_resize], method="area"),
                 caption,
             )
 
@@ -238,3 +238,10 @@ def image_to_logits(image, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5), format="rg
     else:
         raise NotImplementedError("LAB not implemented")
     return image
+
+
+def shift_tokens_left(logits, pad_token_id):
+    shifted_logits = np.zeros_like(logits)
+    shifted_logits[:, :-1] = logits[:, 1:]
+    shifted_logits[:, -1] = pad_token_id
+    return shifted_logits
