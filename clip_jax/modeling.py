@@ -60,6 +60,7 @@ def _convert_to_activation_function(fn_or_string: Union[str, Callable]) -> Calla
         raise ValueError("don't know how to convert %s to an activation function" % (fn_or_string,))
 
 
+# TODO: will be used for https://github.com/borisdayma/clip-jax/issues/12
 def _interpolate(idxs, values):
     """
     Interpolate values at given indices.
@@ -376,12 +377,13 @@ class CLIPTextEmbeddings(nn.Module):
 
 class MultiHeadDotProductAttention(nn.Module):
     """
-    Adapted from nn.MultiHeadDotProductAttention:
+    Adapted from nn.MultiHeadDotProductAttention + maxtext:
     """
 
     num_heads: int
     dtype: Optional[Dtype] = None
     param_dtype: Dtype = jnp.float32
+    float32_logits: bool = False  # compute logits in float32 for stability
     qkv_features: Optional[int] = None
     out_features: Optional[int] = None
     broadcast_dropout: bool = True
@@ -531,6 +533,11 @@ class MultiHeadDotProductAttention(nn.Module):
                     dropout_rng = self.make_rng("dropout")
             else:
                 m_deterministic = True
+   
+            # Casting logits and softmax computation for float32 for model stability
+            if self.float32_logits:
+                query = query.astype(jnp.float32)
+                key = key.astype(jnp.float32)
 
             # apply attention
             x = self.attention_fn(
