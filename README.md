@@ -1,15 +1,11 @@
 # CLIP-JAX
 
-This repository is used to train custom [CLIP models](https://arxiv.org/abs/2103.00020) with JAX:
+This repository is used to train custom vision models with JAX:
 
 - custom model architectures
 - custom sharding strategies
-- training with constrastive loss or [chunked sigmoid loss](https://arxiv.org/abs/2303.15343)
+- training with constrastive loss such as [CLIP](https://arxiv.org/abs/2103.00020), [chunked sigmoid loss](https://arxiv.org/abs/2303.15343) or captioning loss such as [Cappa](https://arxiv.org/abs/2306.07915)
 - downstream fine-tuning
-
-TODO:
-
-- [ ] training with sequence packing per [NaViT](https://arxiv.org/abs/2307.06304)
 
 ## Installation
 
@@ -81,10 +77,11 @@ TODO:
 
 ## Acknowledgements
 
-- [Lucas Beyer](https://twitter.com/giffmana) for helping with clarifications on the [Sigmoid Loss for Language Image Pre-Training](https://arxiv.org/abs/2303.15343) paper
-- 🤗 Hugging Face for CLIP reference implementation and training scripts
+- [Lucas Beyer](https://twitter.com/giffmana) for helping with clarifications on the [Sigmoid Loss for Language Image Pre-Training](https://arxiv.org/abs/2303.15343) paper and [Image Captioners Are Scalable Vision Learners Too](https://arxiv.org/abs/2306.07915)
+- 🤗 Hugging Face for reference implementation of CLIP
 - Google [TPU Research Cloud (TRC) program](https://sites.research.google/trc/) for providing computing resources
 - [Weights & Biases](https://wandb.com/) for providing the infrastructure for experiment tracking and model management
+- [Big Vision Github Repository](https://github.com/google-research/big_vision) for reference code of many papers
 
 ## Citations
 
@@ -122,11 +119,11 @@ TODO:
 ```
 
 ```bibtex
-@misc{dehghani2023patch,
-      title={Patch n' Pack: NaViT, a Vision Transformer for any Aspect Ratio and Resolution}, 
-      author={Mostafa Dehghani and Basil Mustafa and Josip Djolonga and Jonathan Heek and Matthias Minderer and Mathilde Caron and Andreas Steiner and Joan Puigcerver and Robert Geirhos and Ibrahim Alabdulmohsin and Avital Oliver and Piotr Padlewski and Alexey Gritsenko and Mario Lučić and Neil Houlsby},
+@misc{tschannen2023image,
+      title={Image Captioners Are Scalable Vision Learners Too}, 
+      author={Michael Tschannen and Manoj Kumar and Andreas Steiner and Xiaohua Zhai and Neil Houlsby and Lucas Beyer},
       year={2023},
-      eprint={2307.06304},
+      eprint={2306.07915},
       archivePrefix={arXiv},
       primaryClass={cs.CV}
 }
