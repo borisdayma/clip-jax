@@ -128,3 +128,25 @@ TODO:
       primaryClass={cs.CV}
 }
 ```
+
+```bibtex
+@misc{darcet2023vision,
+      title={Vision Transformers Need Registers}, 
+      author={Timothée Darcet and Maxime Oquab and Julien Mairal and Piotr Bojanowski},
+      year={2023},
+      eprint={2309.16588},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV}
+}
+```
+
+```bibtex
+@misc{dehghani2023patch,
+      title={Patch n' Pack: NaViT, a Vision Transformer for any Aspect Ratio and Resolution}, 
+      author={Mostafa Dehghani and Basil Mustafa and Josip Djolonga and Jonathan Heek and Matthias Minderer and Mathilde Caron and Andreas Steiner and Joan Puigcerver and Robert Geirhos and Ibrahim Alabdulmohsin and Avital Oliver and Piotr Padlewski and Alexey Gritsenko and Mario Lučić and Neil Houlsby},
+      year={2023},
+      eprint={2307.06304},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV}
+}
+```
