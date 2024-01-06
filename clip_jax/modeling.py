@@ -533,7 +533,7 @@ class MultiHeadDotProductAttention(nn.Module):
                     dropout_rng = self.make_rng("dropout")
             else:
                 m_deterministic = True
-   
+
             # Casting logits and softmax computation for float32 for model stability
             if self.float32_logits:
                 query = query.astype(jnp.float32)
@@ -1353,16 +1353,20 @@ class CLIPModel(nn.Module):
         input_ids,
         pixel_values,
         attention_mask,
+        decode: bool = False,
         deterministic: bool = True,
     ):
         image_features = self.get_image_features(pixel_values, deterministic=deterministic)
         image_embeds, vision_model_output = image_features["image_embeds"], image_features["vision_model_output"]
 
         is_decoder = self.text_config["is_decoder"]
+        if decode:
+            assert is_decoder, "decode=True only works for decoder mode"
         text_features = self.get_text_features(
             input_ids,
             attention_mask,
             encoder_hidden_states=vision_model_output["last_hidden_state"] if is_decoder else None,
+            decode=decode,
             deterministic=deterministic,
         )
         text_embeds, text_model_output = text_features["text_embeds"], text_features["text_model_output"]
@@ -1399,12 +1403,14 @@ class CLIPModel(nn.Module):
         input_ids,
         attention_mask,
         encoder_hidden_states: Optional[jnp.ndarray] = None,
+        decode: bool = False,
         deterministic: bool = True,
     ):
         text_outputs = self.text_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             encoder_hidden_states=encoder_hidden_states,
+            decode=decode,
             deterministic=deterministic,
         )
 
