@@ -16,10 +16,12 @@
 import dataclasses
 import functools
 import operator
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import flax.linen as nn
+import flax.struct
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -27,6 +29,7 @@ from flax.linen import partitioning as nn_partitioning
 from flax.linen.linear import DotGeneralT, PrecisionLike
 from flax.linen.module import merge_param
 from flax.linen.partitioning import ScanIn
+from transformers import FlaxGenerationMixin
 
 remat = nn_partitioning.remat
 
@@ -45,6 +48,26 @@ Axes = Union[int, Iterable[int]]
 
 # default initializers
 default_kernel_init = nn.initializers.lecun_normal()
+
+
+# Output types, for compatibility with FlaxGenerationMixin
+class BaseOutput:
+    def __getitem__(self, item):
+        return getattr(self, item)
+
+    def __setitem__(self, item, value):
+        super().setattr(item, value)
+
+
+@flax.struct.dataclass
+class EncoderOutput(BaseOutput):
+    last_hidden_state: Array
+
+
+@flax.struct.dataclass
+class DecoderOutput(BaseOutput):
+    logits: Array
+    past_key_values: Array
 
 
 # Utility functions
@@ -984,12 +1007,17 @@ class CLIPTextTransformer(nn.Module):
         )(input_ids=input_ids)
 
         # attention mask
+        if attention_mask is not None:
+            attention_mask = nn.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
         if self.use_causal_mask:
-            if attention_mask is not None:
-                print("Warning: attention_mask will be ignored when use_causal_mask is True.")
-            attention_mask = None if decode else nn.make_causal_mask(input_ids)
-        elif attention_mask is not None:
-            attention_mask = nn.attention.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
+            causal_mask = nn.make_causal_mask(input_ids)
+            if attention_mask is None:
+                attention_mask = causal_mask
+            else:
+                attention_mask = nn.combine_masks(attention_mask, causal_mask)
+        if decode and attention_mask is not None:
+            print("Warning: attention_mask is ignored in decode mode.")
+            attention_mask = None
 
         encoder_outputs = CLIPEncoder(
             num_layers=self.num_layers,
@@ -1278,7 +1306,7 @@ class CLIPTextModelForFineTuning(nn.Module):
         return text_outputs["hidden_states"][-2]
 
 
-class CLIPModel(nn.Module):
+class CLIPModel(nn.Module, FlaxGenerationMixin):
     text_config: Any
     vision_config: Any
     projection_dim: int
@@ -1303,6 +1331,8 @@ class CLIPModel(nn.Module):
         if self.dtype is not None:
             vision_config["dtype"] = self.dtype
         self.vision_config = vision_config
+        # set config flags for FlaxGenerationMixin
+        self.config = SimpleNamespace(is_encoder_decoder=text_config["is_decoder"])
         return super().__post_init__()
 
     def setup(self):
@@ -1452,6 +1482,46 @@ class CLIPModel(nn.Module):
     def init_weights(self, rng: jax.random.PRNGKey):
         inputs = self.init_inputs(rng)
         return self.init(**inputs)
+
+    # Methods for FlaxGenerationMixin
+    def prepare_inputs_for_generation(self, input_ids, max_length, encoder_outputs):
+        # initialize cache
+        model_inputs = self.init_inputs(jax.random.PRNGKey(0))
+        _decode = partial(CLIPModel.__call__, decode=True)
+        past_key_values = self.init(**model_inputs, method=_decode)["cache"]
+        return {"past_key_values": past_key_values, "encoder_outputs": encoder_outputs}
+
+    def encode(self, input_ids, params, return_dict=True):
+        res = self.apply(
+            {"params": params},
+            pixel_values=input_ids,
+            deterministic=True,
+            method=self.get_image_features,
+        )["vision_model_output"]["last_hidden_state"]
+        return EncoderOutput(last_hidden_state=res) if return_dict else res
+
+    def decode(self, decoder_input_ids, encoder_outputs, params, past_key_values, return_dict=True):
+        outputs, mutable = self.apply(
+            {"params": params, "cache": past_key_values},
+            mutable=["cache"],
+            input_ids=decoder_input_ids,
+            attention_mask=None,
+            encoder_hidden_states=encoder_outputs["last_hidden_state"],
+            decode=True,
+            deterministic=True,
+            method=self.get_text_features,
+        )
+        logits = outputs["text_model_output"]["last_hidden_state"]
+        cache = mutable["cache"]
+        return DecoderOutput(logits=logits, past_key_values=cache) if return_dict else (logits, cache)
+
+    def update_inputs_for_generation(self, model_outputs, model_kwargs):
+        model_kwargs["past_key_values"] = model_outputs.past_key_values
+        return model_kwargs
+
+    @classmethod
+    def can_generate(cls):
+        return True
 
 
 def normalize(x, eps=1e-7, safe_norm=True):
