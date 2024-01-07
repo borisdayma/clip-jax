@@ -16,6 +16,7 @@
 import dataclasses
 import functools
 import operator
+from collections import OrderedDict
 from functools import partial
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
@@ -51,12 +52,12 @@ default_kernel_init = nn.initializers.lecun_normal()
 
 
 # Output types, for compatibility with FlaxGenerationMixin
-class BaseOutput:
+class BaseOutput(OrderedDict):
     def __getitem__(self, item):
         return getattr(self, item)
 
     def __setitem__(self, item, value):
-        super().setattr(item, value)
+        super().__setattr__(item, value)
 
 
 @flax.struct.dataclass
@@ -1487,6 +1488,9 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
     def prepare_inputs_for_generation(self, input_ids, max_length, encoder_outputs):
         # initialize cache
         model_inputs = self.init_inputs(jax.random.PRNGKey(0))
+        bs = input_ids.shape[0]
+        for k in ["input_ids", "attention_mask", "pixel_values"]:
+            model_inputs[k] = jnp.repeat(model_inputs[k], bs, axis=0)
         _decode = partial(CLIPModel.__call__, decode=True)
         past_key_values = self.init(**model_inputs, method=_decode)["cache"]
         return {"past_key_values": past_key_values, "encoder_outputs": encoder_outputs}
