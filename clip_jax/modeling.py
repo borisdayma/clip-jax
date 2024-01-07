@@ -610,6 +610,7 @@ class MAPHead(nn.Module):
     activations: Sequence[Union[str, Callable]]
     attention_dropout: float
     mlp_dropout_rate: float
+    float32_logits: bool
 
     @nn.compact
     def __call__(self, x, deterministic: bool = False):
@@ -631,6 +632,7 @@ class MAPHead(nn.Module):
             dropout_rate=self.attention_dropout,
             decode=False,
             normalize_qk=self.normalize_qk,
+            float32_logits=self.float32_logits,
             name="attention",
         )(inputs_q=probe, inputs_kv=x, mask=None, deterministic=deterministic)
         x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
@@ -735,6 +737,7 @@ class CLIPEncoderLayer(nn.Module):
     use_causal_mask: bool
     mlp_dim: int
     decode: bool
+    float32_logits: bool
     dtype: Dtype = jnp.float32
     activations: Sequence[Union[str, Callable]] = ("relu",)
     normalize_qk: bool = False
@@ -781,6 +784,7 @@ class CLIPEncoderLayer(nn.Module):
             dropout_rate=self.attention_dropout,
             decode=self.decode,
             normalize_qk=self.normalize_qk,
+            float32_logits=self.float32_logits,
             name="attention",
         )(inputs_q=hidden_states, inputs_kv=hidden_states, mask=attention_mask, deterministic=deterministic)
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
@@ -820,6 +824,7 @@ class CLIPEncoderLayer(nn.Module):
                 dropout_rate=self.attention_dropout,
                 decode=False,
                 normalize_qk=self.normalize_qk,
+                float32_logits=self.float32_logits,
                 name="cross_attention",
             )(inputs_q=hidden_states, inputs_kv=encoder_hidden_states, deterministic=deterministic)
             hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
@@ -864,6 +869,7 @@ class CLIPEncoder(nn.Module):
     max_length: int
     use_causal_mask: bool
     mlp_dim: int
+    float32_logits: bool
     dtype: Dtype = jnp.float32
     activations: Sequence[Union[str, Callable]] = ("relu",)
     normalize_qk: bool = False
@@ -913,6 +919,7 @@ class CLIPEncoder(nn.Module):
             max_length=self.max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
+            float32_logits=self.float32_logits,
             dtype=self.dtype,
             activations=self.activations,
             normalize_qk=self.normalize_qk,
@@ -943,6 +950,7 @@ class CLIPTextTransformer(nn.Module):
     num_heads: int
     use_causal_mask: bool
     mlp_dim: int
+    float32_logits: bool = False
     dtype: Dtype = jnp.float32
     activations: Sequence[Union[str, Callable]] = ("relu",)
     normalize_qk: bool = False
@@ -1029,6 +1037,7 @@ class CLIPTextTransformer(nn.Module):
             max_length=self.max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
+            float32_logits=self.float32_logits,
             dtype=dtype,
             activations=self.activations,
             normalize_qk=self.normalize_qk,
@@ -1104,6 +1113,7 @@ class CLIPVisionTransformer(nn.Module):
     num_heads: int
     use_causal_mask: bool
     mlp_dim: int
+    float32_logits: bool = False
     position_embedding_type: str = "sincos2d"  # "learnt" or "sincos2d"
     position_embedding_shape: Optional[Tuple[int, int]] = None  # e.g. (16, 16) for 256x256 images with patch 16
     position_embedding_factorized: bool = False
@@ -1154,6 +1164,7 @@ class CLIPVisionTransformer(nn.Module):
             max_length=max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
+            float32_logits=self.float32_logits,
             dtype=dtype,
             activations=self.activations,
             normalize_qk=self.normalize_qk,
@@ -1215,6 +1226,7 @@ class CLIPVisionTransformer(nn.Module):
                 normalize_qk=self.normalize_qk,
                 attention_dropout=self.attention_dropout,
                 mlp_dropout_rate=self.mlp_dropout_rate,
+                float32_logits=self.float32_logits,
                 dtype=dtype,
             )(last_hidden_state)
 
