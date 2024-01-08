@@ -473,6 +473,7 @@ class State:
     time_per_train_step: float = 0.0
     time_per_eval: float = 0.0
     time_per_save: float = 0.0
+    time_per_predict: float = 0.0
     timestamp: float = field(init=False)
     offset_time: float = field(init=False)  # used to substract eval and save times
 
@@ -509,11 +510,13 @@ class State:
             setattr(self, k, v)
 
     def add_time(self, key, duration):
-        assert key in ["eval", "save"]
+        assert key in ["eval", "save", "predict"]
         if key == "eval":
             self.time_per_eval = duration
         elif key == "save":
             self.time_per_save = duration
+        else:
+            self.time_per_predict = duration
         self.offset_time += duration
 
     def to_dict(self):
