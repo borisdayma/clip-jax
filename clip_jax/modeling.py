@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import dataclasses
 import functools
 import operator
@@ -30,7 +29,7 @@ from flax.linen import partitioning as nn_partitioning
 from flax.linen.linear import DotGeneralT, PrecisionLike
 from flax.linen.module import merge_param
 from flax.linen.partitioning import ScanIn
-from transformers import FlaxGenerationMixin
+from transformers import FlaxGenerationMixin, GenerationConfig
 
 remat = nn_partitioning.remat
 
@@ -962,6 +961,8 @@ class CLIPTextTransformer(nn.Module):
     gradient_checkpointing: bool = True
     eos_token_id: int = None
     mask_token_id: int = None
+    pad_token_id: int = None
+    bos_token_id: int = None
     masked_pred_prob: float = 0.75  # recommended by Cappa
     is_decoder: bool = False  # for Cappa
     dtype: str = "float32"
@@ -1539,6 +1540,19 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
     def update_inputs_for_generation(self, model_outputs, model_kwargs):
         model_kwargs["past_key_values"] = model_outputs.past_key_values
         return model_kwargs
+
+    def generate(self, *args, **kwargs):
+        assert self.text_config["is_decoder"], "generate() only works for decoder mode"
+        generation_config = kwargs.pop("generation_config", None)
+        if generation_config is None:
+            generation_config = GenerationConfig(
+                pad_token_id=self.text_config["pad_token_id"],
+                eos_token_id=self.text_config["eos_token_id"],
+                decoder_start_token_id=self.text_config["bos_token_id"],
+                bos_token_id=self.text_config["bos_token_id"],
+                max_length=self.text_config["max_length"],
+            )
+        return super().generate(*args, generation_config=generation_config, **kwargs)
 
     @classmethod
     def can_generate(cls):
