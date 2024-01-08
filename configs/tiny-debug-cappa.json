@@ -1,5 +1,6 @@
 {
   "text_config": {
+    "float32_logits": false,
     "dtype": "float32",
     "activations": ["gelu", "linear"],
     "normalize_qk": false,
@@ -11,6 +12,8 @@
     "gradient_checkpointing": true,
     "eos_token_id": 2,
     "mask_token_id": 4,
+    "pad_token_id": 3,
+    "bos_token_id": 1,
     "masked_pred_prob": 0.75,
     "is_decoder": true,
     "vocab_size": 50000,
@@ -25,6 +28,7 @@
     "mlp_dim": 1024
   },
   "vision_config": {
+    "float32_logits": false,
     "position_embedding_type": "learnt",
     "position_embedding_shape": null,
     "position_embedding_factorized": false,
@@ -38,6 +42,7 @@
     "pool_type": null,
     "unroll": 100,
     "registers": 0,
+    "keep_registers": false,
     "gradient_checkpointing": true,
     "image_size": 256,
     "hidden_size": 512,
