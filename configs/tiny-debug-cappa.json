@@ -14,7 +14,7 @@
     "masked_pred_prob": 0.75,
     "is_decoder": true,
     "vocab_size": 50000,
-    "hidden_size": 384,
+    "hidden_size": 512,
     "max_length": 64,
     "num_layers": 4,
     "use_rmsnorm": true,
@@ -22,7 +22,7 @@
     "num_heads": 8,
     "position_embedding_type": "rotary",
     "use_causal_mask": true,
-    "mlp_dim": 768
+    "mlp_dim": 1024
   },
   "vision_config": {
     "position_embedding_type": "learnt",
@@ -40,14 +40,14 @@
     "registers": 0,
     "gradient_checkpointing": true,
     "image_size": 256,
-    "hidden_size": 384,
+    "hidden_size": 512,
     "patch_size": 16,
     "num_layers": 8,
     "use_rmsnorm": true,
     "ln_type": "normformer",
     "num_heads": 8,
     "use_causal_mask": false,
-    "mlp_dim": 768
+    "mlp_dim": 1024
   },
   "projection_dim": 512,
   "logit_scale_init_value": 10.0,
