@@ -1198,7 +1198,7 @@ class CLIPVisionTransformer(nn.Module):
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
             name="final_norm",
         )(last_hidden_state)
-        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "embed"))
+        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         if self.pool_type == "tok":
             pooled_output = last_hidden_state[:, 0, :]
@@ -1235,6 +1235,8 @@ class CLIPVisionTransformer(nn.Module):
 
         else:
             raise ValueError(f"pool_type {self.pool_type} not supported.")
+
+        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         return dict(
             last_hidden_state=last_hidden_state,
