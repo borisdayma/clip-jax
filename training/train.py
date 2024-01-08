@@ -1274,7 +1274,7 @@ def main():
 
     # Predict step
     def predict_step(params, batch):
-        outputs = model.generate(batch["pixel_values"], params=params, num_beams=1).sequences
+        outputs = model.generate(batch["pixel_values"], params=params).sequences
         return outputs
 
     # Create parallel version of the train and eval step
@@ -1298,7 +1298,6 @@ def main():
     def run_evaluation(params, mesh):
         start_eval_time = time.perf_counter()
         metrics = []
-        predictions = []
         for batch in tqdm(
             dataset.valid,
             desc="Evaluating...",
@@ -1350,8 +1349,77 @@ def main():
             metrics_batch = jax.device_get(metrics_batch)
             metrics.append(metrics_batch)
 
+        # get the mean of the metrics
+        metrics = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *metrics)
+        metrics = jax.tree_util.tree_map(jnp.mean, metrics)
+
+        # update timing
+        state.add_time("eval", time.perf_counter() - start_eval_time)
+
+        # log metrics
+        state.log(metrics)
+
+        # Print metrics and update progress bar
+        print(f"Eval metrics: {metrics}")
+
+        # predict if needed
+        if training_args.n_predict:
+            run_predict(params, mesh)
+
+    def run_predict(params, mesh):
+        start_eval_time = time.perf_counter()
+        predictions = []
+
+        # shorten batches if possible
+        max_batch = training_args.n_predict // jax.process_count()
+
+        for batch in tqdm(
+            dataset.valid,
+            desc="Predicting...",
+            position=2,
+            leave=False,
+            disable=jax.process_index() > 0,
+        ):
+            # shorten batch if possible
+            batch_size = batch[0].shape[0]
+            batch = jax.tree_map(lambda x: x[: min(max_batch, batch_size)], batch)
+
+            # preprocess batch
+            captions = [caption.decode("utf-8") for caption in batch[1]]
+            txt_inputs = tokenizer(
+                captions,
+                padding="max_length",
+                truncation=True,
+                max_length=model.text_config["max_length"],
+                return_tensors="np",
+            )
+            # keep only input_ids and attention_mask
+            txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
+            batch = {"pixel_values": batch[0], **txt_inputs}
+
+            # convert to jax arrays
+            data_global_shape_eval = jax.tree_map(_get_global_shape, batch)
+            # split per device
+            batch = jax.tree_map(lambda x: np.split(x, num_local_devices, axis=0), batch)
+            # put data on device
+            batch = jax.tree_map(
+                lambda x: [jax.device_put(arr, d) for arr, d in zip(x, local_addressable_devices)],
+                batch,
+                is_leaf=lambda x: isinstance(x, list),
+            )
+            # create global array
+            batch = jax.tree_map(
+                lambda shape, data: jax.make_array_from_single_device_arrays(shape, data_global_sharding, data),
+                data_global_shape_eval,
+                batch,
+                is_leaf=lambda x: isinstance(x, (list, tuple)),
+            )
+            # reshard per mesh
+            with mesh:
+                batch = reshard_data(batch)
+
             # predict
-            if training_args.n_predict and len(predictions) < training_args.n_predict:
+            if len(predictions) < training_args.n_predict:
                 with mesh:
                     predictions_batch = p_predict_step(params, batch)
                 n_needed = training_args.n_predict - len(predictions)
@@ -1369,23 +1437,16 @@ def main():
                 captions = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
                 captions = [c.strip() for c in captions]
                 predictions.extend(list(zip(images, captions, preds)))
-
-        # get the mean of the metrics
-        metrics = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *metrics)
-        metrics = jax.tree_util.tree_map(jnp.mean, metrics)
-
-        # update timing
-        state.add_time("eval", time.perf_counter() - start_eval_time)
-
-        # log metrics
-        state.log(metrics)
+            else:
+                break
 
         # log predictions
         if len(predictions) > 0:
             state.log_predictions(predictions)
 
-        # Print metrics and update progress bar
-        print(f"Eval metrics: {metrics}")
+        # update timing
+        state.add_time("predict", time.perf_counter() - start_eval_time)
+        state.log({})
 
     def run_save_model(params, opt_state):
         keep_checkpoints = 100_000
