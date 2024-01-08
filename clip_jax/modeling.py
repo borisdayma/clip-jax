@@ -1127,6 +1127,7 @@ class CLIPVisionTransformer(nn.Module):
     pool_type: str = None  # "tok", "gap", "map", None per google-research/big_vision
     unroll: int = 100  # unroll scan layers
     registers: int = 0  # number of registers per "vision transformers need registers"
+    keep_registers: bool = False  # keep registers in the output
     gradient_checkpointing: bool = True
 
     @nn.compact
@@ -1185,7 +1186,9 @@ class CLIPVisionTransformer(nn.Module):
         last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         # remove registers
-        if self.registers:
+        if self.registers and not self.keep_registers:
+            if self.pool_type == "tok":
+                print("Warning: removing registers in tok pool mode does not seem necessary.")
             last_hidden_state = last_hidden_state[:, : -self.registers]
             last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 

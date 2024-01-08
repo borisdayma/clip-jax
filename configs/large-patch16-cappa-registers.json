@@ -40,6 +40,7 @@
     "pool_type": null,
     "unroll": 100,
     "registers": 8,
+    "keep_registers": true,
     "gradient_checkpointing": true,
     "image_size": 256,
     "hidden_size": 1024,
