@@ -34,12 +34,13 @@ from jax.experimental.pjit import pjit
 from jax.experimental.shard_map import shard_map
 from jax.lax import with_sharding_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from PIL import Image
 from precondition.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from clip_jax import CLIPModel
-from clip_jax.data import Dataset, shift_tokens_left
+from clip_jax.data import Dataset, logits_to_image, shift_tokens_left
 from clip_jax.partitions import logical_axis_rules
 from clip_jax.tokenizer import AutoTokenizer
 from clip_jax.utils import count_params, load_config
@@ -74,6 +75,8 @@ class TrainingArguments:
     )
     do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
+    n_predict: Optional[int] = field(default=0, metadata={"help": "Batch size for training."})
+
     batch_size_per_node: Optional[int] = field(default=64, metadata={"help": "Batch size for training."})
 
     gradient_accumulation_steps: int = field(
@@ -520,6 +523,13 @@ class State:
             for k, v in asdict(self).items()
             if k in self.__dataclass_fields__ and self.__dataclass_fields__[k].init
         }
+
+    def log_predictions(self, predictions):
+        if jax.process_index() == 0:
+            data = [(wandb.Image(img), cap, pred) for img, cap, pred in predictions]
+            columns = ["image", "caption", "prediction"]
+            table = wandb.Table(data=data, columns=columns)
+            wandb.log({"predictions": table})
 
     def log(self, metrics={}):
         if jax.process_index() == 0:
@@ -1262,6 +1272,11 @@ def main():
         metrics = compute_eval_loss(batch)
         return metrics
 
+    # Predict step
+    def predict_step(params, batch):
+        outputs = model.generate(batch["pixel_values"], params=params, num_beams=1).sequences
+        return outputs
+
     # Create parallel version of the train and eval step
     p_train_step = pjit(
         train_step,
@@ -1274,10 +1289,16 @@ def main():
         in_shardings=(params_spec, data_spec),
         out_shardings=None,
     )
+    p_predict_step = pjit(
+        predict_step,
+        in_shardings=(params_spec, data_spec),
+        out_shardings=None,
+    )
 
     def run_evaluation(params, mesh):
         start_eval_time = time.perf_counter()
         metrics = []
+        predictions = []
         for batch in tqdm(
             dataset.valid,
             desc="Evaluating...",
@@ -1329,6 +1350,26 @@ def main():
             metrics_batch = jax.device_get(metrics_batch)
             metrics.append(metrics_batch)
 
+            # predict
+            if training_args.n_predict and len(predictions) < training_args.n_predict:
+                with mesh:
+                    predictions_batch = p_predict_step(params, batch)
+                n_needed = training_args.n_predict - len(predictions)
+                predictions_batch = predictions_batch[:n_needed]
+                predictions_batch = jax.device_get(predictions_batch)
+                preds = tokenizer.batch_decode(predictions_batch, skip_special_tokens=True)
+                preds = [c.strip() for c in preds]
+                pixel_values = batch["pixel_values"][:n_needed]
+                images = jax.device_get(pixel_values)
+                images = images[:n_needed]
+                images = logits_to_image(images)
+                images = [Image.fromarray(img) for img in images]
+                input_ids = batch["input_ids"][:n_needed]
+                input_ids = jax.device_get(input_ids)
+                captions = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+                captions = [c.strip() for c in captions]
+                predictions.extend(list(zip(images, captions, preds)))
+
         # get the mean of the metrics
         metrics = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *metrics)
         metrics = jax.tree_util.tree_map(jnp.mean, metrics)
@@ -1338,6 +1379,10 @@ def main():
 
         # log metrics
         state.log(metrics)
+
+        # log predictions
+        if len(predictions) > 0:
+            state.log_predictions(predictions)
 
         # Print metrics and update progress bar
         print(f"Eval metrics: {metrics}")
