@@ -1375,6 +1375,7 @@ def main():
 
         # shorten batches if possible
         max_batch = training_args.n_predict // jax.process_count()
+        max_batch = max(max_batch, num_local_devices)
 
         for batch in tqdm(
             dataset.valid,
