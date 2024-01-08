@@ -39,7 +39,7 @@
     "mlp_dropout_rate": 0.0,
     "pool_type": null,
     "unroll": 100,
-    "registers": 8,
+    "registers": 0,
     "gradient_checkpointing": true,
     "image_size": 256,
     "hidden_size": 1024,
