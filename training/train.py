@@ -30,8 +30,9 @@ from jax import numpy as jnp
 from jax.experimental import multihost_utils
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.mesh_utils import create_device_mesh
-from jax.experimental.pjit import pjit, with_sharding_constraint
+from jax.experimental.pjit import pjit
 from jax.experimental.shard_map import shard_map
+from jax.lax import with_sharding_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from precondition.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
@@ -338,6 +339,10 @@ class ModelArguments:
             )
         },
     )
+    float32_logits: Optional[bool] = field(
+        default=False,
+        metadata={"help": ("Cast attention logits to float32.")},
+    )
     unroll: int = field(
         default=1,
         metadata={"help": ("Number of steps to unroll scanned layers.")},
@@ -605,12 +610,10 @@ def main():
     # Update config
     clipConfig["text_config"]["unroll"] = model_args.unroll
     clipConfig["vision_config"]["unroll"] = model_args.unroll
-    if training_args.gradient_checkpointing:
-        clipConfig["text_config"]["gradient_checkpointing"] = True
-        clipConfig["vision_config"]["gradient_checkpointing"] = True
-    else:
-        clipConfig["text_config"]["gradient_checkpointing"] = False
-        clipConfig["vision_config"]["gradient_checkpointing"] = False
+    clipConfig["text_config"]["gradient_checkpointing"] = training_args.gradient_checkpointing
+    clipConfig["vision_config"]["gradient_checkpointing"] = training_args.gradient_checkpointing
+    clipConfig["text_config"]["float32_logits"] = model_args.float32_logits
+    clipConfig["vision_config"]["float32_logits"] = model_args.float32_logits
     clipConfig["dtype"] = model_args.dtype
 
     # Load model
