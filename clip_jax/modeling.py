@@ -1511,6 +1511,13 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             model_inputs[k] = jnp.repeat(model_inputs[k], bs, axis=0)
         _decode = partial(CLIPModel.__call__, decode=True)
         past_key_values = self.init(**model_inputs, method=_decode)["cache"]
+        # for generation compatibility
+        # - put batch before scan
+        past_key_values = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
+        # - remove scan dimension from index
+        past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"] = past_key_values["text"]["encoder"][
+            "layers"
+        ]["attention"]["cache_index"][0]
         return {"past_key_values": past_key_values, "encoder_outputs": encoder_outputs}
 
     def encode(self, input_ids, params, return_dict=True):
@@ -1523,6 +1530,12 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         return EncoderOutput(last_hidden_state=res) if return_dict else res
 
     def decode(self, decoder_input_ids, encoder_outputs, params, past_key_values, return_dict=True):
+        # for generation compatibility, apply inverse
+        past_key_values = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
+        scan_dim = past_key_values["text"]["encoder"]["layers"]["attention"]["cached_key"].shape[0]
+        past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"] = jnp.broadcast_to(
+            past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"], (scan_dim,)
+        )
         outputs, mutable = self.apply(
             {"params": params, "cache": past_key_values},
             mutable=["cache"],
@@ -1534,8 +1547,15 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             method=self.get_text_features,
         )
         logits = outputs["text_model_output"]["last_hidden_state"]
-        cache = mutable["cache"]
-        return DecoderOutput(logits=logits, past_key_values=cache) if return_dict else (logits, cache)
+        # for generation compatibility
+        past_key_values = mutable["cache"]
+        past_key_values = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
+        past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"] = past_key_values["text"]["encoder"][
+            "layers"
+        ]["attention"]["cache_index"][0]
+        return (
+            DecoderOutput(logits=logits, past_key_values=past_key_values) if return_dict else (logits, past_key_values)
+        )
 
     def update_inputs_for_generation(self, model_outputs, model_kwargs):
         model_kwargs["past_key_values"] = model_outputs.past_key_values
