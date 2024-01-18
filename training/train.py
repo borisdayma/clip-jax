@@ -76,6 +76,7 @@ class TrainingArguments:
     do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
     n_predict: Optional[int] = field(default=0, metadata={"help": "Batch size for training."})
+    predict_num_beams: Optional[int] = field(default=1, metadata={"help": "Num beams used during prediction."})
 
     batch_size_per_node: Optional[int] = field(default=64, metadata={"help": "Batch size for training."})
 
@@ -1027,8 +1028,7 @@ def main():
     # Define loss
     def encoder_decoder_loss(logits, labels, label_mask):
         """Cross entropy for language models"""
-        one_hot = jax.nn.one_hot(labels, logits.shape[-1])
-        loss = optax.softmax_cross_entropy(logits, one_hot)
+        loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
         loss = loss * label_mask
         # normalize
         loss /= jnp.sum(label_mask, axis=-1, keepdims=True)
@@ -1277,7 +1277,9 @@ def main():
 
     # Predict step
     def predict_step(params, batch):
-        outputs = model.generate(batch["pixel_values"], params=params).sequences
+        outputs = model.generate(
+            batch["pixel_values"], params=params, num_beams=training_args.predict_num_beams
+        ).sequences
         return outputs
 
     # Create parallel version of the train and eval step
