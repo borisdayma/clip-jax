@@ -1387,8 +1387,7 @@ def main():
             disable=jax.process_index() > 0,
         ):
             # shorten batch if possible
-            batch_size = batch[0].shape[0]
-            batch = jax.tree_map(lambda x: x[: min(max_batch, batch_size)], batch)
+            batch = jax.tree_map(lambda x: x[:max_batch], batch)
 
             # preprocess batch
             captions = [caption.decode("utf-8") for caption in batch[1]]
