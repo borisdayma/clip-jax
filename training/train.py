@@ -561,6 +561,13 @@ class State:
             wandb.log(log_metrics)
 
 
+def should_stop_training(metrics):
+    lr = metrics.get("train/learning_rate", None)
+    if lr is not None and lr == 0:
+        return True
+    return False
+
+
 def main():
     # cluster initialization
     jax.distributed.initialize()
@@ -1514,7 +1521,7 @@ def main():
         state.log({})
 
     # Init training variables
-    evaluation_ran, save_model_ran, metrics_logged = False, False, False
+    evaluation_ran, save_model_ran, metrics_logged, stop_training = False, False, False, False
     step, samples = state.step, state.samples  # separate copies for timing metrics
     opt_state_step = 0  # ensure it is defined in evaluation mode
     step_start = step  # define it for test mode
@@ -1529,6 +1536,9 @@ def main():
     # Training loop
     logger.info("***** Running training *****")
     for epoch in epochs:
+        if stop_training:
+            break
+
         state.update(epoch=epoch)
         state.log({})
 
@@ -1620,6 +1630,7 @@ def main():
                     if jax.process_index() == 0:
                         state.log(metrics)
                     metrics_logged = True
+                    stop_training = should_stop_training(metrics)
 
                 # evaluation
                 if training_args.do_eval and step % training_args.eval_steps == 0:
@@ -1638,6 +1649,10 @@ def main():
                     # terminate script
                     print("Test successful")
                     return
+                
+                # end training
+                if stop_training:
+                    break
 
         # log final metrics
         if not metrics_logged:
