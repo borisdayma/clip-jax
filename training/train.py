@@ -563,7 +563,7 @@ class State:
 
 def should_stop_training(metrics):
     lr = metrics.get("train/learning_rate", None)
-    if lr is not None and lr == 0:
+    if lr is not None and jax.device_get(lr) == 0:
         return True
     return False
 
@@ -1649,7 +1649,7 @@ def main():
                     # terminate script
                     print("Test successful")
                     return
-                
+
                 # end training
                 if stop_training:
                     break
