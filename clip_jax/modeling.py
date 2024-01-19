@@ -985,6 +985,19 @@ class CLIPTextTransformer(nn.Module):
         if self.use_causal_mask:
             assert self.eos_token_id is not None
 
+        # attention mask
+        if attention_mask is not None:
+            attention_mask = nn.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
+        if self.use_causal_mask:
+            causal_mask = nn.make_causal_mask(input_ids)
+            if attention_mask is None:
+                attention_mask = causal_mask
+            else:
+                attention_mask = nn.combine_masks(attention_mask, causal_mask)
+        if decode and attention_mask is not None:
+            print("Warning: attention_mask is ignored in decode mode.")
+            attention_mask = None
+        
         # decoder mode
         # src: adapted from google-research/big_vision
         if self.is_decoder and not deterministic:
@@ -1015,19 +1028,6 @@ class CLIPTextTransformer(nn.Module):
             dtype=dtype,
             name="embeddings",
         )(input_ids=input_ids)
-
-        # attention mask
-        if attention_mask is not None:
-            attention_mask = nn.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
-        if self.use_causal_mask:
-            causal_mask = nn.make_causal_mask(input_ids)
-            if attention_mask is None:
-                attention_mask = causal_mask
-            else:
-                attention_mask = nn.combine_masks(attention_mask, causal_mask)
-        if decode and attention_mask is not None:
-            print("Warning: attention_mask is ignored in decode mode.")
-            attention_mask = None
 
         encoder_outputs = CLIPEncoder(
             num_layers=self.num_layers,
