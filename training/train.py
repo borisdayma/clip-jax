@@ -92,7 +92,7 @@ class TrainingArguments:
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate."})
     optim: str = field(
         default="distributed_shampoo",
-        metadata={"help": ('The optimizer to use. Can be "distributed_shampoo" (default) or "adam"')},
+        metadata={"help": ('The optimizer to use. Can be "distributed_shampoo" (default), "adam" or "adafactor"')},
     )
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay applied to parameters."})
     beta1: float = field(
@@ -104,6 +104,7 @@ class TrainingArguments:
         metadata={"help": "Beta2 for for Adam & Distributed Shampoo."},
     )
     adam_epsilon: float = field(default=1e-8, metadata={"help": "Epsilon for AdamW optimizer."})
+    max_grad_norm: float = field(default=1.0, metadata={"help": "Max gradient norm for Adafactor."})
     block_size_text: int = field(
         default=1024,
         metadata={"help": "Chunked size for large layers with Distributed Shampoo."},
@@ -281,7 +282,10 @@ class TrainingArguments:
         assert self.optim in [
             "distributed_shampoo",
             "adam",
+            "adafactor",
         ], f"Unknown optimizer {self.optim}"
+        if self.optim == "adafactor" and self.weight_decay == 0:
+            self.weight_decay = None
         assert self.graft_type in [
             "rmsprop_normalized",
             "rmsprop",
@@ -909,6 +913,14 @@ def main():
         )
         optimizer = {k: _opt(learning_rate=learning_rate_fn) for k in split_scanned_params(logical_params)}
 
+    elif training_args.optim == "adafactor":
+        _opt = partial(
+            optax.adafactor,
+            clipping_threshold=training_args.max_grad_norm,
+            weight_decay_rate=training_args.weight_decay,
+        )
+        optimizer = {k: _opt(learning_rate=learning_rate_fn) for k in split_scanned_params(logical_params)}
+
     # get PartitionSpecof optimizer state
     def get_opt_state_spec():
         # get opt_state shape without actual init
@@ -948,7 +960,10 @@ def main():
 
         def _get_spec(**kwargs):
             """Get optimizer spec for a certain model portion"""
-            if training_args.optim == "adam":
+            if training_args.optim == "adafactor":
+                # we just replicate to each device
+                return None
+            elif training_args.optim == "adam":
                 return _adam_pspec_fn(kwargs["params_spec"], kwargs["opt_state_shape"])
             elif training_args.optim == "distributed_shampoo":
                 return kwargs["opt_fn"].pspec_fn(
@@ -972,8 +987,8 @@ def main():
                 opt_fn=_opt_fn,
                 params_shape=p,
             )
-            if "scanned" in k:
-                # add scan dimension
+            if "scanned" in k and training_args.optim != "adafactor":
+                # add scan dimension (not for adafactor which is replicated)
                 opt_state_spec[k] = jax.tree_util.tree_map(
                     lambda x: PartitionSpec(*scan_spec + x),
                     opt_state_spec[k],
@@ -1211,7 +1226,12 @@ def main():
         new_params, new_opt_state = update_params(params, opt_state, grads)
 
         # get opt_state_step - TODO: only shampoo is supported at the moment
-        opt_state_step = new_opt_state["text"][0]
+        if training_args.optim == "distributed_shampoo":
+            opt_state_step = new_opt_state["text"][0]
+        elif training_args.optim == "adafactor":
+            opt_state_step = new_opt_state["text"][2].count
+        else:
+            raise NotImplementedError
 
         # get metrics
         metrics = {
