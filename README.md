@@ -78,6 +78,7 @@ TODO:
 ## Acknowledgements
 
 - [Lucas Beyer](https://twitter.com/giffmana) for helping with clarifications on the [Sigmoid Loss for Language Image Pre-Training](https://arxiv.org/abs/2303.15343) paper and [Image Captioners Are Scalable Vision Learners Too](https://arxiv.org/abs/2306.07915)
+- [Timothée Darcet](https://twitter.com/TimDarcet) for helping with clarifications on the [Vision Transformers Need Registers](https://arxiv.org/abs/2309.16588) paper
 - 🤗 Hugging Face for reference implementation of CLIP
 - Google [TPU Research Cloud (TRC) program](https://sites.research.google/trc/) for providing computing resources
 - [Weights & Biases](https://wandb.com/) for providing the infrastructure for experiment tracking and model management
