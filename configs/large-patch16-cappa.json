@@ -17,7 +17,7 @@
     "mask_token_id": 4,
     "pad_token_id": 3,
     "bos_token_id": 1,
-    "masked_pred_prob": 0.0,
+    "masked_pred_prob": 0.75,
     "is_decoder": true,
     "vocab_size": 50000,
     "hidden_size": 1024,
