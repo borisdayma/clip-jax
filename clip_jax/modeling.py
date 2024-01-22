@@ -997,7 +997,7 @@ class CLIPTextTransformer(nn.Module):
         if decode and attention_mask is not None:
             print("Warning: attention_mask is ignored in decode mode.")
             attention_mask = None
-        
+
         # decoder mode
         # src: adapted from google-research/big_vision
         if self.is_decoder and not deterministic:
@@ -1188,8 +1188,8 @@ class CLIPVisionTransformer(nn.Module):
 
         # remove registers
         if self.registers and not self.keep_registers:
-            if self.pool_type == "tok":
-                print("Warning: removing registers in tok pool mode does not seem necessary.")
+            if self.pool_type is None or self.pool_type == "tok":
+                print(f"Warning: removing registers with pool_type = {self.pool_type} does not seem necessary.")
             last_hidden_state = last_hidden_state[:, : -self.registers]
             last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
