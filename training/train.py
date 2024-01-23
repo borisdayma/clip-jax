@@ -24,7 +24,7 @@ import tensorflow_io as tfio
 import transformers
 import wandb
 from flax.core import FrozenDict
-from flax.training import checkpoints
+from flax.training import orbax_utils
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import numpy as jnp
 from jax.experimental import multihost_utils
@@ -754,16 +754,18 @@ def main():
     with mesh:
         params = init_params()
 
+    # Restore checkpoint
+    def _restore_checkpoint(ckpt, dir, step):
+        logger.info(f"Restoring checkpoint from {dir} at step {step}")
+        restore_args = orbax_utils.restore_args_from_target(ckpt, mesh)
+        orbax_options = orbax.checkpoint.CheckpointManagerOptions()
+        checkpoint_manager = orbax.checkpoint.CheckpointManager(dir, orbax_checkpointer, orbax_options)
+        return checkpoint_manager.restore(step, ckpt, restore_kwargs={"restore_args": restore_args, "transforms": {}})
+
+    ckpt = {}
     if model_args.model_name_or_path is not None:
-        # Restore checkpoint
-        logger.info(f"Restoring checkpoint from {model_args.model_name_or_path}")
-        params = checkpoints.restore_checkpoint(
-            model_args.model_name_or_path,
-            prefix="model_",
-            step=state.step,
-            target=params,
-            orbax_checkpointer=orbax_checkpointer,
-        )
+        logger.info("Restoring model parameters")
+        ckpt["params"] = params
 
     # Create learning rate schedule
     def create_learning_rate_fn() -> Callable[[int], jnp.array]:
@@ -1017,14 +1019,16 @@ def main():
 
     if model_args.restore_state:
         # Restore checkpoint
-        logger.info(f"Restoring optimizer checkpoint from {model_args.model_name_or_path}")
-        opt_state = checkpoints.restore_checkpoint(
-            model_args.model_name_or_path,
-            prefix="opt_state_",
-            step=state.step,
-            target=opt_state,
-            orbax_checkpointer=orbax_checkpointer,
-        )
+        logger.info("Restoring optimizer checkpoint")
+        ckpt["opt_state"] = opt_state
+
+    # restore
+    if ckpt:
+        ckpt = _restore_checkpoint(ckpt, model_args.model_name_or_path, state.step)
+        if "params" in ckpt:
+            params = ckpt["params"]
+        if "opt_state" in ckpt:
+            opt_state = ckpt["opt_state"]
 
     # Define update function
     def update_params(params, opt_state, grads):
@@ -1481,34 +1485,29 @@ def main():
         state.log({})
 
     def run_save_model(params, opt_state):
-        keep_checkpoints = 100_000
+        def _save_checkpoint(ckpt, dir, step):
+            orbax_options = orbax.checkpoint.CheckpointManagerOptions(create=True)
+            save_checkpoint_manager = orbax.checkpoint.CheckpointManager(dir, orbax_checkpointer, orbax_options)
+            save_args = orbax_utils.save_args_from_target(ckpt)
+            save_checkpoint_manager.save(step, ckpt, save_kwargs={"save_args": save_args})
+
         start_save_time = time.perf_counter()
+
         # save config
         if jax.process_index() == 0:
             config_path = f"{training_args.output_dir}/config.json"
             with fsspec.open(config_path, "w") as f:
                 json.dump(clipConfig, f, indent=2)
         multihost_utils.sync_global_devices("save_config")
-        # save model
-        params_dir = checkpoints.save_checkpoint_multiprocess(
-            training_args.output_dir,
-            params,
-            prefix="model_",
-            step=state.step,
-            overwrite=True,
-            keep=keep_checkpoints,
-            orbax_checkpointer=orbax_checkpointer,
-        )
-        # save opt_state
-        opt_state_dir = checkpoints.save_checkpoint_multiprocess(
-            training_args.output_dir,
-            opt_state,
-            prefix="opt_state_",
-            step=state.step,
-            overwrite=True,
-            keep=keep_checkpoints,
-            orbax_checkpointer=orbax_checkpointer,
-        )
+
+        # save
+        ckpt = {}
+        if params is not None:
+            ckpt["params"] = params
+        if opt_state is not None:
+            ckpt["opt_state"] = opt_state
+        _save_checkpoint(ckpt, training_args.output_dir, state.step)
+
         # save config
         if jax.process_index() == 0:
             # config
@@ -1522,23 +1521,10 @@ def main():
             with artifact.new_file("state.json", mode="w", encoding="utf-8") as f:
                 json.dump(state.to_dict(), f)
             wandb.run.log_artifact(artifact)
-            # model / opt_state
-            use_bucket = training_args.output_dir.startswith("gs://")
-            for item, item_dir in zip(["model", "opt_state"], [params_dir, opt_state_dir]):
-                artifact = wandb.Artifact(
-                    name=f"{item}-{wandb.run.id}",
-                    type=item,
-                    metadata={"output_dir": item_dir, **state.to_dict()},
-                )
-                if use_bucket:
-                    artifact.add_reference(item_dir)
-                else:
-                    artifact.add_dir(item_dir)
-                wandb.run.log_artifact(artifact)
 
         # update timing
         state.add_time("save", time.perf_counter() - start_save_time)
-        state.log({})
+        state.log({"saved_checkpoint": state.step})
 
     # Init training variables
     evaluation_ran, save_model_ran, metrics_logged, stop_training = False, False, False, False
