@@ -12,7 +12,7 @@ import orbax
 import torch
 import torchvision
 import wandb
-from flax.training import checkpoints, orbax_utils
+from flax.training import orbax_utils
 from jax.experimental.mesh_utils import create_device_mesh
 from jax.experimental.pjit import pjit
 from jax.lax import with_sharding_constraint
@@ -1107,7 +1107,7 @@ if __name__ == "__main__":
     )
     ds = load_dataset(transform=transforms)
     every_n = int(1 / args.fraction)
-    dl = torch.utils.data.DataLoader(ds, batch_size=every_n, num_workers=20, shuffle=False)
+    dl = torch.utils.data.DataLoader(ds, batch_size=every_n, num_workers=0, shuffle=False)
 
     # paths
     tokenizer_name = args.tokenizer_name
@@ -1145,7 +1145,8 @@ if __name__ == "__main__":
         params = init_params()
 
     # get checkpoints
-    available_steps = checkpoints.available_steps(model_path)
+    available_steps = orbax.checkpoint.utils.checkpoint_steps(model_path)
+    available_steps = sorted(available_steps)
     if args.latest_only:
         available_steps = available_steps[-1:]
 
