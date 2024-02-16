@@ -612,7 +612,7 @@ class MAPHead(nn.Module):
     float32_logits: bool
 
     @nn.compact
-    def __call__(self, x, deterministic: bool = False):
+    def __call__(self, x, mask, deterministic: bool = False):
         batch, length, embed_dim = x.shape
         probe = self.param(
             "probe",
@@ -621,6 +621,8 @@ class MAPHead(nn.Module):
         )
         probe = jnp.tile(probe, [batch, 1, 1])
         probe = nn.with_logical_constraint(probe, ("batch", None, "embed"))
+        if mask is not None:
+            mask = nn.make_attention_mask(jnp.ones((batch, 1), dtype="i4"), mask, dtype=self.dtype)
         x = MultiHeadDotProductAttention(
             num_heads=self.num_heads,
             dtype=self.dtype,
@@ -966,6 +968,7 @@ class CLIPTextTransformer(nn.Module):
     masked_pred_prob: float = 0.75  # recommended by Cappa
     is_decoder: bool = False  # for Cappa
     dtype: str = "float32"
+    pool_type: str = None  # "bos", "eos", "map"
 
     @nn.compact
     def __call__(
@@ -982,10 +985,11 @@ class CLIPTextTransformer(nn.Module):
             assert self.use_causal_mask
         else:
             assert encoder_hidden_states is None
-        if self.use_causal_mask:
+        if self.use_causal_mask or self.pool_type in ["map", "eos"]:
             assert self.eos_token_id is not None
 
         # attention mask
+        input_attention_mask = attention_mask
         if attention_mask is not None:
             attention_mask = nn.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
         if self.use_causal_mask:
@@ -1071,6 +1075,7 @@ class CLIPTextTransformer(nn.Module):
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
         if self.is_decoder:
+            assert self.pool_type is not None, "pool_type is ignored in decoder mode"
             # dense to vocab
             last_hidden_state = nn.Dense(
                 self.vocab_size,
@@ -1083,11 +1088,12 @@ class CLIPTextTransformer(nn.Module):
             pooled_output = None
 
         else:
-            if not self.use_causal_mask:
-                # take features from the BOS embedding instead of EOS (no causal mask)
+            assert self.pool_type is not None, "pool_type must be specified when not in decoder mode"
+            if self.use_causal_mask:
+                assert not self.pool_type == "bos", "pool_type = 'bos' does not make sense with causal mask"
+            if self.pool_type == "bos":
                 pooled_output = last_hidden_state[:, 0, :]
-            else:
-                # take features from the EOS embedding
+            elif self.pool_type == "eos":
 
                 def _get_id_pos(mat, id):
                     return jnp.where(mat == id, 1, 0).argmax(axis=-1)
@@ -1095,6 +1101,24 @@ class CLIPTextTransformer(nn.Module):
                 pooled_output = last_hidden_state[
                     jnp.arange(last_hidden_state.shape[0]), _get_id_pos(input_ids, self.eos_token_id)
                 ]
+            elif self.pool_type == "map":
+                pooled_output = MAPHead(
+                    num_heads=self.num_heads,
+                    mlp_dim=self.mlp_dim,
+                    ln_type=self.ln_type,
+                    use_rmsnorm=self.use_rmsnorm,
+                    use_bias=self.use_bias,
+                    force_scale=self.force_scale,
+                    activations=self.activations,
+                    normalize_qk=self.normalize_qk,
+                    attention_dropout=self.attention_dropout,
+                    mlp_dropout_rate=self.mlp_dropout_rate,
+                    float32_logits=self.float32_logits,
+                    dtype=dtype,
+                )(last_hidden_state, input_attention_mask, deterministic=deterministic)
+
+            else:
+                raise ValueError(f"pool_type {self.pool_type} not supported.")
             pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         return dict(
@@ -1208,15 +1232,16 @@ class CLIPVisionTransformer(nn.Module):
             pooled_output = last_hidden_state[:, 0, :]
 
         elif self.pool_type == "gap":
-            # mean pool - jnp.mean -> leads to large memory consumption
-            # pooled_output = jnp.mean(last_hidden_state, axis=1)
+            # mean pool - jnp.mean -> was leading to large memory consumption in the past
+            pooled_output = jnp.mean(last_hidden_state, axis=1)
 
-            # mean pool - for loop -> this works!
-            length = last_hidden_state.shape[1]
-            pooled_output = last_hidden_state[:, 0, :]
-            for i in range(1, length):
-                pooled_output = pooled_output + last_hidden_state[:, i, :]
-            pooled_output = pooled_output / length
+            if False:
+                # mean pool - for loop -> this worked better in the past, keeping it just in case
+                length = last_hidden_state.shape[1]
+                pooled_output = last_hidden_state[:, 0, :]
+                for i in range(1, length):
+                    pooled_output = pooled_output + last_hidden_state[:, i, :]
+                pooled_output = pooled_output / length
 
         elif self.pool_type == "map":
             pooled_output = MAPHead(
@@ -1232,7 +1257,7 @@ class CLIPVisionTransformer(nn.Module):
                 mlp_dropout_rate=self.mlp_dropout_rate,
                 float32_logits=self.float32_logits,
                 dtype=dtype,
-            )(last_hidden_state)
+            )(last_hidden_state, None, deterministic=deterministic)
 
         elif self.pool_type is None:
             pooled_output = None
