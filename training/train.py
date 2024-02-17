@@ -84,6 +84,10 @@ class TrainingArguments:
         default=1,
         metadata={"help": ("Number of updates steps to accumulate before performing an update" " pass.")},
     )
+    freeze_vision: bool = field(
+        default=False,
+        metadata={"help": ("Freezes vision tower.")},
+    )
     loss_type: str = field(
         default="cross_entropy",
         metadata={"help": ("The type of loss to use. Can be 'cross_entropy' (default) or 'sigmoid'.")},
