@@ -1075,7 +1075,7 @@ class CLIPTextTransformer(nn.Module):
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
         if self.is_decoder:
-            assert self.pool_type is not None, "pool_type is ignored in decoder mode"
+            assert self.pool_type is None, "pool_type is ignored in decoder mode"
             # dense to vocab
             last_hidden_state = nn.Dense(
                 self.vocab_size,
