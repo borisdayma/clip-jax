@@ -1604,7 +1604,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         return True
 
 
-def normalize(x, eps=1e-7, safe_norm=True):
+def normalize(x, eps=1e-6, safe_norm=True):
     if safe_norm:
         return x * jax.lax.rsqrt(jnp.sum(jax.lax.square(x), axis=-1, keepdims=True) + eps)
     else:
