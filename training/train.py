@@ -467,6 +467,21 @@ def unsplit_scanned_params(data):
     return unflatten_dict(flat)
 
 
+def trainable_params(data, training_args):
+    """Return trainable params"""
+    frozen_keys = None
+    if training_args.freeze_vision:
+        frozen_keys = ["vision:embeddings", "vision:encoder"]
+    if frozen_keys is not None:
+        data_train = {}
+        for k, v in flatten_dict(data, sep=":").items():
+            if not any([e in k for e in frozen_keys]):
+                data_train[k] = v
+        return unflatten_dict(data_train, sep=":")
+    else:
+        return data
+
+
 @dataclass
 class State:
     step: int = 0
@@ -848,9 +863,7 @@ def main():
         preconditioner_axis = (
             training_args.shard_shampoo_across
             if training_args.shard_shampoo_across != "2d"
-            else "model"
-            if training_args.mp_devices > training_args.dp_devices
-            else "data"
+            else "model" if training_args.mp_devices > training_args.dp_devices else "data"
         )
         preconditioner_num_devices = (
             training_args.mp_devices if preconditioner_axis == "model" else training_args.dp_devices
@@ -890,7 +903,7 @@ def main():
         # for main optimizer, we need to allow scanned layers
         optimizer = {}
         opt_fn = {}
-        for k, p in split_scanned_params(logical_params).items():
+        for k, p in split_scanned_params(trainable_params(logical_params, training_args)).items():
             if ("scanned_text" in k) or ("scanned_vision" in k):
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
@@ -913,7 +926,10 @@ def main():
             eps=training_args.adam_epsilon,
             weight_decay=training_args.weight_decay,
         )
-        optimizer = {k: _opt(learning_rate=learning_rate_fn) for k in split_scanned_params(logical_params)}
+        optimizer = {
+            k: _opt(learning_rate=learning_rate_fn)
+            for k in split_scanned_params(trainable_params(logical_params, training_args))
+        }
 
     elif training_args.optim == "adafactor":
         _opt = partial(
@@ -921,13 +937,16 @@ def main():
             clipping_threshold=training_args.max_grad_norm,
             weight_decay_rate=training_args.weight_decay,
         )
-        optimizer = {k: _opt(learning_rate=learning_rate_fn) for k in split_scanned_params(logical_params)}
+        optimizer = {
+            k: _opt(learning_rate=learning_rate_fn)
+            for k in split_scanned_params(trainable_params(logical_params, training_args))
+        }
 
     # get PartitionSpecof optimizer state
     def get_opt_state_spec():
         # get opt_state shape without actual init
         opt_state_shape = {}
-        for k, p in split_scanned_params(logical_params).items():
+        for k, p in split_scanned_params(trainable_params(logical_params, training_args)).items():
             if ("scanned_text" in k) or ("scanned_vision" in k):
                 opt_state_shape[k] = jax.eval_shape(jax.vmap(optimizer[k].init), p)
             else:
@@ -957,7 +976,7 @@ def main():
             )
 
         # get PartitionSpec
-        split_spec = split_scanned_params(params_spec)
+        split_spec = split_scanned_params(trainable_params(params_spec, training_args))
         opt_state_spec = {}
 
         def _get_spec(**kwargs):
@@ -976,7 +995,7 @@ def main():
             else:
                 raise NotImplementedError
 
-        for k, p in split_scanned_params(logical_params).items():
+        for k, p in split_scanned_params(trainable_params(logical_params, training_args)).items():
             p_spec = split_spec[k]
             if ("scanned_text" in k) or ("scanned_vision" in k):
                 # extract 1 layer
@@ -1006,7 +1025,7 @@ def main():
     @partial(pjit, in_shardings=(params_spec,), out_shardings=opt_state_spec)
     def init_opt_state(params):
         opt_state = {}
-        for k, p in split_scanned_params(params).items():
+        for k, p in split_scanned_params(trainable_params(params, training_args)).items():
             init_fn = optimizer[k].init
             if "scanned" in k:
                 init_fn = jax.vmap(init_fn)
@@ -1032,8 +1051,8 @@ def main():
 
     # Define update function
     def update_params(params, opt_state, grads):
-        grads = split_scanned_params(grads)
-        split_params = split_scanned_params(params)
+        grads = split_scanned_params(trainable_params(grads, training_args))
+        split_params = split_scanned_params(trainable_params(params, training_args))
         new_opt_state = {}
         new_params = {}
         for k, param in split_params.items():
@@ -1250,11 +1269,12 @@ def main():
 
         def maybe_fn(fn, val, freq):
             """Call fn only if it is a logging step"""
+            trainable_val = trainable_params(val, training_args)
             return jax.lax.cond(
                 state.step % freq == 0,
                 fn,
                 lambda p: jax.tree_map(lambda v: jnp.zeros_like(v), fn(p)),
-                val,
+                trainable_val,
             )
 
         if training_args.log_norm_steps:
