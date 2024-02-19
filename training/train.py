@@ -75,7 +75,8 @@ class TrainingArguments:
     )
     do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
-    n_predict: Optional[int] = field(default=0, metadata={"help": "Batch size for training."})
+    n_predict: Optional[int] = field(default=0, metadata={"help": "Number of predictions."})
+    n_predict_batch: Optional[int] = field(default=None, metadata={"help": "Batch size for training."})
     predict_num_beams: Optional[int] = field(default=1, metadata={"help": "Num beams used during prediction."})
 
     batch_size_per_node: Optional[int] = field(default=64, metadata={"help": "Batch size for training."})
@@ -116,6 +117,10 @@ class TrainingArguments:
     block_size_vision: int = field(
         default=1024,
         metadata={"help": "Chunked size for large layers with Distributed Shampoo."},
+    )
+    set_opt_spec_vision_to_none: bool = field(
+        default=False,
+        metadata={"help": "Set the optimizer vision spec to None."},
     )
     preconditioning_compute_steps: int = field(
         default=20, metadata={"help": "Number of steps to update preconditioner."}
@@ -1026,6 +1031,12 @@ def main():
     # Initialize or restore optimizer state
     logger.info("Initializing optimizer state")
 
+    # when training only vision head, we may have too few parameters for sharding optimizer state
+    if training_args.set_opt_spec_vision_to_none:
+        if not training_args.freeze_vision:
+            logger.warn("Setting optimizer state spec for vision to None while it does not seem required")
+        opt_state_spec["vision"] = None    
+
     @partial(pjit, in_shardings=(params_spec,), out_shardings=opt_state_spec)
     def init_opt_state(params):
         opt_state = {}
@@ -1431,7 +1442,8 @@ def main():
         predictions = []
 
         # shorten batches if possible
-        max_batch = training_args.n_predict // jax.process_count()
+        n_predict_batch = training_args.n_predict if training_args.n_predict_batch is None else training_args.n_predict_batch
+        max_batch = n_predict_batch // jax.process_count()
         max_batch = max(max_batch, num_local_devices)
 
         for batch in tqdm(
