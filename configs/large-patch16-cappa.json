@@ -2,10 +2,7 @@
   "text_config": {
     "float32_logits": true,
     "dtype": "float32",
-    "activations": [
-      "gelu",
-      "linear"
-    ],
+    "activations": ["gelu", "linear"],
     "normalize_qk": false,
     "use_bias": false,
     "force_scale": false,
@@ -36,10 +33,7 @@
     "position_embedding_shape": null,
     "position_embedding_factorized": false,
     "dtype": "float32",
-    "activations": [
-      "gelu",
-      "linear"
-    ],
+    "activations": ["gelu", "linear"],
     "normalize_qk": false,
     "use_bias": false,
     "force_scale": false,
@@ -47,8 +41,8 @@
     "mlp_dropout_rate": 0.0,
     "pool_type": null,
     "unroll": 100,
-    "registers": 0,
-    "keep_registers": false,
+    "registers": 8,
+    "keep_registers": true,
     "gradient_checkpointing": true,
     "image_size": 256,
     "hidden_size": 1024,

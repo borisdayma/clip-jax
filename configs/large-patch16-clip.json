@@ -2,7 +2,10 @@
   "text_config": {
     "float32_logits": true,
     "dtype": "float32",
-    "activations": ["gelu", "linear"],
+    "activations": [
+      "gelu",
+      "linear"
+    ],
     "normalize_qk": false,
     "use_bias": false,
     "force_scale": false,
@@ -15,16 +18,17 @@
     "pad_token_id": 3,
     "bos_token_id": 1,
     "masked_pred_prob": 0.75,
-    "is_decoder": true,
+    "is_decoder": false,
+    "pool_type": "map",
     "vocab_size": 50000,
     "hidden_size": 1024,
-    "max_length": 64,
-    "num_layers": 12,
+    "max_length": 80,
+    "num_layers": 24,
     "use_rmsnorm": true,
     "ln_type": "normformer",
     "num_heads": 16,
     "position_embedding_type": "rotary",
-    "use_causal_mask": true,
+    "use_causal_mask": false,
     "mlp_dim": 3072
   },
   "vision_config": {
@@ -33,13 +37,16 @@
     "position_embedding_shape": null,
     "position_embedding_factorized": false,
     "dtype": "float32",
-    "activations": ["gelu", "linear"],
+    "activations": [
+      "gelu",
+      "linear"
+    ],
     "normalize_qk": false,
     "use_bias": false,
     "force_scale": false,
     "attention_dropout": 0.0,
     "mlp_dropout_rate": 0.0,
-    "pool_type": null,
+    "pool_type": "map",
     "unroll": 100,
     "registers": 8,
     "keep_registers": true,
