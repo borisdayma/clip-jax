@@ -360,6 +360,10 @@ class ModelArguments:
         default=False,
         metadata={"help": ("Cast attention logits to float32.")},
     )
+    masked_pred_prob: Optional[float] = field(
+        default=False,
+        metadata={"help": ("Overwrites marked_pred_prob.")},
+    )
     unroll: int = field(
         default=1,
         metadata={"help": ("Number of steps to unroll scanned layers.")},
@@ -664,6 +668,8 @@ def main():
     clipConfig["text_config"]["float32_logits"] = model_args.float32_logits
     clipConfig["vision_config"]["float32_logits"] = model_args.float32_logits
     clipConfig["dtype"] = model_args.dtype
+    if model_args.masked_pred_prob is not None:
+        clipConfig["text_config"]["masked_pred_prob"] = model_args.masked_pred_prob
 
     # Load model
     model = CLIPModel(**clipConfig)
