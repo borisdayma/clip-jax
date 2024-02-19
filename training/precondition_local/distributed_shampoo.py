@@ -840,6 +840,7 @@ def matrix_inverse_pth_root(
         error = jnp.array(0, jnp.float32)
         iters = 0
         error_ratio = 0.0
+        total_retries = 0
     else:
         retry_loop_error_threshold = 0.05
         num_tries = 1
