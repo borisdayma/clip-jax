@@ -361,7 +361,7 @@ class ModelArguments:
         metadata={"help": ("Cast attention logits to float32.")},
     )
     masked_pred_prob: Optional[float] = field(
-        default=False,
+        default=None,
         metadata={"help": ("Overwrites marked_pred_prob.")},
     )
     unroll: int = field(
