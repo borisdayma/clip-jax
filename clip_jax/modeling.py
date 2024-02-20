@@ -637,6 +637,15 @@ class MAPHead(nn.Module):
             name="attention",
         )(inputs_q=probe, inputs_kv=x, mask=None, deterministic=deterministic)
         x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
+        y = norm(self.use_rmsnorm)(
+            dtype=self.dtype,
+            use_bias=self.use_bias,
+            use_scale=self.force_scale,
+            scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
+            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
+            name="norm",
+        )(x)
+        y = nn.with_logical_constraint(y, ("batch", "length", "embed"))
         y = CLIPMLP(
             mlp_dim=self.mlp_dim,
             ln_type=self.ln_type,
@@ -647,7 +656,7 @@ class MAPHead(nn.Module):
             use_rmsnorm=self.use_rmsnorm,
             dtype=self.dtype,
             name="mlp",
-        )(x, deterministic=deterministic)
+        )(y, deterministic=deterministic)
         y = nn.with_logical_constraint(y, ("batch", "length", "embed"))
         x = x + y
         x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
