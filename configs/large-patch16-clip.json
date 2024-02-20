@@ -20,7 +20,7 @@
     "masked_pred_prob": 0.75,
     "is_decoder": false,
     "pool_type": "map",
-    "vocab_size": 50000,
+    "vocab_size": 50048,
     "hidden_size": 1024,
     "max_length": 80,
     "num_layers": 24,

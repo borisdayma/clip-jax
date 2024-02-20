@@ -1,7 +1,10 @@
 {
   "text_config": {
     "dtype": "float32",
-    "activations": ["relu", "linear"],
+    "activations": [
+      "relu",
+      "linear"
+    ],
     "use_bias": false,
     "force_scale": false,
     "attention_dropout": 0.0,
@@ -9,7 +12,7 @@
     "unroll": 100,
     "gradient_checkpointing": true,
     "eos_token_id": 49407,
-    "vocab_size": 50000,
+    "vocab_size": 50048,
     "hidden_size": 256,
     "max_length": 80,
     "num_layers": 2,
@@ -23,7 +26,10 @@
   "vision_config": {
     "position_embedding_type": "sincos2d",
     "dtype": "float32",
-    "activations": ["relu", "linear"],
+    "activations": [
+      "relu",
+      "linear"
+    ],
     "use_bias": false,
     "force_scale": false,
     "attention_dropout": 0.0,

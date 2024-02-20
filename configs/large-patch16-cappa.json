@@ -2,7 +2,10 @@
   "text_config": {
     "float32_logits": true,
     "dtype": "float32",
-    "activations": ["gelu", "linear"],
+    "activations": [
+      "gelu",
+      "linear"
+    ],
     "normalize_qk": false,
     "use_bias": false,
     "force_scale": false,
@@ -16,7 +19,7 @@
     "bos_token_id": 1,
     "masked_pred_prob": 0.75,
     "is_decoder": true,
-    "vocab_size": 50000,
+    "vocab_size": 50048,
     "hidden_size": 1024,
     "max_length": 64,
     "num_layers": 12,
@@ -33,7 +36,10 @@
     "position_embedding_shape": null,
     "position_embedding_factorized": false,
     "dtype": "float32",
-    "activations": ["gelu", "linear"],
+    "activations": [
+      "gelu",
+      "linear"
+    ],
     "normalize_qk": false,
     "use_bias": false,
     "force_scale": false,
