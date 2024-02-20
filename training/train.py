@@ -89,6 +89,14 @@ class TrainingArguments:
         default=False,
         metadata={"help": ("Freezes vision tower.")},
     )
+    reinit_text: bool = field(
+        default=False,
+        metadata={"help": ("Reinit text parameters when loading from a checkpoint.")},
+    )
+    set_opt_spec_vision_to_none: bool = field(
+        default=False,
+        metadata={"help": "Set the optimizer vision spec to None."},
+    )
     loss_type: str = field(
         default="cross_entropy",
         metadata={"help": ("The type of loss to use. Can be 'cross_entropy' (default) or 'sigmoid'.")},
@@ -117,10 +125,6 @@ class TrainingArguments:
     block_size_vision: int = field(
         default=1024,
         metadata={"help": "Chunked size for large layers with Distributed Shampoo."},
-    )
-    set_opt_spec_vision_to_none: bool = field(
-        default=False,
-        metadata={"help": "Set the optimizer vision spec to None."},
     )
     preconditioning_compute_steps: int = field(
         default=20, metadata={"help": "Number of steps to update preconditioner."}
@@ -790,7 +794,17 @@ def main():
         restore_args = orbax_utils.restore_args_from_target(ckpt, mesh)
         orbax_options = orbax.checkpoint.CheckpointManagerOptions()
         checkpoint_manager = orbax.checkpoint.CheckpointManager(dir, orbax_checkpointer, orbax_options)
-        return checkpoint_manager.restore(step, ckpt, restore_kwargs={"restore_args": restore_args, "transforms": {}})
+        if training_args.reinit_text:
+            logger.info("Text parameters were not restored from checkpoint")
+            # NOTE: used in LiT setting, we also need to reinit any head, logit bias and logit scale
+            transforms = {
+                r"(.*)(text|logit_bias|logit_scale|MAPHead)(.*)": orbax.checkpoint.Transform(use_fallback=True)
+            }
+        else:
+            transforms = {}
+        return checkpoint_manager.restore(
+            step, ckpt, restore_kwargs={"restore_args": restore_args, "transforms": transforms}
+        )
 
     ckpt = {}
     if model_args.model_name_or_path is not None:
@@ -1041,7 +1055,7 @@ def main():
     if training_args.set_opt_spec_vision_to_none:
         if not training_args.freeze_vision:
             logger.warn("Setting optimizer state spec for vision to None while it does not seem required")
-        opt_state_spec["vision"] = None    
+        opt_state_spec["vision"] = None
 
     @partial(pjit, in_shardings=(params_spec,), out_shardings=opt_state_spec)
     def init_opt_state(params):
@@ -1448,7 +1462,9 @@ def main():
         predictions = []
 
         # shorten batches if possible
-        n_predict_batch = training_args.n_predict if training_args.n_predict_batch is None else training_args.n_predict_batch
+        n_predict_batch = (
+            training_args.n_predict if training_args.n_predict_batch is None else training_args.n_predict_batch
+        )
         max_batch = n_predict_batch // jax.process_count()
         max_batch = max(max_batch, num_local_devices)
 
