@@ -80,6 +80,7 @@ class TrainingArguments:
     predict_num_beams: Optional[int] = field(default=1, metadata={"help": "Num beams used during prediction."})
 
     batch_size_per_node: Optional[int] = field(default=64, metadata={"help": "Batch size for training."})
+    valid_batch_size_per_node: Optional[int] = field(default=None, metadata={"help": "Batch size for validation."})
 
     gradient_accumulation_steps: int = field(
         default=1,
@@ -325,7 +326,7 @@ class TrainingArguments:
         self.batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
         # define batch size for data loader
         self.train_batch_size = batch_size_per_node_per_step
-        self.valid_batch_size = self.batch_size_per_node
+        self.valid_batch_size = self.valid_batch_size_per_node or self.batch_size_per_node
 
 
 @dataclass
