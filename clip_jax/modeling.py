@@ -1343,6 +1343,17 @@ class CLIPTextModelForFineTuning(nn.Module):
     text_config: Any
     dtype: jnp.dtype = jnp.float32
 
+    def __post_init__(self):
+        # add default fields vision_config
+        default_fields = dataclasses.fields(CLIPTextTransformer)
+        default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
+        default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
+        text_config = {**default_fields, **self.text_config}
+        if self.dtype is not None:
+            text_config["dtype"] = self.dtype
+        self.text_config = text_config
+        return super().__post_init__()
+
     @nn.compact
     def __call__(
         self,
@@ -1350,14 +1361,26 @@ class CLIPTextModelForFineTuning(nn.Module):
         attention_mask=None,
         deterministic: bool = True,
     ):
-        text_outputs = CLIPTextTransformer(**self.text_config, dtype=self.dtype)(
+        text_outputs = CLIPTextTransformer(**self.text_config, name="text")(
             input_ids=input_ids,
             attention_mask=attention_mask,
             deterministic=deterministic,
         )
+        return text_outputs
 
-        # return penuultimate layer
-        return text_outputs["hidden_states"][-2]
+    def init_inputs(config, rng: jax.random.PRNGKey):
+        text_config = config.text_config
+        if isinstance(text_config, dict):
+            text_config = SimpleNamespace(**text_config)
+        input_ids = jnp.ones((1, text_config.max_length), dtype="i4")
+        attention_mask = jnp.ones((1, text_config.max_length), dtype="i4")
+        params_rng, dropout_rng = jax.random.split(rng)
+        rngs = {"params": params_rng, "dropout": dropout_rng}
+        return {"rngs": rngs, "input_ids": input_ids, "attention_mask": attention_mask}
+
+    def init_weights(self, rng: jax.random.PRNGKey):
+        inputs = self.init_inputs(rng)
+        return self.init(**inputs)
 
 
 class CLIPModel(nn.Module, FlaxGenerationMixin):
