@@ -1112,6 +1112,7 @@ def main():
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
         loss = loss * label_mask
         # normalize
+        loss = loss.astype(jnp.float64)
         loss /= jnp.sum(label_mask, axis=-1, keepdims=True)
         loss = jnp.mean(loss)
         return loss
