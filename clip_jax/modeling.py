@@ -1098,7 +1098,6 @@ class CLIPTextTransformer(nn.Module):
             pooled_output = None
 
         else:
-            assert self.pool_type is not None, "pool_type must be specified when not in decoder mode"
             if self.use_causal_mask:
                 assert not self.pool_type == "bos", "pool_type = 'bos' does not make sense with causal mask"
             if self.pool_type == "bos":
@@ -1128,8 +1127,9 @@ class CLIPTextTransformer(nn.Module):
                 )(last_hidden_state, input_attention_mask, deterministic=deterministic)
 
             else:
-                raise ValueError(f"pool_type {self.pool_type} not supported.")
-            pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+                pooled_output = None
+            if pooled_output is not None:
+                pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         return dict(
             last_hidden_state=last_hidden_state,
