@@ -912,7 +912,6 @@ def main():
             graft_type=graft_type,
             nesterov=training_args.nesterov,
             exponent_override=0,
-            statistics_partition_spec=statistics_partition_spec,
             preconditioner_partition_spec=PartitionSpec(preconditioner_axis, None, None),
             num_devices_for_pjit=preconditioner_num_devices,
             shard_optimizer_states=True,
@@ -925,8 +924,22 @@ def main():
             generate_training_metrics=False,
         )
         # get the real optimizer and helper functions
-        opt_text = _opt(learning_rate_fn, block_size=training_args.block_size_text)
-        opt_vision = _opt(learning_rate_fn, block_size=training_args.block_size_text)
+        opt_text = _opt(
+            learning_rate_fn,
+            block_size=training_args.block_size_text,
+            statistics_partition_spec=statistics_partition_spec,
+        )
+        opt_vision = _opt(
+            learning_rate_fn,
+            block_size=training_args.block_size_text,
+            statistics_partition_spec=statistics_partition_spec,
+        )
+        if training_args.set_opt_spec_vision_to_none:
+            opt_vision_none = _opt(
+                learning_rate_fn,
+                block_size=training_args.block_size_text,
+                statistics_partition_spec=PartitionSpec(None),
+            )
         update_fn_text = opt_text.update
         update_fn_vision = opt_vision.update
 
@@ -938,7 +951,11 @@ def main():
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
             optimizer[k] = (
-                opt_vision.init(p) if any(name in k for name in ["vision", "scanned_vision"]) else opt_text.init(p)
+                opt_vision_none.init(p)
+                if (k == "vision" and training_args.set_opt_spec_vision_to_none)
+                else (
+                    opt_vision.init(p) if any(name in k for name in ["vision", "scanned_vision"]) else opt_text.init(p)
+                )
             )
             opt_fn[k] = NamedTuple("opt_fn", pspec_fn=Any, shape_and_dtype_fn=Any)(
                 optimizer[k].pspec_fn, optimizer[k].shape_and_dtype_fn
@@ -1020,7 +1037,11 @@ def main():
                 return kwargs["opt_fn"].pspec_fn(
                     kwargs["params_shape"],
                     kwargs["params_spec"],
-                    statistics_partition_spec,
+                    (
+                        PartitionSpec(None)
+                        if (kwargs["key"] == "vision" and training_args.set_opt_spec_vision_to_none)
+                        else statistics_partition_spec
+                    ),
                 )
             else:
                 raise NotImplementedError
@@ -1037,6 +1058,7 @@ def main():
                 opt_state_shape=opt_state_shape[k],
                 opt_fn=_opt_fn,
                 params_shape=p,
+                key=k,
             )
             if "scanned" in k and training_args.optim != "adafactor":
                 # add scan dimension (not for adafactor which is replicated)
@@ -1056,7 +1078,6 @@ def main():
     if training_args.set_opt_spec_vision_to_none:
         if not training_args.freeze_vision:
             logger.warn("Setting optimizer state spec for vision to None while it does not seem required")
-        opt_state_spec["vision"] = None
 
     @partial(pjit, in_shardings=(params_spec,), out_shardings=opt_state_spec)
     def init_opt_state(params):
