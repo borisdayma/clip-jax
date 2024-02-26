@@ -636,7 +636,7 @@ class MAPHead(nn.Module):
             float32_logits=self.float32_logits,
             kernel_init_out=default_kernel_init,
             name="attention",
-        )(inputs_q=probe, inputs_kv=x, mask=None, deterministic=deterministic)
+        )(inputs_q=probe, inputs_kv=x, mask=mask, deterministic=deterministic)
         x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
         y = norm(self.use_rmsnorm)(
             dtype=self.dtype,
