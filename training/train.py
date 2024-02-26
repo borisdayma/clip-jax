@@ -1161,9 +1161,19 @@ def main():
         logits = jnp.matmul(text_embeds, image_embeds.T) * logit_scale + logit_bias
         # increase precision for large batches
         logits = logits.astype(jnp.float64)
-        return -jnp.mean(jax.nn.log_sigmoid(labels * logits))
+        return -jnp.sum(jax.nn.log_sigmoid(labels * logits)) / bs
 
     def sigmoid_loss(outputs):
+        text_embeds = outputs["text_embeds"]
+        image_embeds = outputs["image_embeds"]
+        logit_scale = outputs["logit_scale"]
+        logit_bias = outputs["logit_bias"]
+
+        # consider all samples in a batch
+        loss = mini_batch_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias, negative_samples=False)
+        return loss
+
+    def chunked_sigmoid_loss(outputs):
         text_embeds = outputs["text_embeds"]
         image_embeds = outputs["image_embeds"]
         logit_scale = outputs["logit_scale"]
@@ -1216,6 +1226,8 @@ def main():
             elif training_args.loss_type == "cross_entropy":
                 logits = outputs["logits_per_text"]
                 loss = cross_entropy_loss(logits)
+            elif training_args.loss_type == "chunked_sigmoid":
+                loss = chunked_sigmoid_loss(outputs)
             elif training_args.loss_type == "sigmoid":
                 loss = sigmoid_loss(outputs)
             else:
