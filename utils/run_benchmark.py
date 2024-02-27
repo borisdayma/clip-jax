@@ -11,12 +11,13 @@ import cv2
 import jax
 import jax.numpy as jnp
 import numpy as np
+import orbax
 import torch
 import torchvision
 import wandb
-from flax.jax_utils import replicate
-from flax.training import checkpoints
 from flax.training.common_utils import shard
+from flax.jax_utils import replicate
+from flax.training import orbax_utils
 from torchvision.datasets import ImageNet
 from tqdm import tqdm
 
@@ -24,10 +25,12 @@ from clip_jax import CLIPModel
 from clip_jax.tokenizer import AutoTokenizer
 from clip_jax.utils import load_config
 
+
 # parse arguments
 parser = argparse.ArgumentParser()
 parser.add_argument("--tokenizer_name", type=str, default="openai/clip-vit-base-patch32")
 parser.add_argument("--train_run", required=True, type=str, help='wandb run id as "entity/clip/run_id"')
+parser.add_argument("--latest_only", action="store_true", help="Evaluate all checkpoints")
 args = parser.parse_args()
 
 
@@ -1138,7 +1141,7 @@ zero_shot_classification_template = [
 ]
 
 
-def resize_and_center_crop(image, image_size):
+def resize(image, image_size, center_crop=False):
     # image is a numpy array with shape (channels, height, width), reverse to (height, width, channels)
     image = image.numpy().transpose(1, 2, 0)
 
@@ -1152,17 +1155,21 @@ def resize_and_center_crop(image, image_size):
 
     h, w, _ = image.shape
     if not (h == image_size and w == image_size):
-        # Resize keeping the aspect ratio, shortest side resized to image_size
-        if h > w:
-            oh, ow = image_size * h // w, image_size
-        else:
-            oh, ow = image_size, image_size * w // h
-        image = cv2.resize(image, (ow, oh), interpolation=cv2.INTER_AREA)
+        if center_crop:
+            # Resize keeping the aspect ratio, shortest side resized to image_size
+            if h > w:
+                oh, ow = image_size * h // w, image_size
+            else:
+                oh, ow = image_size, image_size * w // h
+            image = cv2.resize(image, (ow, oh), interpolation=cv2.INTER_AREA)
 
-        # Center crop to final image size
-        i = (oh - image_size) // 2
-        j = (ow - image_size) // 2
-        image = image[i : i + image_size, j : j + image_size]
+            # Center crop to final image size
+            i = (oh - image_size) // 2
+            j = (ow - image_size) // 2
+            image = image[i : i + image_size, j : j + image_size]
+        else:
+            # Resize to image_size x image_size
+            image = cv2.resize(image, (image_size, image_size), interpolation=cv2.INTER_AREA)
 
     # normalize
     image = (image - 0.5) / 0.5
@@ -1178,7 +1185,7 @@ if __name__ == "__main__":
     transforms = torchvision.transforms.Compose(
         [
             torchvision.transforms.ToTensor(),
-            torchvision.transforms.Lambda(lambda x: resize_and_center_crop(x, 256)),
+            torchvision.transforms.Lambda(lambda x: resize(x, 256)),
         ]
     )
     ds = load_dataset(transform=transforms)
@@ -1196,6 +1203,8 @@ if __name__ == "__main__":
     print("Loading model...")
     wandb_api = wandb.Api()
     train_run = wandb_api.run(train_run)
+    entity = train_run.entity
+    project = train_run.project
     model_path = train_run.config["output_dir"]
 
     # model
@@ -1229,7 +1238,10 @@ if __name__ == "__main__":
         return acc_top_1, acc_top_5
 
     # available steps
-    available_steps = checkpoints.available_steps(model_path, prefix="model_")
+    available_steps = orbax.checkpoint.utils.checkpoint_steps(model_path)
+    available_steps = sorted(available_steps)
+    if args.latest_only:
+        available_steps = available_steps[-1:]
 
     # unique wandb run per model
     wandb_id = f"eval_{train_run.id}"
@@ -1237,7 +1249,7 @@ if __name__ == "__main__":
 
     # get last step logged
     try:
-        last_step_logged = wandb_api.run(f"clip/{wandb_id}").summary.get("state/step", 0)
+        last_step_logged = wandb_api.run(f"{entity}/{project}/{wandb_id}").summary.get("state/step", 0)
     except:
         last_step_logged = 0
 
@@ -1246,8 +1258,8 @@ if __name__ == "__main__":
         id=wandb_id,
         name=wandb_run_name,
         resume="allow",
-        entity=None,
-        project="clip",
+        entity=entity,
+        project=project,
         job_type="eval",
     )
 
@@ -1260,7 +1272,13 @@ if __name__ == "__main__":
 
         # restore checkpoint
         print(f"Restoring checkpoint at step {step}...")
-        params = checkpoints.restore_checkpoint(model_path, target=params, prefix="model_", step=step)
+        ckpt = {"params": params}
+        restore_args = orbax_utils.restore_args_from_target(ckpt)
+        orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        orbax_options = orbax.checkpoint.CheckpointManagerOptions()
+        checkpoint_manager = orbax.checkpoint.CheckpointManager(model_path, orbax_checkpointer, orbax_options)
+        ckpt = checkpoint_manager.restore(step, ckpt, restore_kwargs={"restore_args": restore_args, "transforms": {}})
+        params = ckpt["params"]
 
         # get text features
         txt_features = []
