@@ -647,7 +647,6 @@ class MAPHead(nn.Module):
             force_scale=self.force_scale,
             use_rmsnorm=self.use_rmsnorm,
             dtype=self.dtype,
-            kernel_init_out=default_kernel_init,
             name="mlp",
         )(x, deterministic=deterministic)
         y = nn.with_logical_constraint(y, ("batch", "length", "embed"))
