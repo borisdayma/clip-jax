@@ -638,15 +638,6 @@ class MAPHead(nn.Module):
             name="attention",
         )(inputs_q=probe, inputs_kv=x, mask=mask, deterministic=deterministic)
         x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
-        y = norm(self.use_rmsnorm)(
-            dtype=self.dtype,
-            use_bias=self.use_bias,
-            use_scale=self.force_scale,
-            scale_init=nn.with_logical_partitioning(nn.initializers.ones_init(), ("embed",)),
-            bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
-            name="norm",
-        )(x)
-        y = nn.with_logical_constraint(y, ("batch", "length", "embed"))
         y = CLIPMLP(
             mlp_dim=self.mlp_dim,
             ln_type=self.ln_type,
@@ -656,8 +647,9 @@ class MAPHead(nn.Module):
             force_scale=self.force_scale,
             use_rmsnorm=self.use_rmsnorm,
             dtype=self.dtype,
+            kernel_init_out=default_kernel_init,
             name="mlp",
-        )(y, deterministic=deterministic)
+        )(x, deterministic=deterministic)
         y = nn.with_logical_constraint(y, ("batch", "length", "embed"))
         x = x + y
         x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
@@ -673,6 +665,7 @@ class CLIPMLP(nn.Module):
     use_bias: bool = False
     force_scale: bool = False
     use_rmsnorm: bool = True
+    kernel_init_out: Optional[Callable[[PRNGKey, Shape, Dtype], Array]] = nn.initializers.zeros_init()
 
     @nn.compact
     def __call__(self, inputs, deterministic: bool = False):
@@ -731,8 +724,8 @@ class CLIPMLP(nn.Module):
                 embed_dim,
                 dtype=self.dtype,
                 use_bias=self.use_bias,
-                kernel_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp", "embed")),
-                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init, ("embed",)),
+                kernel_init=nn.with_logical_partitioning(self.kernel_init_out, ("mlp", "embed")),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                 name="wo",
             )(x)
             output = nn.with_logical_constraint(output, ("batch", "length", "embed"))
