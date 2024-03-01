@@ -22,7 +22,7 @@
     "pool_type": "bos",
     "vocab_size": 50048,
     "hidden_size": 1024,
-    "max_length": 80,
+    "max_length": 64,
     "num_layers": 12,
     "use_rmsnorm": true,
     "ln_type": "normformer",
