@@ -1130,10 +1130,10 @@ def main():
     # Define loss
     def encoder_decoder_loss(logits, labels, label_mask):
         """Cross entropy for language models"""
+        logits = logits.astype(jnp.float64)
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
         loss = loss * label_mask
         # normalize
-        loss = loss.astype(jnp.float64)
         loss /= jnp.sum(label_mask, axis=-1, keepdims=True)
         loss = jnp.mean(loss)
         return loss
