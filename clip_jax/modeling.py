@@ -563,6 +563,7 @@ class MultiHeadDotProductAttention(nn.Module):
                 key = key.astype(jnp.float32)
 
             # apply attention
+            # NOTE: we compute both attention weights and logits in float32 with float32_logits
             x = self.attention_fn(
                 query,
                 key,
@@ -572,7 +573,6 @@ class MultiHeadDotProductAttention(nn.Module):
                 dropout_rate=self.dropout_rate,
                 broadcast_dropout=self.broadcast_dropout,
                 deterministic=m_deterministic,
-                dtype=self.dtype,
                 precision=self.precision,
             )  # pytype: disable=wrong-keyword-args
             # back to the original inputs dimensions
