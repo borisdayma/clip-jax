@@ -879,7 +879,7 @@ class CLIPEncoder(nn.Module):
             in_axes=(nn.broadcast, nn.broadcast, nn.broadcast, nn.broadcast),
             length=self.num_layers,
             unroll=self.unroll,
-            metadata_params={nn.PARTITION_NAME: "layer"},
+            metadata_params={nn.PARTITION_NAME: "layers"},
         )(
             use_rmsnorm=self.use_rmsnorm,
             ln_type=self.ln_type,
