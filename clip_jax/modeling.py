@@ -960,7 +960,6 @@ class CLIPTextTransformer(nn.Module):
         # attention mask
         input_attention_mask = attention_mask
         if attention_mask is not None:
-            print("input_ids", input_ids.shape)
             attention_mask = nn.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
         if self.use_causal_mask and not decode:
             causal_mask = nn.make_causal_mask(input_ids)
