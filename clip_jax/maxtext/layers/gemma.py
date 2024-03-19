@@ -15,15 +15,15 @@
  """
 
 from flax import linen as nn
-import common_types
+from .. import common_types
 import jax.numpy as jnp
 
-from layers import normalizations
-from layers import attentions
-from layers import initializers
-from layers import embeddings
-from layers import linears
-from layers import quantizations
+from . import normalizations
+from . import attentions
+from . import initializers
+from . import embeddings
+from . import linears
+from . import quantizations
 
 from typing import Optional
 

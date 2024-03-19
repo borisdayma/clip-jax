@@ -22,10 +22,10 @@ import flax.linen as nn
 import jax
 from jax import lax
 import jax.numpy as jnp
-import common_types
-from layers import initializers
-from layers import normalizations
-from layers import quantizations
+from .. import common_types
+from . import initializers
+from . import normalizations
+from . import quantizations
 import numpy as np
 from jax.ad_checkpoint import checkpoint_name
 
@@ -181,7 +181,7 @@ class MlpBlock(nn.Module):
         if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
             return RMSNorm
         elif self.config.decoder_block == "gpt3":
-            from layers import gpt3
+            from . import gpt3
 
             return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
         else:

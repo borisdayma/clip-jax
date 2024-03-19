@@ -18,7 +18,7 @@ import functools
 
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2.flax import aqt_flax
-from common_types import Array, Config
+from ..common_types import Array, Config
 from dataclasses import dataclass
 import jax
 import jax.numpy as jnp

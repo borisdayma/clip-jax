@@ -29,11 +29,11 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ma
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 import jax.numpy as jnp
 
-import common_types
-from layers import embeddings
-from layers import initializers
-from layers import linears
-from layers import quantizations
+from .. import common_types
+from . import embeddings
+from . import initializers
+from . import linears
+from . import quantizations
 
 
 Array = common_types.Array

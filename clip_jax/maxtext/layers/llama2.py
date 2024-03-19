@@ -23,14 +23,14 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 
 # from jax.experimental.pallas.ops.tpu import flash_attention
-from layers import attentions
-from layers import embeddings
-from layers import linears
-from layers import normalizations
-from layers import models
-from layers import quantizations
+from . import attentions
+from . import embeddings
+from . import linears
+from . import normalizations
+from . import models
+from . import quantizations
 
-import common_types
+from .. import common_types
 from typing import Optional
 
 Array = common_types.Array

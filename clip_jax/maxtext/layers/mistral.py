@@ -20,18 +20,18 @@
 
 
 from typing import Optional
-from layers import quantizations
-from layers import linears
-from layers import initializers
+from . import quantizations
+from . import linears
+from . import initializers
 import jax
 from jax.sharding import Mesh
 from flax import linen as nn
 import jax.numpy as jnp
-from layers import attentions
-from layers import embeddings
-from layers import normalizations
-from layers import models
-import common_types
+from . import attentions
+from . import embeddings
+from . import normalizations
+from . import models
+from .. import common_types
 
 Array = common_types.Array
 Config = common_types.Config
@@ -40,11 +40,11 @@ Mesh = common_types.Mesh
 ScanIn = common_types.ScanIn
 
 Embed = embeddings.Embed
-# Attention = attentions.Attention
+Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
 
-# Hack which attention is used
+# TODO: Hack which attention is used
 
 # -----------------------------------------
 # The Decoder Layer for Mistral or Mixtral

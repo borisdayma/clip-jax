@@ -23,11 +23,11 @@ from flax import linen as nn
 import functools
 import jax
 import jax.numpy as jnp
-import common_types
-from layers import attentions
-from layers import embeddings
-from layers import linears
-from layers import normalizations, quantizations
+from .. import common_types
+from . import attentions
+from . import embeddings
+from . import linears
+from . import normalizations, quantizations
 
 Array = common_types.Array
 Config = common_types.Config
@@ -162,20 +162,20 @@ class Decoder(nn.Module):
         if self.config.decoder_block == "default":
             return DecoderLayer
         elif self.config.decoder_block == "llama2":
-            from layers import llama2
+            from . import llama2
 
             return llama2.LlamaDecoderLayer
         elif self.config.decoder_block == "mistral":
             # TODO(ranran): update to Mistral with sliding window attention
-            from layers import mistral
+            from . import mistral
 
             return mistral.MistralDecoderLayer
         elif self.config.decoder_block == "gemma":
-            from layers import gemma
+            from . import gemma
 
             return gemma.GemmaDecoderLayer
         elif self.config.decoder_block == "gpt3":
-            from layers import gpt3
+            from . import gpt3
 
             return gpt3.Gpt3DecoderLayer
         else:
@@ -185,7 +185,7 @@ class Decoder(nn.Module):
         if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
             return RMSNorm
         elif self.config.decoder_block == "gpt3":
-            from layers import gpt3
+            from . import gpt3
 
             return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
         else:
