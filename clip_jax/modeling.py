@@ -120,118 +120,63 @@ def posemb_sincos_2d(h, w, width, temperature=10_000.0, dtype=jnp.float32):
     return jnp.asarray(pe, dtype)[None, :, :]
 
 
-# Rotary Embeddings
+# Rotary Embeddings - Source: https://github.com/google/maxtext
+class RotaryEmbedding(nn.Module):
+    """RoPE
 
-
-# source: https://github.com/google/flaxformer/blob/main/flaxformer/architectures/perceiver_ar/rotary_embedding.py
-def rotate_half(x: Array) -> Array:
-    """Helper that splits a tensor at last dim into half and rotate it."""
-    x1, x2 = jnp.split(x, 2, axis=-1)
-    x = jnp.concatenate([-x2, x1], axis=-1)
-    return x
-
-
-# source: https://github.com/google/flaxformer/blob/main/flaxformer/architectures/perceiver_ar/rotary_embedding.py
-@functools.partial(jax.jit, static_argnums=(4,))
-def apply_rotary_embedding(
-    q: Array,
-    k: Array,
-    cos: Array,
-    sin: Array,
-    decode: bool = False,
-    q_position_offset: Optional[Array] = None,
-    rotary_index: Optional[Array] = None,
-) -> Tuple[Array, Array]:
-    """Helper function to apply Rotary Embeddings, supports Q position offset."""
-    if len(k.shape) == 3:
-        # for multi query attention
-        k = jnp.expand_dims(k, 2)
-        multiquery = True
-    else:
-        multiquery = False
-
-    batch, qlen, qheads, d = q.shape
-    kbatch, klen, kheads, kd = k.shape
-    assert batch == kbatch, f"{batch} != {kbatch}"
-    assert d == kd, f"{d} != {kd}"
-
-    # cos: [len, d]
-    # sin: [len, d]
-    # rotary_index: [batch]
-    # q_position_offset: [batch]
-
-    if decode and qlen == 1 and rotary_index is not None:
-        # we check qlen == 1 so that we don't do this when initializing cache.
-        qcos = cos[rotary_index, :]
-        qsin = sin[rotary_index, :]
-        # qcos, qsin: [batch, d]
-        qcos = jax.lax.broadcast_in_dim(qcos, (batch, qlen, qheads, d), (0, 3))
-        qsin = jax.lax.broadcast_in_dim(qsin, (batch, qlen, qheads, d), (0, 3))
-        # qcos, qsin: [batch, qlen, qheads, d]
-    else:
-        if q_position_offset is None:
-            qcos, qsin = cos[:qlen, :], sin[:qlen, :]
-        else:
-            # If q_position_offset is specified, we'll slice per-example after
-            # broadcasting to batch size.
-            qcos, qsin = cos, sin
-
-        # qcos, qsin: [qlen, d]
-        qcos = jax.lax.broadcast_in_dim(qcos, (batch, qcos.shape[0], qheads, d), (1, 3))
-        qsin = jax.lax.broadcast_in_dim(qsin, (batch, qsin.shape[0], qheads, d), (1, 3))
-        # qcos, qsin: [batch, qlen, qheads, d]
-        if q_position_offset is not None:
-            qcos = jax.vmap(functools.partial(jax.lax.dynamic_slice_in_dim, slice_size=qlen, axis=0))(
-                qcos, q_position_offset
-            )
-            qsin = jax.vmap(functools.partial(jax.lax.dynamic_slice_in_dim, slice_size=qlen, axis=0))(
-                qsin, q_position_offset
-            )
-
-    kcos, ksin = cos[:klen, :], sin[:klen, :]
-    # kcos, ksin: [klen, d]
-    kcos = jax.lax.broadcast_in_dim(kcos, (batch, klen, kheads, d), (1, 3))
-    ksin = jax.lax.broadcast_in_dim(ksin, (batch, klen, kheads, d), (1, 3))
-    # kcos, ksin: [batch, klen, kheads, d]
-
-    out_q = (q * qcos) + (rotate_half(q) * qsin)
-    out_k = (k * kcos) + (rotate_half(k) * ksin)
-    if multiquery:
-        out_k = jnp.squeeze(out_k, 2)
-    return out_q, out_k
-
-
-# source: https://github.com/google/flaxformer/blob/main/flaxformer/components/embedding.py
-def generate_fixed_pos_embedding(features, length, min_timescale=1.0, max_timescale=10000.0):
-    """Generate Sin/Cos for Rotary Embeddings.
-    Generates sinusoids at (features//2) different timescales, where the
-    timescales form a gemetric series from min_timescale to max_timescale
-    (max_timescale is not included, but would be the next element in the series).
-    Sinusoids are evaluated at integer positions i in [0, length).
-    The outputs are computed as:
-      output_sin[i, j] = sin(i / timescale[j])
-      output_cos[i, j] = cos(i / timescale[j])
-    Finally, the outputs are tiled twice in the features dimension.
-    Args:
-      features: an integer
-      length: an integer
-      min_timescale: an optional float
-      max_timescale: an optional float
-    Returns:
-      output_sin: a float32 Tensor with shape [length, features]
-      output_cos: a float32 Tensor with shape [length, features]
+    Attributes:
+      min_timescale: Start of the geometric index. Determines the periodicity of
+        the added signal.
+      max_timescale: End o$f the geometric index. Determines the frequency of the
+        added signal.
+      embedding_dims: Dimension of the embedding to be generated.
     """
-    fraction = jnp.arange(0, features, 2, dtype=jnp.float32) / features
-    timescale = min_timescale * (max_timescale / min_timescale) ** fraction
-    rotational_frequency = 1.0 / timescale
-    # Must use high precision einsum here, since rounding off to a bfloat16 is
-    # catastrophic. bfloat16 rounds 257 to 256, but sin(257) is very different
-    # from sin(256).
-    sinusoid_inp = jnp.einsum(
-        "i , j -> i j", jnp.arange(length), rotational_frequency, precision=jax.lax.Precision.HIGHEST
-    )
-    sinusoid_inp = jnp.concatenate([sinusoid_inp, sinusoid_inp], axis=-1)
-    return jnp.sin(sinusoid_inp), jnp.cos(sinusoid_inp)
+
+    min_timescale: int = 1
+    max_timescale: int = 10_000
+    embedding_dims: int = 0
+
+    def setup(self) -> None:
+        if self.embedding_dims % 2:
+            raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
+
+    def __call__(
+        self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
+        inputs: jax.Array,
+        position: jax.Array,
+    ) -> jax.Array:
+        """Generates a jax.Array of sinusoids with different frequencies.
+
+        Args:
+          inputs: The input sequence on which to apply the Rotary position
+            embedding. Since rotary position embeddings are applied to query and
+            keys after projection, it is assumed of shape [B, S, N, H].
+          position: Optional position jax.Array which denotes the position of each
+            token in the sequence. It is of shape [B, S].
+
+        Returns:
+          a jax.Array of shape [B, S, N, H] which includes the inputs together with
+          the rotary position embedding incorporated in it.
+        """
+        assert position is not None
+        if len(inputs.shape) != 4:
+            raise ValueError("Input is assumed to be a rank 4 tensor of shape" "[batch, sequence, heads, dims].")
+        if self.embedding_dims != inputs.shape[3]:
+            raise ValueError(
+                "The embedding dims of the rotary position embedding" "must match the hidden dimension of the inputs."
+            )
+        half_embedding_dim = self.embedding_dims // 2
+        fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
+        timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
+        position = position[:, :, jnp.newaxis, jnp.newaxis]
+        sinusoid_inp = position / timescale
+        sin = jnp.sin(sinusoid_inp)
+        cos = jnp.cos(sinusoid_inp)
+        first_half, second_half = jnp.split(inputs, 2, axis=-1)
+        first_part = first_half * cos - second_half * sin
+        second_part = second_half * cos + first_half * sin
+        x_out = jnp.concatenate((first_part, second_part), axis=-1)
+        return x_out
 
 
 def norm(use_rmsnorm):
@@ -429,7 +374,12 @@ class MultiHeadDotProductAttention(nn.Module):
 
     @nn.compact
     def __call__(
-        self, inputs_q: Array, inputs_kv: Array, mask: Optional[Array] = None, deterministic: Optional[bool] = None
+        self,
+        inputs_q: Array,
+        inputs_kv: Array,
+        mask: Optional[Array] = None,
+        position_ids: Optional[Array] = None,
+        deterministic: Optional[bool] = None,
     ):
         """Applies multi-head dot product attention on the input data.
 
@@ -504,9 +454,19 @@ class MultiHeadDotProductAttention(nn.Module):
 
             if self.use_rotary:
                 assert self.max_length is not None, "max_length must be specified for rotary embeddings."
-                # source: https://github.com/google-research/jestimator/blob/main/jestimator/models/rope/modeling.py
-                sin, cos = generate_fixed_pos_embedding(head_dim, self.max_length)
-                query, key = apply_rotary_embedding(query, key, cos, sin)
+                if position_ids is not None:
+                    query_positions = position_ids
+                    key_positions = position_ids
+                else:
+                    query_positions = jnp.arange(query.shape[1])
+                    query_positions = jnp.broadcast_to(query_positions[None], query.shape[:2])
+                    key_positions = jnp.arange(key.shape[1])
+                    key_positions = jnp.broadcast_to(key_positions[None], key.shape[:2])
+
+                key = RotaryEmbedding(embedding_dims=head_dim, name="key_rotary")(inputs=key, position=key_positions)
+                query = RotaryEmbedding(embedding_dims=head_dim, name="query_rotary")(
+                    inputs=query, position=query_positions
+                )
                 # convert to correct type
                 query = query.astype(self.dtype)
                 key = key.astype(self.dtype)
@@ -525,13 +485,6 @@ class MultiHeadDotProductAttention(nn.Module):
                 cache_index = self.variable("cache", "cache_index", lambda: jnp.array(0, dtype=jnp.int32))
                 if is_initialized:
                     *batch_dims, max_length, num_heads, depth_per_head = cached_key.value.shape
-                    # shape check of cached keys against query input
-                    expected_shape = tuple(batch_dims) + (1, num_heads, depth_per_head)
-                    if expected_shape != query.shape:
-                        raise ValueError(
-                            "Autoregressive cache shape error, "
-                            "expected query shape %s instead got %s." % (expected_shape, query.shape)
-                        )
                     # update key, value caches with our new 1d spatial slices
                     cur_index = cache_index.value
                     indices = (0,) * len(batch_dims) + (cur_index, 0, 0)
@@ -539,15 +492,20 @@ class MultiHeadDotProductAttention(nn.Module):
                     value = jax.lax.dynamic_update_slice(cached_value.value, value, indices)
                     cached_key.value = key
                     cached_value.value = value
-                    cache_index.value = cache_index.value + 1
+                    num_updated_cache_vectors = query.shape[1]
+                    cache_index.value = cache_index.value + num_updated_cache_vectors
+
                     # causal mask for cached decoder self-attention:
                     # our single query position should only attend to those key
                     # positions that have already been generated and cached,
                     # not the remaining zero elements.
-                    mask = nn.combine_masks(
-                        mask,
-                        jnp.broadcast_to(jnp.arange(max_length) <= cur_index, tuple(batch_dims) + (1, 1, max_length)),
+                    causal_mask = jnp.broadcast_to(
+                        jnp.arange(max_length) < cur_index + num_updated_cache_vectors,
+                        tuple(batch_dims) + (1, num_updated_cache_vectors, max_length),
                     )
+                    if mask is not None:
+                        mask = jax.lax.dynamic_slice(mask, (0, 0, cur_index, 0), causal_mask.shape)
+                    mask = nn.combine_masks(mask, causal_mask)
 
             dropout_rng = None
             if self.dropout_rate > 0.0:  # Require `deterministic` only if using dropout.
@@ -755,6 +713,7 @@ class CLIPEncoderLayer(nn.Module):
         hidden_states,
         attention_mask,
         encoder_hidden_states,
+        position_ids: Optional[Array] = None,
         deterministic: bool = True,
     ):
         assert self.ln_type in ["normformer", "preln"], f"ln_type {self.ln_type} not supported."
@@ -789,7 +748,13 @@ class CLIPEncoderLayer(nn.Module):
             normalize_qk=self.normalize_qk,
             float32_logits=self.float32_logits,
             name="attention",
-        )(inputs_q=hidden_states, inputs_kv=hidden_states, mask=attention_mask, deterministic=deterministic)
+        )(
+            inputs_q=hidden_states,
+            inputs_kv=hidden_states,
+            mask=attention_mask,
+            position_ids=position_ids,
+            deterministic=deterministic,
+        )
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         if self.ln_type == "normformer":
             hidden_states = norm(self.use_rmsnorm)(
@@ -890,7 +855,8 @@ class CLIPEncoder(nn.Module):
         hidden_states,
         attention_mask=None,
         encoder_hidden_states=None,
-        deterministic: bool = True,
+        position_ids=None,
+        deterministic=True,
     ):
         # gradient checkpointing
         use_scan = True
@@ -910,7 +876,7 @@ class CLIPEncoder(nn.Module):
             layer,
             variable_axes={"params": params_spec, "cache": 0},
             split_rngs={"params": True, "dropout": True},
-            in_axes=(nn.broadcast, nn.broadcast, nn.broadcast),
+            in_axes=(nn.broadcast, nn.broadcast, nn.broadcast, nn.broadcast),
             length=self.num_layers,
             unroll=self.unroll,
             metadata_params={nn.PARTITION_NAME: "layer"},
@@ -933,7 +899,7 @@ class CLIPEncoder(nn.Module):
             decode=self.decode,
             name="layers",
         )(
-            hidden_states, attention_mask, encoder_hidden_states, deterministic
+            hidden_states, attention_mask, encoder_hidden_states, position_ids, deterministic
         )
 
         return dict(
@@ -978,6 +944,7 @@ class CLIPTextTransformer(nn.Module):
         input_ids,
         attention_mask,
         encoder_hidden_states=None,
+        position_ids=None,
         decode=False,
         deterministic: bool = True,
     ):
@@ -993,16 +960,14 @@ class CLIPTextTransformer(nn.Module):
         # attention mask
         input_attention_mask = attention_mask
         if attention_mask is not None:
+            print("input_ids", input_ids.shape)
             attention_mask = nn.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
-        if self.use_causal_mask:
+        if self.use_causal_mask and not decode:
             causal_mask = nn.make_causal_mask(input_ids)
             if attention_mask is None:
                 attention_mask = causal_mask
             else:
                 attention_mask = nn.combine_masks(attention_mask, causal_mask)
-        if decode and attention_mask is not None:
-            print("Warning: attention_mask is ignored in decode mode.")
-            attention_mask = None
 
         # decoder mode
         # src: adapted from google-research/big_vision
@@ -1060,6 +1025,7 @@ class CLIPTextTransformer(nn.Module):
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             encoder_hidden_states=encoder_hidden_states,
+            position_ids=position_ids,
             deterministic=deterministic,
         )
         last_hidden_state = encoder_outputs["last_hidden_state"]
@@ -1351,11 +1317,13 @@ class CLIPTextModelForFineTuning(nn.Module):
         self,
         input_ids=None,
         attention_mask=None,
+        position_ids=None,
         deterministic: bool = True,
     ):
         text_outputs = CLIPTextTransformer(**self.text_config, name="text")(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             deterministic=deterministic,
         )
         return text_outputs
@@ -1452,6 +1420,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         input_ids,
         pixel_values,
         attention_mask,
+        position_ids: Optional[jnp.ndarray] = None,
         decode: bool = False,
         deterministic: bool = True,
     ):
@@ -1465,6 +1434,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             input_ids,
             attention_mask,
             encoder_hidden_states=vision_model_output["last_hidden_state"] if is_decoder else None,
+            position_ids=position_ids,
             decode=decode,
             deterministic=deterministic,
         )
@@ -1502,6 +1472,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         input_ids,
         attention_mask,
         encoder_hidden_states: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
         decode: bool = False,
         deterministic: bool = True,
     ):
@@ -1509,6 +1480,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             input_ids=input_ids,
             attention_mask=attention_mask,
             encoder_hidden_states=encoder_hidden_states,
+            position_ids=position_ids,
             decode=decode,
             deterministic=deterministic,
         )
@@ -1553,14 +1525,26 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         return self.init(**inputs)
 
     # Methods for FlaxGenerationMixin
-    def prepare_inputs_for_generation(self, input_ids, max_length, encoder_outputs):
+    def prepare_inputs_for_generation(
+        self, decoder_input_ids, max_length, encoder_outputs, decoder_attention_mask=None
+    ):
         # initialize cache
         model_inputs = self.init_inputs(jax.random.PRNGKey(0))
-        bs = input_ids.shape[0]
+        bs = decoder_input_ids.shape[0]
         for k in ["input_ids", "attention_mask", "pixel_values"]:
             model_inputs[k] = jnp.repeat(model_inputs[k], bs, axis=0)
         _decode = partial(CLIPModel.__call__, decode=True)
         past_key_values = self.init(**model_inputs, method=_decode)["cache"]
+        # extend attention mask
+        if decoder_attention_mask is not None:
+            print("decoder_attention_mask", decoder_attention_mask.shape)
+            position_ids = decoder_attention_mask.cumsum(axis=-1) - 1
+            extended_mask = jnp.ones((bs, max_length), dtype="i4")
+            decoder_attention_mask = jax.lax.dynamic_update_slice(extended_mask, decoder_attention_mask, (0, 0))
+            print("extended_attention_mask", decoder_attention_mask.shape)
+        else:
+            position_ids = jnp.arange(decoder_input_ids.shape[1])
+            position_ids = jnp.broadcast_to(position_ids[None], decoder_input_ids.shape[:2])
         # for generation compatibility
         # - put batch before scan
         past_key_values = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
@@ -1568,7 +1552,12 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"] = past_key_values["text"]["encoder"][
             "layers"
         ]["attention"]["cache_index"][0]
-        return {"past_key_values": past_key_values, "encoder_outputs": encoder_outputs}
+        return {
+            "past_key_values": past_key_values,
+            "encoder_outputs": encoder_outputs,
+            "decoder_attention_mask": decoder_attention_mask,
+            "decoder_position_ids": position_ids,
+        }
 
     def encode(self, input_ids, params, return_dict=True):
         res = self.apply(
@@ -1579,7 +1568,16 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         )["vision_model_output"]["last_hidden_state"]
         return EncoderOutput(last_hidden_state=res) if return_dict else res
 
-    def decode(self, decoder_input_ids, encoder_outputs, params, past_key_values, return_dict=True):
+    def decode(
+        self,
+        decoder_input_ids,
+        decoder_attention_mask,
+        decoder_position_ids,
+        encoder_outputs,
+        params,
+        past_key_values,
+        return_dict=True,
+    ):
         # for generation compatibility, apply inverse
         past_key_values = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
         scan_dim = past_key_values["text"]["encoder"]["layers"]["attention"]["cached_key"].shape[0]
@@ -1590,7 +1588,8 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             {"params": params, "cache": past_key_values},
             mutable=["cache"],
             input_ids=decoder_input_ids,
-            attention_mask=None,
+            attention_mask=decoder_attention_mask,
+            position_ids=decoder_position_ids,
             encoder_hidden_states=encoder_outputs["last_hidden_state"],
             decode=True,
             deterministic=True,
@@ -1609,6 +1608,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
 
     def update_inputs_for_generation(self, model_outputs, model_kwargs):
         model_kwargs["past_key_values"] = model_outputs.past_key_values
+        model_kwargs["decoder_position_ids"] = model_kwargs["decoder_position_ids"][:, -1:] + 1
         return model_kwargs
 
     def generate(self, *args, **kwargs):
