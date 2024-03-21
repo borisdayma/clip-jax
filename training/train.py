@@ -1753,21 +1753,21 @@ def main():
                 if stop_training:
                     break
 
-        # log final metrics
-        if not metrics_logged:
-            state.update(step=step, samples=samples, opt_state_step=opt_state_step)
-            if jax.process_index() == 0:
-                state.log(metrics)
+    # log final metrics
+    if not metrics_logged:
+        state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+        if jax.process_index() == 0:
+            state.log(metrics)
 
-        # run final evaluation
-        if training_args.do_eval and not evaluation_ran:
-            state.update(step=step, samples=samples, opt_state_step=opt_state_step)
-            run_evaluation(params, mesh)
+    # run final evaluation
+    if training_args.do_eval and not evaluation_ran:
+        state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+        run_evaluation(params, mesh)
 
-        # save final model
-        if not save_model_ran:
-            state.update(step=step, samples=samples, opt_state_step=opt_state_step)
-            run_save_model(params, opt_state)
+    # save final model
+    if not save_model_ran:
+        state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+        run_save_model(params, opt_state)
 
 
 if __name__ == "__main__":
