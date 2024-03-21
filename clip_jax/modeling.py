@@ -127,7 +127,7 @@ class RotaryEmbedding(nn.Module):
     Attributes:
       min_timescale: Start of the geometric index. Determines the periodicity of
         the added signal.
-      max_timescale: End o$f the geometric index. Determines the frequency of the
+      max_timescale: End of the geometric index. Determines the frequency of the
         added signal.
       embedding_dims: Dimension of the embedding to be generated.
     """
@@ -367,7 +367,6 @@ class MultiHeadDotProductAttention(nn.Module):
     out_dot_general: DotGeneralT = jax.lax.dot_general
     # custom config
     use_rotary: bool = False
-    max_length: Optional[int] = None  # required if use_rotary
     embed_dim_name: str = "embed"
     normalize_qk: bool = False
     kernel_init_out: Optional[Callable[[PRNGKey, Shape, Dtype], Array]] = nn.initializers.zeros_init()
@@ -453,7 +452,6 @@ class MultiHeadDotProductAttention(nn.Module):
             value = nn.with_logical_constraint(value, ("batch", "length", "heads", "kv"))
 
             if self.use_rotary:
-                assert self.max_length is not None, "max_length must be specified for rotary embeddings."
                 if position_ids is not None:
                     query_positions = position_ids
                     key_positions = position_ids
@@ -587,7 +585,6 @@ class MAPHead(nn.Module):
             deterministic=deterministic,
             use_bias=self.use_bias,
             use_rotary=False,
-            max_length=None,
             dropout_rate=self.attention_dropout,
             decode=False,
             normalize_qk=self.normalize_qk,
@@ -694,7 +691,6 @@ class CLIPEncoderLayer(nn.Module):
     ln_type: str  # "preln", "normformer"
     num_heads: int
     position_embedding_type: str  # "learnt", "rotary" or "sincos2d"
-    max_length: int
     use_causal_mask: bool
     mlp_dim: int
     decode: bool
@@ -742,7 +738,6 @@ class CLIPEncoderLayer(nn.Module):
             deterministic=deterministic,
             use_bias=self.use_bias,
             use_rotary=(self.position_embedding_type == "rotary"),
-            max_length=self.max_length,
             dropout_rate=self.attention_dropout,
             decode=self.decode,
             normalize_qk=self.normalize_qk,
@@ -788,7 +783,6 @@ class CLIPEncoderLayer(nn.Module):
                 deterministic=deterministic,
                 use_bias=self.use_bias,
                 use_rotary=False,  # don't apply on cross-attention
-                max_length=self.max_length,
                 dropout_rate=self.attention_dropout,
                 decode=False,
                 normalize_qk=self.normalize_qk,
@@ -834,7 +828,6 @@ class CLIPEncoder(nn.Module):
     ln_type: str  # "preln", "normformer"
     num_heads: int
     position_embedding_type: str  # "learnt", "rotary"
-    max_length: int
     use_causal_mask: bool
     mlp_dim: int
     float32_logits: bool
@@ -885,7 +878,6 @@ class CLIPEncoder(nn.Module):
             ln_type=self.ln_type,
             num_heads=self.num_heads,
             position_embedding_type=self.position_embedding_type,
-            max_length=self.max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
             float32_logits=self.float32_logits,
@@ -1005,7 +997,6 @@ class CLIPTextTransformer(nn.Module):
             ln_type=self.ln_type,
             num_heads=self.num_heads,
             position_embedding_type=self.position_embedding_type,
-            max_length=self.max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
             float32_logits=self.float32_logits,
@@ -1147,14 +1138,12 @@ class CLIPVisionTransformer(nn.Module):
             name="embeddings",
         )(pixel_values)
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
-        max_length = hidden_states.shape[1]
         encoder_outputs = CLIPEncoder(
             num_layers=self.num_layers,
             use_rmsnorm=self.use_rmsnorm,
             ln_type=self.ln_type,
             num_heads=self.num_heads,
             position_embedding_type=self.position_embedding_type,
-            max_length=max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
             float32_logits=self.float32_logits,
@@ -1201,14 +1190,6 @@ class CLIPVisionTransformer(nn.Module):
         elif self.pool_type == "gap":
             # mean pool - jnp.mean -> was leading to large memory consumption in the past
             pooled_output = jnp.mean(last_hidden_state, axis=1)
-
-            if False:
-                # mean pool - for loop -> this worked better in the past, keeping it just in case
-                length = last_hidden_state.shape[1]
-                pooled_output = last_hidden_state[:, 0, :]
-                for i in range(1, length):
-                    pooled_output = pooled_output + last_hidden_state[:, i, :]
-                pooled_output = pooled_output / length
 
         elif self.pool_type == "map":
             pooled_output = MAPHead(
@@ -1619,7 +1600,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
                 eos_token_id=self.text_config["eos_token_id"],
                 decoder_start_token_id=self.text_config["bos_token_id"],
                 bos_token_id=self.text_config["bos_token_id"],
-                max_length=self.text_config["max_length"],
+                max_length=kwargs.get("max_length", self.text_config["max_length"]),
             )
         return super().generate(*args, generation_config=generation_config, **kwargs)
 
