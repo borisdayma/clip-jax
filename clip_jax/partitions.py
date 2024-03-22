@@ -24,6 +24,9 @@ def logical_axis_rules(
             ("embed_proj", "model"),
             ("heads", "model"),
             ("kv", None),
+            ("cache_batch", "data"),
+            ("cache_heads", "model"),
+            ("cache_kv", None),
         ]
     elif activation_partitioning_dims == 2 and parameter_partitioning_dims == 1:
         rules = [
@@ -34,6 +37,9 @@ def logical_axis_rules(
             ("heads", "model"),
             ("kv", None),
             ("embed", "model"),
+            ("cache_batch", "data"),
+            ("cache_heads", "model"),
+            ("cache_kv", None),
         ]
     elif activation_partitioning_dims == 1 and parameter_partitioning_dims == 2:
         rules = [
@@ -44,6 +50,9 @@ def logical_axis_rules(
             ("heads", "model"),
             ("kv", None),
             ("embed", "data"),
+            ("cache_batch", "data"),
+            ("cache_heads", "model"),
+            ("cache_kv", None),
         ]
     elif activation_partitioning_dims == 2 and parameter_partitioning_dims == 2:
         rules = [
@@ -55,6 +64,9 @@ def logical_axis_rules(
             ("kv", None),
             ("embed", "model"),
             ("embed", "data"),
+            ("cache_batch", "data"),
+            ("cache_heads", "model"),
+            ("cache_kv", None),
         ]
     else:
         raise ValueError(
