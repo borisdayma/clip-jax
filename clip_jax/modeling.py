@@ -553,7 +553,7 @@ class MAPHead(nn.Module):
     Multihead Attention Pooling
     Adapted from google-reasearch/big_vision
     """
-
+    num_queries: int
     mlp_dim: int
     num_heads: int
     ln_type: str
@@ -573,9 +573,9 @@ class MAPHead(nn.Module):
         probe = self.param(
             "probe",
             nn.with_logical_partitioning(nn.initializers.xavier_uniform(), (None, None, "embed")),
-            (1, 1, embed_dim),
+            (1, self.num_queries, embed_dim),
         )
-        probe = jnp.tile(probe, [batch, 1, 1])
+        probe = jnp.tile(probe, [batch, self.num_queries, 1])
         probe = nn.with_logical_constraint(probe, ("batch", None, "embed"))
         if mask is not None:
             mask = nn.make_attention_mask(jnp.ones((batch, 1), dtype="i4"), mask, dtype=self.dtype)
@@ -607,7 +607,7 @@ class MAPHead(nn.Module):
         y = nn.with_logical_constraint(y, ("batch", "length", "embed"))
         x = x + y
         x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
-        return x[:, 0]
+        return x
 
 
 class CLIPMLP(nn.Module):
@@ -929,6 +929,7 @@ class CLIPTextTransformer(nn.Module):
     is_decoder: bool = False  # for Cappa
     dtype: str = "float32"
     pool_type: str = None  # "bos", "eos", "map"
+    num_queries: int = 1  # used for map
 
     @nn.compact
     def __call__(
@@ -1060,6 +1061,7 @@ class CLIPTextTransformer(nn.Module):
                 ]
             elif self.pool_type == "map":
                 pooled_output = MAPHead(
+                    num_queries=self.num_queries,
                     num_heads=self.num_heads,
                     mlp_dim=self.mlp_dim,
                     ln_type=self.ln_type,
@@ -1073,6 +1075,9 @@ class CLIPTextTransformer(nn.Module):
                     float32_logits=self.float32_logits,
                     dtype=dtype,
                 )(last_hidden_state, input_attention_mask, deterministic=deterministic)
+                if self.num_queries == 1:
+                    # used for clip
+                    pooled_output = pooled_output[:, 0]
 
             else:
                 pooled_output = None
