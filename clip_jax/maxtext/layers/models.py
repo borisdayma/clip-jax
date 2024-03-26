@@ -198,6 +198,8 @@ class Decoder(nn.Module):
         decoder_positions,
         decoder_segment_ids=None,
         deterministic=False,
+        vision_embeddings=None,
+        vision_start_ids=None,
         model_mode=common_types.MODEL_MODE_TRAIN,
     ):
         cfg = self.config
@@ -221,6 +223,17 @@ class Decoder(nn.Module):
                 name="position_embedder",
                 config=cfg,
             )(decoder_positions)
+
+        # use vision tokens
+        if vision_embeddings is not None:
+            assert vision_start_ids is not None
+            if len(vision_start_ids.shape) == 0:
+                # we passed a single int, same start_id for all samples
+                y = jax.lax.dynamic_update_slice(y, vision_embeddings, (0, vision_start_ids, 0))
+            else:
+                # one id per sample
+                # TODO: check it works, may need to add 0 for embed dim
+                y = jax.vmap(jax.lax.dynamic_update_slice)(y, vision_embeddings, vision_start_ids[..., None])
 
         BlockLayer = self.get_decoder_layer()
 
