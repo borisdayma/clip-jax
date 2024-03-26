@@ -227,6 +227,7 @@ class Decoder(nn.Module):
         # use vision tokens
         if vision_embeddings is not None:
             # project vision embeddings
+            # TODO: optional projection when dim match
             vision_embeddings = linears.DenseGeneral(
                 cfg.emb_dim,
                 dtype=cfg.dtype,

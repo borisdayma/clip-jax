@@ -29,7 +29,10 @@ from flax.linen import partitioning as nn_partitioning
 from flax.linen.linear import DotGeneralT, PrecisionLike
 from flax.linen.module import merge_param
 from flax.linen.partitioning import ScanIn
+from jax.ad_checkpoint import checkpoint_name
 from transformers import FlaxGenerationMixin, GenerationConfig
+
+from .maxtext.layers.models import Transformer
 
 remat = nn_partitioning.remat
 
@@ -473,6 +476,11 @@ class MultiHeadDotProductAttention(nn.Module):
                 query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
                 key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
 
+            # checkpoint policies
+            query = checkpoint_name(query, "query_proj")
+            key = checkpoint_name(key, "key_proj")
+            value = checkpoint_name(value, "value_proj")
+
             # During fast autoregressive decoding, we feed one position at a time,
             # and cache the keys and values step by step.
             if self.decode:
@@ -553,6 +561,7 @@ class MAPHead(nn.Module):
     Multihead Attention Pooling
     Adapted from google-reasearch/big_vision
     """
+
     num_queries: int
     mlp_dim: int
     num_heads: int
@@ -840,7 +849,7 @@ class CLIPEncoder(nn.Module):
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
     unroll: int = 100  # unroll scan layers
-    gradient_checkpointing: bool = True
+    remat_policy: str = "none"
 
     @nn.compact
     def __call__(
@@ -855,15 +864,20 @@ class CLIPEncoder(nn.Module):
         use_scan = True
         initializing = self.is_mutable_collection("params")
         params_spec = 0 if initializing else ScanIn(0)
-        layer = (
-            nn.remat(
-                CLIPEncoderLayer,
-                static_argnums=(-1,),
-                prevent_cse=not use_scan,
-            )
-            if self.gradient_checkpointing
-            else CLIPEncoderLayer
-        )
+        layer = CLIPEncoderLayer
+        if self.remat_policy != "none":
+            if self.remat_policy == "minimal":
+                policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+            elif self.remat_policy == "proj":
+                policy = jax.checkpoint_policies.save_only_these_names("query_proj", "value_proj", "key_proj")
+            elif self.remat_policy == "minimal_offloaded":
+                policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(
+                    offload_src="device", offload_dst="pinned_host"
+                )
+            else:
+                assert self.remat_policy == "full", "Remat policy needs to be on list of remat policies"
+                policy = None
+            layer = nn.remat(layer, prevent_cse=not use_scan, policy=policy, static_argnums=(-1, -2, -3, -4, -5))
 
         hidden_states, _ = nn.scan(
             layer,
@@ -920,7 +934,7 @@ class CLIPTextTransformer(nn.Module):
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
     unroll: int = 100  # unroll scan layers
-    gradient_checkpointing: bool = True
+    remat_policy: str = "none"
     eos_token_id: int = None
     mask_token_id: int = None
     pad_token_id: int = None
@@ -1009,7 +1023,7 @@ class CLIPTextTransformer(nn.Module):
             attention_dropout=self.attention_dropout,
             mlp_dropout_rate=self.mlp_dropout_rate,
             unroll=self.unroll,
-            gradient_checkpointing=self.gradient_checkpointing,
+            remat_policy=self.remat_policy,
             decode=decode,
             name="encoder",
         )(
@@ -1060,6 +1074,7 @@ class CLIPTextTransformer(nn.Module):
                     jnp.arange(last_hidden_state.shape[0]), _get_id_pos(input_ids, self.eos_token_id)
                 ]
             elif self.pool_type == "map":
+                # TODO: should allow custom heads/dim when using as queries for llm
                 pooled_output = MAPHead(
                     num_queries=self.num_queries,
                     num_heads=self.num_heads,
@@ -1116,7 +1131,8 @@ class CLIPVisionTransformer(nn.Module):
     unroll: int = 100  # unroll scan layers
     registers: int = 0  # number of registers per "vision transformers need registers"
     keep_registers: bool = False  # keep registers in the output
-    gradient_checkpointing: bool = True
+    remat_policy: str = "none"
+    num_queries: int = 1  # used for map
 
     @nn.compact
     def __call__(
@@ -1160,7 +1176,7 @@ class CLIPVisionTransformer(nn.Module):
             attention_dropout=self.attention_dropout,
             mlp_dropout_rate=self.mlp_dropout_rate,
             unroll=self.unroll,
-            gradient_checkpointing=self.gradient_checkpointing,
+            remat_policy=self.remat_policy,
             name="encoder",
         )(
             hidden_states=hidden_states,
@@ -1198,6 +1214,7 @@ class CLIPVisionTransformer(nn.Module):
 
         elif self.pool_type == "map":
             pooled_output = MAPHead(
+                num_queries=self.num_queries,
                 num_heads=self.num_heads,
                 mlp_dim=self.mlp_dim,
                 ln_type=self.ln_type,
@@ -1211,6 +1228,9 @@ class CLIPVisionTransformer(nn.Module):
                 float32_logits=self.float32_logits,
                 dtype=dtype,
             )(last_hidden_state, None, deterministic=deterministic)
+            if self.num_queries == 1:
+                # used for clip
+                pooled_output = pooled_output[:, 0]
 
         elif self.pool_type is None:
             pooled_output = None
@@ -1335,16 +1355,26 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
     logit_scale_init_value: float = 2.6592
     logit_bias_init_value: float = 0.0
     dtype: str = "float32"
+    maxtext_mesh: Any = None
 
-    def __post_init__(self):
+    def __post_init__(self, **kwargs):
         # add default fields text_config
-        default_fields = dataclasses.fields(CLIPTextTransformer)
-        default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
-        default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
-        text_config = {**default_fields, **self.text_config}
-        if self.dtype is not None:
-            text_config["dtype"] = self.dtype
-        self.text_config = text_config
+        if self.maxtext_mesh is None:
+            # ensure no args have been passed
+            assert len(kwargs) == 0
+            # regular model
+            default_fields = dataclasses.fields(CLIPTextTransformer)
+            default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
+            default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
+            text_config = {**default_fields, **self.text_config}
+            if self.dtype is not None:
+                text_config["dtype"] = self.dtype
+                self.text_config = text_config
+        else:
+            # maxtext model
+            text_config = {**self.text_config, **kwargs}
+            self.text_config = text_config
+
         # add default fields vision_config
         default_fields = dataclasses.fields(CLIPVisionTransformer)
         default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
@@ -1354,12 +1384,12 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             vision_config["dtype"] = self.dtype
         self.vision_config = vision_config
         # set config flags for FlaxGenerationMixin
-        self.config = SimpleNamespace(is_encoder_decoder=text_config["is_decoder"])
+        self.config = SimpleNamespace(is_encoder_decoder=text_config.get("is_decoder") or self.maxtext_mesh is not None)
         return super().__post_init__()
 
     def setup(self):
-        if self.text_config["is_decoder"]:
-            assert self.vision_config["pool_type"] is None, "pool_type must be None for decoder mode"
+        if self.text_config.get("is_decoder"):
+            assert self.vision_config["pool_type"] is None, "pool_type must be None for decoder mode without maxtext"
         dtype = jnp.dtype(self.dtype)
         self.logit_scale = self.param(
             "logit_scale",

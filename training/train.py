@@ -102,7 +102,7 @@ class TrainingArguments:
         default="cross_entropy",
         metadata={"help": ("The type of loss to use. Can be 'cross_entropy' (default) or 'sigmoid'.")},
     )
-    gradient_checkpointing: bool = field(default=False, metadata={"help": "Use gradient checkpointing."})
+    remat_policy: str = field(default="none", metadata={"help": "Use gradient checkpointing."})
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate."})
     optim: str = field(
         default="distributed_shampoo",
@@ -668,8 +668,8 @@ def main():
     # Update config
     clipConfig["text_config"]["unroll"] = model_args.unroll
     clipConfig["vision_config"]["unroll"] = model_args.unroll
-    clipConfig["text_config"]["gradient_checkpointing"] = training_args.gradient_checkpointing
-    clipConfig["vision_config"]["gradient_checkpointing"] = training_args.gradient_checkpointing
+    clipConfig["text_config"]["remat_policy"] = training_args.remat_policy
+    clipConfig["vision_config"]["remat_policy"] = training_args.remat_policy
     clipConfig["text_config"]["float32_logits"] = model_args.float32_logits
     clipConfig["vision_config"]["float32_logits"] = model_args.float32_logits
     clipConfig["dtype"] = model_args.dtype
