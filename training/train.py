@@ -1220,7 +1220,7 @@ def main():
         label_mask = minibatch.pop("label_mask", None)
         outputs = model_fn.apply({"params": params}, rngs=rngs, deterministic=not train, **minibatch)
         with jax.profiler.TraceAnnotation("Compute_Loss"):
-            if model.text_config["is_decoder"]:
+            if model.text_config.get("is_decoder", True):
                 logits = outputs["text_model_output"]["last_hidden_state"]
                 loss = encoder_decoder_loss(logits, labels, label_mask)
             elif training_args.loss_type == "cross_entropy":
@@ -1443,7 +1443,7 @@ def main():
             # keep only input_ids and attention_mask
             txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
             # add labels for decoder
-            if model.text_config["is_decoder"]:
+            if model.text_config.get("is_decoder", True):
                 txt_inputs["labels"] = shift_tokens_left(txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id)
                 txt_inputs["label_mask"] = shift_tokens_left(txt_inputs["attention_mask"], pad_token_id=0)
             batch = {"pixel_values": batch[0], **txt_inputs}
@@ -1671,7 +1671,7 @@ def main():
                 # keep only input_ids and attention_mask
                 txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
                 # add labels for decoder
-                if model.text_config["is_decoder"]:
+                if model.text_config.get("is_decoder", True):
                     txt_inputs["labels"] = shift_tokens_left(
                         txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id
                     )
