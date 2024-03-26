@@ -33,6 +33,7 @@ from jax.ad_checkpoint import checkpoint_name
 from transformers import FlaxGenerationMixin, GenerationConfig
 
 from .maxtext.layers.models import Transformer
+from .maxtext import common_types
 
 remat = nn_partitioning.remat
 
@@ -1102,7 +1103,6 @@ class CLIPTextTransformer(nn.Module):
         return dict(
             last_hidden_state=last_hidden_state,
             pooled_output=pooled_output,
-            # TODO: add hidden states (for down-stream tasks)
         )
 
 
@@ -1384,12 +1384,16 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             vision_config["dtype"] = self.dtype
         self.vision_config = vision_config
         # set config flags for FlaxGenerationMixin
-        self.config = SimpleNamespace(is_encoder_decoder=text_config.get("is_decoder") or self.maxtext_mesh is not None)
+        self.config = SimpleNamespace(
+            is_encoder_decoder=text_config.get("is_decoder") or self.maxtext_mesh is not None
+        )
         return super().__post_init__()
 
     def setup(self):
-        if self.text_config.get("is_decoder"):
-            assert self.vision_config["pool_type"] is None, "pool_type must be None for decoder mode without maxtext"
+        if self.text_config.get("is_decoder", True):
+            assert (self.vision_config["pool_type"] is None) or (
+                self.vision_config["pool_type"] == "map" and self.vision_config["num_queries"] > 1
+            ), "pool_type must be None for decoder mode without maxtext"
         dtype = jnp.dtype(self.dtype)
         self.logit_scale = self.param(
             "logit_scale",
@@ -1401,15 +1405,18 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             nn.with_logical_partitioning(nn.initializers.constant(self.logit_bias_init_value), (None,)),
             (1,),
         )
-        self.text_model = CLIPTextTransformer(
-            **self.text_config,
-            name="text",
-        )
+        if self.maxtext_mesh is None:
+            self.text_model = CLIPTextTransformer(
+                **self.text_config,
+                name="text",
+            )
+        else:
+            self.text_model = Transformer(SimpleNamespace(**self.text_config), self.maxtext_mesh, quant=None)
         self.vision_model = CLIPVisionTransformer(
             **self.vision_config,
             name="vision",
         )
-        if (not self.text_config["is_decoder"]) and (
+        if (not self.text_config.get("is_decoder", True)) and (
             self.text_config["hidden_size"] != self.vision_config["hidden_size"]
         ):
             self.text_projection = nn.Dense(
@@ -1438,11 +1445,13 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         position_ids: Optional[jnp.ndarray] = None,
         decode: bool = False,
         deterministic: bool = True,
+        vision_start_ids: Optional[Any] = None,
+        model_mode: str = common_types.MODEL_MODE_TRAIN,
     ):
         image_features = self.get_image_features(pixel_values, deterministic=deterministic)
         image_embeds, vision_model_output = image_features["image_embeds"], image_features["vision_model_output"]
 
-        is_decoder = self.text_config["is_decoder"]
+        is_decoder = self.text_config.get("is_decoder", True)
         if decode:
             assert is_decoder, "decode=True only works for decoder mode"
         text_features = self.get_text_features(
@@ -1450,8 +1459,10 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             attention_mask,
             encoder_hidden_states=vision_model_output["last_hidden_state"] if is_decoder else None,
             position_ids=position_ids,
+            vision_start_ids=vision_start_ids,
             decode=decode,
             deterministic=deterministic,
+            model_mode=model_mode,
         )
         text_embeds, text_model_output = text_features["text_embeds"], text_features["text_model_output"]
 
@@ -1488,21 +1499,39 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         attention_mask,
         encoder_hidden_states: Optional[jnp.ndarray] = None,
         position_ids: Optional[jnp.ndarray] = None,
+        vision_start_ids: Optional[Any] = None,
         decode: bool = False,
         deterministic: bool = True,
+        model_mode: str = common_types.MODEL_MODE_TRAIN,
     ):
-        text_outputs = self.text_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            encoder_hidden_states=encoder_hidden_states,
-            position_ids=position_ids,
-            decode=decode,
-            deterministic=deterministic,
-        )
+        if self.maxtext_mesh is None:
+            text_outputs = self.text_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                position_ids=position_ids,
+                decode=decode,
+                deterministic=deterministic,
+            )
 
-        text_embeds = text_outputs["pooled_output"]
-        if self.text_projection is not None:
-            text_embeds = self.text_projection(text_embeds)
+            text_embeds = text_outputs["pooled_output"]
+            if self.text_projection is not None:
+                text_embeds = self.text_projection(text_embeds)
+        else:
+            text_embeds = None
+            last_hidden_state = self.text_model(
+                decoder_input_tokens=input_ids,
+                decoder_positions=position_ids,
+                decoder_segment_ids=attention_mask,
+                enable_dropout=not deterministic,
+                vision_embeddings=encoder_hidden_states,
+                vision_start_ids=vision_start_ids,
+                model_mode=model_mode,
+            )
+            text_outputs = dict(
+                last_hidden_state=last_hidden_state,
+                pooled_output=None,
+            )
 
         return {"text_embeds": text_embeds, "text_model_output": text_outputs}
 
@@ -1528,12 +1557,19 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             text_config = SimpleNamespace(**text_config)
         if isinstance(vision_config, dict):
             vision_config = SimpleNamespace(**vision_config)
-        input_ids = jnp.ones((1, text_config.max_length), dtype="i4")
-        attention_mask = jnp.ones((1, text_config.max_length), dtype="i4")
+        max_len = getattr(text_config, "max_length", 512)
+        input_ids = jnp.ones((1, max_len), dtype="i4")
         pixel_values = jnp.ones((1, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
         params_rng, dropout_rng = jax.random.split(rng)
-        rngs = {"params": params_rng, "dropout": dropout_rng}
-        return {"rngs": rngs, "input_ids": input_ids, "pixel_values": pixel_values, "attention_mask": attention_mask}
+        rngs = {"params": params_rng, "dropout": dropout_rng, "aqt": params_rng}
+        return {
+            "rngs": rngs,
+            "input_ids": input_ids,
+            "pixel_values": pixel_values,
+            "attention_mask": jnp.ones_like(input_ids),
+            "position_ids": jnp.ones_like(input_ids),
+            "vision_start_ids": 0,
+        }
 
     def init_weights(self, rng: jax.random.PRNGKey):
         inputs = self.init_inputs(rng)
@@ -1592,6 +1628,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         params,
         past_key_values,
         return_dict=True,
+        vision_start_ids=None,
     ):
         # for generation compatibility, apply inverse
         past_key_values = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
@@ -1606,6 +1643,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             attention_mask=decoder_attention_mask,
             position_ids=decoder_position_ids,
             encoder_hidden_states=encoder_outputs["last_hidden_state"],
+            vision_start_ids=vision_start_ids,
             decode=True,
             deterministic=True,
             method=self.get_text_features,
@@ -1627,7 +1665,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         return model_kwargs
 
     def generate(self, *args, **kwargs):
-        assert self.text_config["is_decoder"], "generate() only works for decoder mode"
+        assert self.text_config.get("is_decoder", True), "generate() only works for decoder mode"
         generation_config = kwargs.pop("generation_config", None)
         if generation_config is None:
             generation_config = GenerationConfig(
