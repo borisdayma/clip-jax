@@ -1550,16 +1550,16 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
 
         return {"image_embeds": image_embeds, "vision_model_output": vision_outputs}
 
-    def init_inputs(config, rng: jax.random.PRNGKey):
+    def init_inputs(config, rng: jax.random.PRNGKey, batch_size=1, max_length=512):
         text_config = config.text_config
         vision_config = config.vision_config
         if isinstance(text_config, dict):
             text_config = SimpleNamespace(**text_config)
         if isinstance(vision_config, dict):
             vision_config = SimpleNamespace(**vision_config)
-        max_len = getattr(text_config, "max_length", 512)
-        input_ids = jnp.ones((1, max_len), dtype="i4")
-        pixel_values = jnp.ones((1, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
+        max_len = getattr(text_config, "max_length",  max_length)
+        input_ids = jnp.ones((batch_size, max_len), dtype="i4")
+        pixel_values = jnp.ones((batch_size, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
         params_rng, dropout_rng = jax.random.split(rng)
         rngs = {"params": params_rng, "dropout": dropout_rng, "aqt": params_rng}
         return {
@@ -1666,16 +1666,20 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
 
     def generate(self, *args, **kwargs):
         assert self.text_config.get("is_decoder", True), "generate() only works for decoder mode"
-        generation_config = kwargs.pop("generation_config", None)
-        if generation_config is None:
-            generation_config = GenerationConfig(
-                pad_token_id=self.text_config["pad_token_id"],
-                eos_token_id=self.text_config["eos_token_id"],
-                decoder_start_token_id=self.text_config["bos_token_id"],
-                bos_token_id=self.text_config["bos_token_id"],
-                max_length=kwargs.get("max_length", self.text_config["max_length"]),
-            )
-        return super().generate(*args, generation_config=generation_config, **kwargs)
+        if self.maxtext_mesh is None:
+            generation_config = kwargs.pop("generation_config", None)
+            if generation_config is None:
+                generation_config = GenerationConfig(
+                    pad_token_id=self.text_config["pad_token_id"],
+                    eos_token_id=self.text_config["eos_token_id"],
+                    decoder_start_token_id=self.text_config["bos_token_id"],
+                    bos_token_id=self.text_config["bos_token_id"],
+                    max_length=kwargs.get("max_length", self.text_config["max_length"]),
+                )
+            return super().generate(*args, generation_config=generation_config, **kwargs)
+        else:
+            pass
+
 
     @classmethod
     def can_generate(cls):
