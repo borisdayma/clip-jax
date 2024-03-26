@@ -1355,25 +1355,25 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
     logit_scale_init_value: float = 2.6592
     logit_bias_init_value: float = 0.0
     dtype: str = "float32"
+    # for maxtext models
     maxtext_mesh: Any = None
+    maxtext_args: Any = None
 
-    def __post_init__(self, **kwargs):
+    def __post_init__(self):
         # add default fields text_config
         if self.maxtext_mesh is None:
-            # ensure no args have been passed
-            assert len(kwargs) == 0
             # regular model
             default_fields = dataclasses.fields(CLIPTextTransformer)
             default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
             default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
             text_config = {**default_fields, **self.text_config}
-            if self.dtype is not None:
-                text_config["dtype"] = self.dtype
-                self.text_config = text_config
         else:
-            # maxtext model
-            text_config = {**self.text_config, **kwargs}
-            self.text_config = text_config
+            # maxtext model, accepts extra args for customization (mesh spec, etc)
+            maxtext_args = self.maxtext_args or {}
+            text_config = {**self.text_config, **maxtext_args}
+        if self.dtype is not None:
+            text_config["dtype"] = self.dtype
+        self.text_config = text_config
 
         # add default fields vision_config
         default_fields = dataclasses.fields(CLIPVisionTransformer)

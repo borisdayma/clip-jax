@@ -681,7 +681,7 @@ def main():
     model_eval = model if model_args.dtype == "float32" else CLIPModel(**{**clipConfig, "dtype": "float32"})
 
     # Update config with default fields
-    clipConfig = {k: v for k, v in asdict(model).items() if k not in ["parent", "name"]}
+    clipConfig = {k: v for k, v in asdict(model).items() if k not in ["parent", "name", "maxtext_mesh", "maxtext_args"]}
 
     # Load state
     state = State.from_config_metadata(model_args.config_metadata, model_args.restore_state)
