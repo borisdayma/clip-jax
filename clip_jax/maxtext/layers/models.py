@@ -90,6 +90,8 @@ class DecoderLayer(nn.Module):
             weight_dtype=cfg.weight_dtype,
             dropout_rate=cfg.dropout_rate,
             name="self_attention",
+            float32_qk_product=True,
+            float32_logits=True,
             quant=self.quant,
             quantize_kvcache=self.quantize_kvcache,
         )
@@ -235,7 +237,7 @@ class Decoder(nn.Module):
                 name="vision_projection",
             )(vision_embeddings)
             assert vision_start_ids is not None
-            if len(vision_start_ids.shape) == 0:
+            if isinstance(vision_start_ids, int) or len(vision_start_ids.shape) == 0:
                 # we passed a single int, same start_id for all samples
                 y = jax.lax.dynamic_update_slice(y, vision_embeddings, (0, vision_start_ids, 0))
             else:
@@ -389,6 +391,8 @@ class Transformer(nn.Module):
         decoder_positions,
         decoder_segment_ids=None,
         enable_dropout=True,
+        vision_embeddings=None,
+        vision_start_ids=None,
         model_mode=common_types.MODEL_MODE_TRAIN,
     ):
         """Applies Transformer decoder-branch on encoded-input and target."""
@@ -404,6 +408,8 @@ class Transformer(nn.Module):
             decoder_positions=decoder_positions,
             decoder_segment_ids=decoder_segment_ids,
             deterministic=not enable_dropout,
+            vision_embeddings=vision_embeddings,
+            vision_start_ids=vision_start_ids,
             model_mode=model_mode,
         )
         return logits
