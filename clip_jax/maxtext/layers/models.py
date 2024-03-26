@@ -226,6 +226,13 @@ class Decoder(nn.Module):
 
         # use vision tokens
         if vision_embeddings is not None:
+            # project vision embeddings
+            vision_embeddings = linears.DenseGeneral(
+                cfg.emb_dim,
+                dtype=cfg.dtype,
+                kernel_axes=("embed", "vocab"),  # not really vocab but ok for partitioning
+                name="vision_projection",
+            )(vision_embeddings)
             assert vision_start_ids is not None
             if len(vision_start_ids.shape) == 0:
                 # we passed a single int, same start_id for all samples
