@@ -34,6 +34,7 @@ from transformers import FlaxGenerationMixin, GenerationConfig
 
 from .maxtext.layers.models import Transformer
 from .maxtext import common_types
+from .maxtext.inference_utils import sampling
 
 remat = nn_partitioning.remat
 
@@ -72,6 +73,19 @@ class EncoderOutput(BaseOutput):
 class DecoderOutput(BaseOutput):
     logits: Array
     past_key_values: Array
+
+
+@flax.struct.dataclass
+class DecodeState:
+    cur_len: int
+    is_sent_finished: Array
+    sent_result: Array
+    input_ids: Array
+    attention_mask: Array
+    position_ids: Array
+    encoder_hidden_states: Array
+    vision_start_ids: Array
+    cache: Array
 
 
 # Utility functions
@@ -1557,7 +1571,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             text_config = SimpleNamespace(**text_config)
         if isinstance(vision_config, dict):
             vision_config = SimpleNamespace(**vision_config)
-        max_len = getattr(text_config, "max_length",  max_length)
+        max_len = getattr(text_config, "max_length", max_length)
         input_ids = jnp.ones((batch_size, max_len), dtype="i4")
         pixel_values = jnp.ones((batch_size, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
         params_rng, dropout_rng = jax.random.split(rng)
@@ -1664,7 +1678,16 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         model_kwargs["decoder_position_ids"] = model_kwargs["decoder_position_ids"][:, -1:] + 1
         return model_kwargs
 
-    def generate(self, *args, **kwargs):
+    def generate(
+        self,
+        *args,
+        # for maxtext only
+        decode_sampling_strategy="greedy",
+        decode_sampling_nucleus_p=-1,
+        decode_sampling_top_k=0,
+        decode_sampling_temperature=1.0,
+        **kwargs,
+    ):
         assert self.text_config.get("is_decoder", True), "generate() only works for decoder mode"
         if self.maxtext_mesh is None:
             generation_config = kwargs.pop("generation_config", None)
@@ -1678,8 +1701,84 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
                 )
             return super().generate(*args, generation_config=generation_config, **kwargs)
         else:
-            pass
+            # get relevant args
+            params = kwargs["params"]
+            input_ids = kwargs["input_ids"]
+            pixel_values = kwargs["pixel_values"]
+            attention_mask = kwargs["attention_mask"]
+            position_ids = kwargs["position_ids"]
+            vision_start_ids = kwargs["vision_start_ids"]
+            rng = kwargs["rng"]
+            batch_size = pixel_values.shape[0]
+            max_generate = self.text_config.max_target_length - self.text_config.max_prefill_predict_length
+            pad_token_id = self.text_config.pad_token_id
+            eos_token_id = self.text_config.eos_token_id
 
+            # get encoder outputs
+            encoder_hidden_states = self.encode(pixel_values, params, return_dict=False)
+
+            # set initial_state
+            state = DecodeState(
+                cur_len=0,
+                is_sent_finished=jnp.zeros((batch_size,), dtype=jnp.bool_),
+                sent_result=jnp.full((batch_size, max_generate), pad_token_id, dtype=jnp.int32),
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                encoder_hidden_states=encoder_hidden_states,
+                vision_start_ids=vision_start_ids,
+                cache=None,
+            )
+
+            # decode one step
+            def _decode_one_step(
+                state,
+                model_mode,
+            ):
+                var_params = {"params": params}
+                if state.cache is not None:
+                    var_params["cache"] = state.cache
+                outputs, mutable = self.apply(
+                    {"params": params},
+                    mutable=["cache"],
+                    input_ids=state.input_ids,
+                    attention_mask=state.attention_mask,
+                    position_ids=state.position_ids,
+                    encoder_hidden_states=state.encoder_hidden_states,
+                    vision_start_ids=state.vision_start_ids,
+                    deterministic=True,
+                    model_mode=model_mode,
+                    method=self.get_text_features,
+                )
+                logits = outputs["text_model_output"]["last_hidden_state"]
+                state.cache = mutable["cache"]
+                state.position_ids = state.position_ids[:, -1:] + 1
+                state.attention_mask = None
+                state.encoder_hidden_states = None
+                state.vision_start_ids = None
+
+                # sample token
+                logits = logits[:, -1:]
+                next_token = sampling(
+                    logits,
+                    rng,
+                    decode_sampling_strategy,
+                    topk=decode_sampling_top_k,
+                    nucleus_topp=decode_sampling_nucleus_p,
+                    temperature=decode_sampling_temperature,
+                )
+                next_token = next_token * ~state.is_sent_finished + pad_token_id * state.is_sent_finished
+                state.is_sent_finished = state.is_sent_finished | (next_token == eos_token_id)
+                state.sent_result = jax.lax.dynamic_update_slice(state.sequences, next_token, (0, state.cur_len))
+                state.cur_len += 1
+                return state
+
+            state = _decode_one_step(
+                state,
+                model_mode=common_types.MODEL_MODE_PREFILL,
+            )
+
+            return state
 
     @classmethod
     def can_generate(cls):
