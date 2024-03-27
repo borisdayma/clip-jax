@@ -1710,9 +1710,12 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             vision_start_ids = kwargs["vision_start_ids"]
             rng = kwargs["rng"]
             batch_size = pixel_values.shape[0]
-            max_generate = self.text_config.max_target_length - self.text_config.max_prefill_predict_length
-            pad_token_id = self.text_config.pad_token_id
-            eos_token_id = self.text_config.eos_token_id
+            max_prefill_length = input_ids.shape[1]
+            if self.text_config["max_prefill_predict_length"] != max_prefill_length:
+                print(f"""Warning: max_prefill_predict_length != input shape: {self.text_config["max_prefill_predict_length"]} != {max_prefill_length}""")
+            max_generate = self.text_config["max_target_length"] - max_prefill_length
+            pad_token_id = self.text_config["pad_token_id"]
+            eos_token_id = self.text_config["eos_token_id"]
 
             # get encoder outputs
             encoder_hidden_states = self.encode(pixel_values, params, return_dict=False)
@@ -1751,11 +1754,6 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
                     method=self.get_text_features,
                 )
                 logits = outputs["text_model_output"]["last_hidden_state"]
-                state.cache = mutable["cache"]
-                state.position_ids = state.position_ids[:, -1:] + 1
-                state.attention_mask = None
-                state.encoder_hidden_states = None
-                state.vision_start_ids = None
 
                 # sample token
                 logits = logits[:, -1:]
@@ -1767,10 +1765,18 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
                     nucleus_topp=decode_sampling_nucleus_p,
                     temperature=decode_sampling_temperature,
                 )
-                next_token = next_token * ~state.is_sent_finished + pad_token_id * state.is_sent_finished
-                state.is_sent_finished = state.is_sent_finished | (next_token == eos_token_id)
-                state.sent_result = jax.lax.dynamic_update_slice(state.sequences, next_token, (0, state.cur_len))
-                state.cur_len += 1
+                next_token = next_token * ~state.is_sent_finished[:, None] + pad_token_id * state.is_sent_finished[:, None]
+                state = state.replace(
+                    cur_len=state.cur_len + 1,
+                    is_sent_finished=state.is_sent_finished | (next_token[..., 0] == eos_token_id),
+                    sent_result=jax.lax.dynamic_update_slice(state.sent_result, next_token, (0, state.cur_len)),
+                    input_ids=next_token,
+                    attention_mask=None,
+                    position_ids=state.position_ids[:, -1:] + 1,
+                    encoder_hidden_states=None,
+                    vision_start_ids=None,
+                    cache=mutable["cache"],
+                )
                 return state
 
             state = _decode_one_step(
