@@ -102,7 +102,7 @@ class TrainingArguments:
         default="cross_entropy",
         metadata={"help": ("The type of loss to use. Can be 'cross_entropy' (default) or 'sigmoid'.")},
     )
-    gradient_checkpointing: bool = field(default=False, metadata={"help": "Use gradient checkpointing."})
+    remat_policy: str = field(default="none", metadata={"help": "Use gradient checkpointing."})
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate."})
     optim: str = field(
         default="distributed_shampoo",
@@ -668,8 +668,8 @@ def main():
     # Update config
     clipConfig["text_config"]["unroll"] = model_args.unroll
     clipConfig["vision_config"]["unroll"] = model_args.unroll
-    clipConfig["text_config"]["gradient_checkpointing"] = training_args.gradient_checkpointing
-    clipConfig["vision_config"]["gradient_checkpointing"] = training_args.gradient_checkpointing
+    clipConfig["text_config"]["remat_policy"] = training_args.remat_policy
+    clipConfig["vision_config"]["remat_policy"] = training_args.remat_policy
     clipConfig["text_config"]["float32_logits"] = model_args.float32_logits
     clipConfig["vision_config"]["float32_logits"] = model_args.float32_logits
     clipConfig["dtype"] = model_args.dtype
@@ -681,7 +681,7 @@ def main():
     model_eval = model if model_args.dtype == "float32" else CLIPModel(**{**clipConfig, "dtype": "float32"})
 
     # Update config with default fields
-    clipConfig = {k: v for k, v in asdict(model).items() if k not in ["parent", "name"]}
+    clipConfig = {k: v for k, v in asdict(model).items() if k not in ["parent", "name", "maxtext_mesh", "maxtext_args"]}
 
     # Load state
     state = State.from_config_metadata(model_args.config_metadata, model_args.restore_state)
@@ -1220,7 +1220,7 @@ def main():
         label_mask = minibatch.pop("label_mask", None)
         outputs = model_fn.apply({"params": params}, rngs=rngs, deterministic=not train, **minibatch)
         with jax.profiler.TraceAnnotation("Compute_Loss"):
-            if model.text_config["is_decoder"]:
+            if model.text_config.get("is_decoder", True):
                 logits = outputs["text_model_output"]["last_hidden_state"]
                 loss = encoder_decoder_loss(logits, labels, label_mask)
             elif training_args.loss_type == "cross_entropy":
@@ -1443,7 +1443,7 @@ def main():
             # keep only input_ids and attention_mask
             txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
             # add labels for decoder
-            if model.text_config["is_decoder"]:
+            if model.text_config.get("is_decoder", True):
                 txt_inputs["labels"] = shift_tokens_left(txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id)
                 txt_inputs["label_mask"] = shift_tokens_left(txt_inputs["attention_mask"], pad_token_id=0)
             batch = {"pixel_values": batch[0], **txt_inputs}
@@ -1671,7 +1671,7 @@ def main():
                 # keep only input_ids and attention_mask
                 txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
                 # add labels for decoder
-                if model.text_config["is_decoder"]:
+                if model.text_config.get("is_decoder", True):
                     txt_inputs["labels"] = shift_tokens_left(
                         txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id
                     )
