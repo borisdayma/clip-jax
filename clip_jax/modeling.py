@@ -1686,6 +1686,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         decode_sampling_nucleus_p=-1,
         decode_sampling_top_k=0,
         decode_sampling_temperature=1.0,
+        decode_force_max_length=False,  # for benchmarking
         **kwargs,
     ):
         assert self.text_config.get("is_decoder", True), "generate() only works for decoder mode"
@@ -1712,7 +1713,9 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             batch_size = pixel_values.shape[0]
             max_prefill_length = input_ids.shape[1]
             if self.text_config["max_prefill_predict_length"] != max_prefill_length:
-                print(f"""Warning: max_prefill_predict_length != input shape: {self.text_config["max_prefill_predict_length"]} != {max_prefill_length}""")
+                print(
+                    f"""Warning: max_prefill_predict_length != input shape: {self.text_config["max_prefill_predict_length"]} != {max_prefill_length}"""
+                )
             max_generate = self.text_config["max_target_length"] - max_prefill_length
             pad_token_id = self.text_config["pad_token_id"]
             eos_token_id = self.text_config["eos_token_id"]
@@ -1742,7 +1745,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
                 if state.cache is not None:
                     var_params["cache"] = state.cache
                 outputs, mutable = self.apply(
-                    {"params": params},
+                    var_params,
                     mutable=["cache"],
                     input_ids=state.input_ids,
                     attention_mask=state.attention_mask,
@@ -1765,7 +1768,9 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
                     nucleus_topp=decode_sampling_nucleus_p,
                     temperature=decode_sampling_temperature,
                 )
-                next_token = next_token * ~state.is_sent_finished[:, None] + pad_token_id * state.is_sent_finished[:, None]
+                next_token = (
+                    next_token * ~state.is_sent_finished[:, None] + pad_token_id * state.is_sent_finished[:, None]
+                )
                 state = state.replace(
                     cur_len=state.cur_len + 1,
                     is_sent_finished=state.is_sent_finished | (next_token[..., 0] == eos_token_id),
@@ -1779,12 +1784,24 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
                 )
                 return state
 
+            # prefill
             state = _decode_one_step(
                 state,
                 model_mode=common_types.MODEL_MODE_PREFILL,
             )
 
-            return state
+            # generate
+            def _cond_fn(state):
+                max_len_reached = state.cur_len >= max_generate
+                if decode_force_max_length:
+                    return ~max_len_reached
+                all_sent_finished = jnp.all(state.is_sent_finished)
+                return ~(all_sent_finished | max_len_reached)
+
+            state = jax.lax.while_loop(
+                _cond_fn, partial(_decode_one_step, model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE), state
+            )
+            return state.sent_result
 
     @classmethod
     def can_generate(cls):
