@@ -16,18 +16,15 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import functools
 from typing import Callable, Optional
 
-
-from flax import linen as nn
-import functools
 import jax
 import jax.numpy as jnp
+from flax import linen as nn
+
 from .. import common_types
-from . import attentions
-from . import embeddings
-from . import linears
-from . import normalizations, quantizations
+from . import attentions, embeddings, linears, normalizations, quantizations
 
 Array = common_types.Array
 Config = common_types.Config
@@ -243,17 +240,19 @@ class Decoder(nn.Module):
             assert vision_start_ids is not None
             if isinstance(vision_start_ids, int) or len(vision_start_ids.shape) == 0:
                 # we passed a single int, same start_id for all samples
-                y = jax.lax.dynamic_update_slice(y, vision_embeddings, (0, vision_start_ids, 0))
-                decoder_positions = jax.lax.dynamic_update_slice(
-                    decoder_positions, vision_positions, (0, vision_start_ids)
-                )
+                vision_start_ids = jnp.asarray(vision_start_ids)
+                vision_start_ids = jnp.insert(vision_start_ids, 0, 0)  # 0, start_id
+                decoder_positions = jax.lax.dynamic_update_slice(decoder_positions, vision_positions, vision_start_ids)
+                vision_start_ids = vision_start_ids.append(0)  # 0, start_id, 0
+                y = jax.lax.dynamic_update_slice(y, vision_embeddings, vision_start_ids)
+
             else:
                 # one id per sample
-                # TODO: check it works, may need to add 0 for embed dim
-                y = jax.vmap(jax.lax.dynamic_update_slice)(y, vision_embeddings, vision_start_ids[..., None])
                 decoder_positions = jax.vmap(jax.lax.dynamic_update_slice)(
                     decoder_positions, vision_positions, vision_start_ids[..., None]
                 )
+                _f = lambda a, b, c: jax.lax.dynamic_update_slice(a, b, jnp.append(c, 0))  # start_id, 0
+                y = jax.vmap(_f)(y, vision_embeddings, vision_start_ids[..., None])
 
         BlockLayer = self.get_decoder_layer()
 
