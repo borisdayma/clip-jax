@@ -236,14 +236,24 @@ class Decoder(nn.Module):
                 kernel_axes=("embed", "vocab"),  # not really vocab but ok for partitioning
                 name="vision_projection",
             )(vision_embeddings)
+            # set positions to 0
+            embed_len = vision_embeddings.shape[1]
+            print(f"Setting {embed_len} position embeddings for vision")
+            vision_positions = jnp.zeros_like(decoder_positions[:, :embed_len])
             assert vision_start_ids is not None
             if isinstance(vision_start_ids, int) or len(vision_start_ids.shape) == 0:
                 # we passed a single int, same start_id for all samples
                 y = jax.lax.dynamic_update_slice(y, vision_embeddings, (0, vision_start_ids, 0))
+                decoder_positions = jax.lax.dynamic_update_slice(
+                    decoder_positions, vision_positions, (0, vision_start_ids)
+                )
             else:
                 # one id per sample
                 # TODO: check it works, may need to add 0 for embed dim
                 y = jax.vmap(jax.lax.dynamic_update_slice)(y, vision_embeddings, vision_start_ids[..., None])
+                decoder_positions = jax.vmap(jax.lax.dynamic_update_slice)(
+                    decoder_positions, vision_positions, vision_start_ids[..., None]
+                )
 
         BlockLayer = self.get_decoder_layer()
 
