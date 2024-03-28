@@ -20,9 +20,9 @@
 
 
 from typing import Optional
-from . import quantizations
-from . import linears
-from . import initializers
+from layers import quantizations
+from layers import linears
+from layers import initializers
 import jax
 from jax.sharding import Mesh
 from flax import linen as nn
@@ -43,8 +43,6 @@ Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
-
-# TODO: Hack which attention is used
 
 # -----------------------------------------
 # The Decoder Layer for Mistral or Mixtral
