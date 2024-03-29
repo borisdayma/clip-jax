@@ -1252,7 +1252,8 @@ class CLIPVisionTransformer(nn.Module):
         else:
             raise ValueError(f"pool_type {self.pool_type} not supported.")
 
-        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+        if pooled_output is not None:
+            pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         return dict(
             last_hidden_state=last_hidden_state,
