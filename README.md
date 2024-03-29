@@ -153,17 +153,6 @@ TODO:
 ```
 
 ```bibtex
-@misc{cha2023honeybee,
-      title={Honeybee: Locality-enhanced Projector for Multimodal LLM}, 
-      author={Junbum Cha and Wooyoung Kang and Jonghwan Mun and Byungseok Roh},
-      year={2023},
-      eprint={2312.06742},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV}
-}
-```
-
-```bibtex
 @misc{mckinzie2024mm1,
       title={MM1: Methods, Analysis & Insights from Multimodal LLM Pre-training}, 
       author={Brandon McKinzie and Zhe Gan and Jean-Philippe Fauconnier and Sam Dodge and Bowen Zhang and Philipp Dufter and Dhruti Shah and Xianzhi Du and Futang Peng and Floris Weers and Anton Belyi and Haotian Zhang and Karanjeet Singh and Doug Kang and Ankur Jain and Hongyu Hè and Max Schwarzer and Tom Gunter and Xiang Kong and Aonan Zhang and Jianyu Wang and Chong Wang and Nan Du and Tao Lei and Sam Wiseman and Guoli Yin and Mark Lee and Zirui Wang and Ruoming Pang and Peter Grasch and Alexander Toshev and Yinfei Yang},
