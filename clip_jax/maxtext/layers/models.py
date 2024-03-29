@@ -225,14 +225,20 @@ class Decoder(nn.Module):
 
         # use vision tokens
         if vision_embeddings is not None:
-            # project vision embeddings
-            # TODO: optional projection when dim match
-            vision_embeddings = linears.DenseGeneral(
-                cfg.emb_dim,
+
+            # project vision embeddings (already normalized)
+            vision_embeddings = linears.MlpBlock(
+                intermediate_dim=cfg.mlp_dim,
+                activations=cfg.mlp_activations,
+                intermediate_dropout_rate=cfg.dropout_rate,
                 dtype=cfg.dtype,
-                kernel_axes=("embed", "vocab"),  # not really vocab but ok for partitioning
+                weight_dtype=cfg.weight_dtype,
                 name="vision_projection",
-            )(vision_embeddings)
+                config=cfg,
+                quant=self.quant,
+            )(vision_embeddings, deterministic=deterministic)
+            vision_embeddings = nn.with_logical_constraint(vision_embeddings, ("activation_batch", "activation_length", "activation_embed"))
+
             # set positions to 0
             embed_len = vision_embeddings.shape[1]
             print(f"Setting {embed_len} position embeddings for vision")
