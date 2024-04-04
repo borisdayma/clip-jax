@@ -75,6 +75,7 @@ class TrainingArguments:
     )
     do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
+    max_length: Optional[int] = field(default=None, metadata={"help": "max length used by tokenizer"})
     n_predict: Optional[int] = field(default=0, metadata={"help": "Number of predictions."})
     n_predict_batch: Optional[int] = field(default=None, metadata={"help": "Batch size for training."})
     predict_num_beams: Optional[int] = field(default=1, metadata={"help": "Num beams used during prediction."})
@@ -698,6 +699,7 @@ def main():
 
     # Load model
     model = CLIPModel(**clipConfig, maxtext_mesh=maxtext_mesh, maxtext_args=maxtext_args)
+    max_length = training_args.max_length if training_args.max_length is not None else model.text_config["max_length"]
     model_eval = (
         model
         if model_args.dtype == "float32"
@@ -705,8 +707,6 @@ def main():
             **{**clipConfig, "dtype": "float32", "maxtext_mesh": maxtext_mesh, "maxtext_args": maxtext_args}
         )
     )
-
-    # Update config with default fields
     clipConfig = {
         k: v for k, v in asdict(model).items() if k not in ["parent", "name", "maxtext_mesh", "maxtext_args"]
     }
@@ -723,7 +723,7 @@ def main():
     # Parameter count
     num_params = {
         "Total": count_params(logical_params),
-        "Text": count_params(logical_params["text"]),
+        "Text": count_params(logical_params["text" if "text" in logical_params else "text_model"]),
         "Vision": count_params(logical_params["vision"]),
     }
 
@@ -1470,7 +1470,7 @@ def main():
                 captions,
                 padding="max_length",
                 truncation=True,
-                max_length=model.text_config["max_length"],
+                max_length=max_length,
                 return_tensors="np",
             )
             # keep only input_ids and attention_mask
@@ -1552,7 +1552,7 @@ def main():
                 captions,
                 padding="max_length",
                 truncation=True,
-                max_length=model.text_config["max_length"],
+                max_length=max_length,
                 return_tensors="np",
             )
             # keep only input_ids and attention_mask
@@ -1698,7 +1698,7 @@ def main():
                     captions,
                     padding="max_length",
                     truncation=True,
-                    max_length=model.text_config["max_length"],
+                    max_length=max_length,
                     return_tensors="np",
                 )
                 # keep only input_ids and attention_mask
