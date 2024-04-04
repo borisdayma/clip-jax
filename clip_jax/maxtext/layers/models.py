@@ -236,6 +236,7 @@ class Decoder(nn.Module):
                 name="vision_projection",
                 config=cfg,
                 quant=self.quant,
+                output_dim=cfg.emb_dim,
             )(vision_embeddings, deterministic=deterministic)
             vision_embeddings = nn.with_logical_constraint(vision_embeddings, ("activation_batch", "activation_length", "activation_embed"))
 
@@ -249,7 +250,7 @@ class Decoder(nn.Module):
                 vision_start_ids = jnp.asarray(vision_start_ids)
                 vision_start_ids = jnp.insert(vision_start_ids, 0, 0)  # 0, start_id
                 decoder_positions = jax.lax.dynamic_update_slice(decoder_positions, vision_positions, vision_start_ids)
-                vision_start_ids = vision_start_ids.append(0)  # 0, start_id, 0
+                vision_start_ids = jnp.append(vision_start_ids, 0)  # 0, start_id, 0
                 y = jax.lax.dynamic_update_slice(y, vision_embeddings, vision_start_ids)
 
             else:

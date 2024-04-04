@@ -176,6 +176,7 @@ class MlpBlock(nn.Module):
     use_bias: bool = False
     use_pre_norm: bool = False
     quant: Optional[Quant] = None
+    output_dim: Optional[int] = None
 
     def get_norm_layer(self):
         if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
@@ -243,7 +244,7 @@ class MlpBlock(nn.Module):
         )  # Broadcast along length.
         x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
         output = DenseGeneral(
-            inputs.shape[-1],
+            inputs.shape[-1] if self.output_dim is None else self.output_dim,
             dtype=self.dtype,
             weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,

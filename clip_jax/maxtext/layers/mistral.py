@@ -20,9 +20,9 @@
 
 
 from typing import Optional
-from layers import quantizations
-from layers import linears
-from layers import initializers
+from . import quantizations
+from . import linears
+from . import initializers
 import jax
 from jax.sharding import Mesh
 from flax import linen as nn
