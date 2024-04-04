@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from functools import partial
 from platform import python_version
 from pprint import pformat
@@ -43,7 +43,7 @@ from clip_jax import CLIPModel
 from clip_jax.data import Dataset, logits_to_image, shift_tokens_left
 from clip_jax.partitions import logical_axis_rules
 from clip_jax.tokenizer import AutoTokenizer
-from clip_jax.utils import count_params, load_config
+from clip_jax.utils import count_params, load_config, asdict
 
 try:
     from google.cloud import storage
