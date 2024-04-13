@@ -15,6 +15,7 @@ dependencies = [
     "orbax-checkpoint",
     "tensorflow-io[tensorflow-cpu]",
     "transformers",
+    "aqtp",
 ]
 
 [project.optional-dependencies]

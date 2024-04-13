@@ -29,7 +29,12 @@ from flax.linen import partitioning as nn_partitioning
 from flax.linen.linear import DotGeneralT, PrecisionLike
 from flax.linen.module import merge_param
 from flax.linen.partitioning import ScanIn
+from jax.ad_checkpoint import checkpoint_name
 from transformers import FlaxGenerationMixin, GenerationConfig
+
+from .maxtext.layers.models import Transformer
+from .maxtext import common_types
+from .maxtext.inference_utils import sampling
 
 remat = nn_partitioning.remat
 
@@ -68,6 +73,19 @@ class EncoderOutput(BaseOutput):
 class DecoderOutput(BaseOutput):
     logits: Array
     past_key_values: Array
+
+
+@flax.struct.dataclass
+class DecodeState:
+    cur_len: int
+    is_sent_finished: Array
+    sent_result: Array
+    input_ids: Array
+    attention_mask: Array
+    position_ids: Array
+    encoder_hidden_states: Array
+    vision_start_ids: Array
+    cache: Array
 
 
 # Utility functions
@@ -127,7 +145,7 @@ class RotaryEmbedding(nn.Module):
     Attributes:
       min_timescale: Start of the geometric index. Determines the periodicity of
         the added signal.
-      max_timescale: End o$f the geometric index. Determines the frequency of the
+      max_timescale: End of the geometric index. Determines the frequency of the
         added signal.
       embedding_dims: Dimension of the embedding to be generated.
     """
@@ -367,7 +385,6 @@ class MultiHeadDotProductAttention(nn.Module):
     out_dot_general: DotGeneralT = jax.lax.dot_general
     # custom config
     use_rotary: bool = False
-    max_length: Optional[int] = None  # required if use_rotary
     embed_dim_name: str = "embed"
     normalize_qk: bool = False
     kernel_init_out: Optional[Callable[[PRNGKey, Shape, Dtype], Array]] = nn.initializers.zeros_init()
@@ -453,7 +470,6 @@ class MultiHeadDotProductAttention(nn.Module):
             value = nn.with_logical_constraint(value, ("batch", "length", "heads", "kv"))
 
             if self.use_rotary:
-                assert self.max_length is not None, "max_length must be specified for rotary embeddings."
                 if position_ids is not None:
                     query_positions = position_ids
                     key_positions = position_ids
@@ -474,6 +490,11 @@ class MultiHeadDotProductAttention(nn.Module):
                 # ensure sharding
                 query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
                 key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+
+            # checkpoint policies
+            query = checkpoint_name(query, "query_proj")
+            key = checkpoint_name(key, "key_proj")
+            value = checkpoint_name(value, "value_proj")
 
             # During fast autoregressive decoding, we feed one position at a time,
             # and cache the keys and values step by step.
@@ -556,6 +577,7 @@ class MAPHead(nn.Module):
     Adapted from google-reasearch/big_vision
     """
 
+    num_queries: int
     mlp_dim: int
     num_heads: int
     ln_type: str
@@ -575,9 +597,9 @@ class MAPHead(nn.Module):
         probe = self.param(
             "probe",
             nn.with_logical_partitioning(nn.initializers.xavier_uniform(), (None, None, "embed")),
-            (1, 1, embed_dim),
+            (1, self.num_queries, embed_dim),
         )
-        probe = jnp.tile(probe, [batch, 1, 1])
+        probe = jnp.tile(probe, [batch, self.num_queries, 1])
         probe = nn.with_logical_constraint(probe, ("batch", None, "embed"))
         if mask is not None:
             mask = nn.make_attention_mask(jnp.ones((batch, 1), dtype="i4"), mask, dtype=self.dtype)
@@ -587,7 +609,6 @@ class MAPHead(nn.Module):
             deterministic=deterministic,
             use_bias=self.use_bias,
             use_rotary=False,
-            max_length=None,
             dropout_rate=self.attention_dropout,
             decode=False,
             normalize_qk=self.normalize_qk,
@@ -610,7 +631,7 @@ class MAPHead(nn.Module):
         y = nn.with_logical_constraint(y, ("batch", "length", "embed"))
         x = x + y
         x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
-        return x[:, 0]
+        return x
 
 
 class CLIPMLP(nn.Module):
@@ -694,7 +715,6 @@ class CLIPEncoderLayer(nn.Module):
     ln_type: str  # "preln", "normformer"
     num_heads: int
     position_embedding_type: str  # "learnt", "rotary" or "sincos2d"
-    max_length: int
     use_causal_mask: bool
     mlp_dim: int
     decode: bool
@@ -742,7 +762,6 @@ class CLIPEncoderLayer(nn.Module):
             deterministic=deterministic,
             use_bias=self.use_bias,
             use_rotary=(self.position_embedding_type == "rotary"),
-            max_length=self.max_length,
             dropout_rate=self.attention_dropout,
             decode=self.decode,
             normalize_qk=self.normalize_qk,
@@ -788,7 +807,6 @@ class CLIPEncoderLayer(nn.Module):
                 deterministic=deterministic,
                 use_bias=self.use_bias,
                 use_rotary=False,  # don't apply on cross-attention
-                max_length=self.max_length,
                 dropout_rate=self.attention_dropout,
                 decode=False,
                 normalize_qk=self.normalize_qk,
@@ -834,7 +852,6 @@ class CLIPEncoder(nn.Module):
     ln_type: str  # "preln", "normformer"
     num_heads: int
     position_embedding_type: str  # "learnt", "rotary"
-    max_length: int
     use_causal_mask: bool
     mlp_dim: int
     float32_logits: bool
@@ -847,7 +864,7 @@ class CLIPEncoder(nn.Module):
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
     unroll: int = 100  # unroll scan layers
-    gradient_checkpointing: bool = True
+    remat_policy: str = "none"
 
     @nn.compact
     def __call__(
@@ -862,15 +879,20 @@ class CLIPEncoder(nn.Module):
         use_scan = True
         initializing = self.is_mutable_collection("params")
         params_spec = 0 if initializing else ScanIn(0)
-        layer = (
-            nn.remat(
-                CLIPEncoderLayer,
-                static_argnums=(-1,),
-                prevent_cse=not use_scan,
-            )
-            if self.gradient_checkpointing
-            else CLIPEncoderLayer
-        )
+        layer = CLIPEncoderLayer
+        if self.remat_policy != "none":
+            if self.remat_policy == "minimal":
+                policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+            elif self.remat_policy == "proj":
+                policy = jax.checkpoint_policies.save_only_these_names("query_proj", "value_proj", "key_proj")
+            elif self.remat_policy == "minimal_offloaded":
+                policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(
+                    offload_src="device", offload_dst="pinned_host"
+                )
+            else:
+                assert self.remat_policy == "full", "Remat policy needs to be on list of remat policies"
+                policy = None
+            layer = nn.remat(layer, prevent_cse=not use_scan, policy=policy, static_argnums=(-1, -2, -3, -4, -5))
 
         hidden_states, _ = nn.scan(
             layer,
@@ -879,13 +901,12 @@ class CLIPEncoder(nn.Module):
             in_axes=(nn.broadcast, nn.broadcast, nn.broadcast, nn.broadcast),
             length=self.num_layers,
             unroll=self.unroll,
-            metadata_params={nn.PARTITION_NAME: "layer"},
+            metadata_params={nn.PARTITION_NAME: "layers"},
         )(
             use_rmsnorm=self.use_rmsnorm,
             ln_type=self.ln_type,
             num_heads=self.num_heads,
             position_embedding_type=self.position_embedding_type,
-            max_length=self.max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
             float32_logits=self.float32_logits,
@@ -928,7 +949,7 @@ class CLIPTextTransformer(nn.Module):
     attention_dropout: float = 0.0
     mlp_dropout_rate: float = 0.0
     unroll: int = 100  # unroll scan layers
-    gradient_checkpointing: bool = True
+    remat_policy: str = "none"
     eos_token_id: int = None
     mask_token_id: int = None
     pad_token_id: int = None
@@ -937,6 +958,7 @@ class CLIPTextTransformer(nn.Module):
     is_decoder: bool = False  # for Cappa
     dtype: str = "float32"
     pool_type: str = None  # "bos", "eos", "map"
+    num_queries: int = 1  # used for map
 
     @nn.compact
     def __call__(
@@ -1005,7 +1027,6 @@ class CLIPTextTransformer(nn.Module):
             ln_type=self.ln_type,
             num_heads=self.num_heads,
             position_embedding_type=self.position_embedding_type,
-            max_length=self.max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
             float32_logits=self.float32_logits,
@@ -1017,7 +1038,7 @@ class CLIPTextTransformer(nn.Module):
             attention_dropout=self.attention_dropout,
             mlp_dropout_rate=self.mlp_dropout_rate,
             unroll=self.unroll,
-            gradient_checkpointing=self.gradient_checkpointing,
+            remat_policy=self.remat_policy,
             decode=decode,
             name="encoder",
         )(
@@ -1068,7 +1089,9 @@ class CLIPTextTransformer(nn.Module):
                     jnp.arange(last_hidden_state.shape[0]), _get_id_pos(input_ids, self.eos_token_id)
                 ]
             elif self.pool_type == "map":
+                # TODO: should allow custom heads/dim when using as queries for llm
                 pooled_output = MAPHead(
+                    num_queries=self.num_queries,
                     num_heads=self.num_heads,
                     mlp_dim=self.mlp_dim,
                     ln_type=self.ln_type,
@@ -1082,6 +1105,9 @@ class CLIPTextTransformer(nn.Module):
                     float32_logits=self.float32_logits,
                     dtype=dtype,
                 )(last_hidden_state, input_attention_mask, deterministic=deterministic)
+                if self.num_queries == 1:
+                    # used for clip
+                    pooled_output = pooled_output[:, 0]
 
             else:
                 pooled_output = None
@@ -1091,7 +1117,6 @@ class CLIPTextTransformer(nn.Module):
         return dict(
             last_hidden_state=last_hidden_state,
             pooled_output=pooled_output,
-            # TODO: add hidden states (for down-stream tasks)
         )
 
 
@@ -1120,7 +1145,8 @@ class CLIPVisionTransformer(nn.Module):
     unroll: int = 100  # unroll scan layers
     registers: int = 0  # number of registers per "vision transformers need registers"
     keep_registers: bool = False  # keep registers in the output
-    gradient_checkpointing: bool = True
+    remat_policy: str = "none"
+    num_queries: int = 1  # used for map
 
     @nn.compact
     def __call__(
@@ -1147,14 +1173,12 @@ class CLIPVisionTransformer(nn.Module):
             name="embeddings",
         )(pixel_values)
         hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
-        max_length = hidden_states.shape[1]
         encoder_outputs = CLIPEncoder(
             num_layers=self.num_layers,
             use_rmsnorm=self.use_rmsnorm,
             ln_type=self.ln_type,
             num_heads=self.num_heads,
             position_embedding_type=self.position_embedding_type,
-            max_length=max_length,
             use_causal_mask=self.use_causal_mask,
             mlp_dim=self.mlp_dim,
             float32_logits=self.float32_logits,
@@ -1166,7 +1190,7 @@ class CLIPVisionTransformer(nn.Module):
             attention_dropout=self.attention_dropout,
             mlp_dropout_rate=self.mlp_dropout_rate,
             unroll=self.unroll,
-            gradient_checkpointing=self.gradient_checkpointing,
+            remat_policy=self.remat_policy,
             name="encoder",
         )(
             hidden_states=hidden_states,
@@ -1202,16 +1226,9 @@ class CLIPVisionTransformer(nn.Module):
             # mean pool - jnp.mean -> was leading to large memory consumption in the past
             pooled_output = jnp.mean(last_hidden_state, axis=1)
 
-            if False:
-                # mean pool - for loop -> this worked better in the past, keeping it just in case
-                length = last_hidden_state.shape[1]
-                pooled_output = last_hidden_state[:, 0, :]
-                for i in range(1, length):
-                    pooled_output = pooled_output + last_hidden_state[:, i, :]
-                pooled_output = pooled_output / length
-
         elif self.pool_type == "map":
             pooled_output = MAPHead(
+                num_queries=self.num_queries,
                 num_heads=self.num_heads,
                 mlp_dim=self.mlp_dim,
                 ln_type=self.ln_type,
@@ -1225,6 +1242,9 @@ class CLIPVisionTransformer(nn.Module):
                 float32_logits=self.float32_logits,
                 dtype=dtype,
             )(last_hidden_state, None, deterministic=deterministic)
+            if self.num_queries == 1:
+                # used for clip
+                pooled_output = pooled_output[:, 0]
 
         elif self.pool_type is None:
             pooled_output = None
@@ -1232,7 +1252,8 @@ class CLIPVisionTransformer(nn.Module):
         else:
             raise ValueError(f"pool_type {self.pool_type} not supported.")
 
-        pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+        if pooled_output is not None:
+            pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
 
         return dict(
             last_hidden_state=last_hidden_state,
@@ -1349,16 +1370,26 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
     logit_scale_init_value: float = 2.6592
     logit_bias_init_value: float = 0.0
     dtype: str = "float32"
+    # for maxtext models
+    maxtext_mesh: Any = None
+    maxtext_args: Any = None
 
     def __post_init__(self):
         # add default fields text_config
-        default_fields = dataclasses.fields(CLIPTextTransformer)
-        default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
-        default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
-        text_config = {**default_fields, **self.text_config}
+        if self.maxtext_mesh is None:
+            # regular model
+            default_fields = dataclasses.fields(CLIPTextTransformer)
+            default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
+            default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
+            text_config = {**default_fields, **self.text_config}
+        else:
+            # maxtext model, accepts extra args for customization (mesh spec, etc)
+            maxtext_args = self.maxtext_args or {}
+            text_config = {**self.text_config, **maxtext_args}
         if self.dtype is not None:
             text_config["dtype"] = self.dtype
         self.text_config = text_config
+
         # add default fields vision_config
         default_fields = dataclasses.fields(CLIPVisionTransformer)
         default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
@@ -1368,12 +1399,16 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             vision_config["dtype"] = self.dtype
         self.vision_config = vision_config
         # set config flags for FlaxGenerationMixin
-        self.config = SimpleNamespace(is_encoder_decoder=text_config["is_decoder"])
+        self.config = SimpleNamespace(
+            is_encoder_decoder=text_config.get("is_decoder") or self.maxtext_mesh is not None
+        )
         return super().__post_init__()
 
     def setup(self):
-        if self.text_config["is_decoder"]:
-            assert self.vision_config["pool_type"] is None, "pool_type must be None for decoder mode"
+        if self.text_config.get("is_decoder", True):
+            assert (self.vision_config["pool_type"] is None) or (
+                self.vision_config["pool_type"] == "map" and self.vision_config["num_queries"] > 1
+            ), "pool_type must be None for decoder mode without maxtext"
         dtype = jnp.dtype(self.dtype)
         self.logit_scale = self.param(
             "logit_scale",
@@ -1385,15 +1420,18 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             nn.with_logical_partitioning(nn.initializers.constant(self.logit_bias_init_value), (None,)),
             (1,),
         )
-        self.text_model = CLIPTextTransformer(
-            **self.text_config,
-            name="text",
-        )
+        if self.maxtext_mesh is None:
+            self.text_model = CLIPTextTransformer(
+                **self.text_config,
+                name="text",
+            )
+        else:
+            self.text_model = Transformer(SimpleNamespace(**self.text_config), self.maxtext_mesh, quant=None)
         self.vision_model = CLIPVisionTransformer(
             **self.vision_config,
             name="vision",
         )
-        if (not self.text_config["is_decoder"]) and (
+        if (not self.text_config.get("is_decoder", True)) and (
             self.text_config["hidden_size"] != self.vision_config["hidden_size"]
         ):
             self.text_projection = nn.Dense(
@@ -1422,11 +1460,13 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         position_ids: Optional[jnp.ndarray] = None,
         decode: bool = False,
         deterministic: bool = True,
+        vision_start_ids: Optional[Any] = None,
+        model_mode: str = common_types.MODEL_MODE_TRAIN,
     ):
         image_features = self.get_image_features(pixel_values, deterministic=deterministic)
         image_embeds, vision_model_output = image_features["image_embeds"], image_features["vision_model_output"]
 
-        is_decoder = self.text_config["is_decoder"]
+        is_decoder = self.text_config.get("is_decoder", True)
         if decode:
             assert is_decoder, "decode=True only works for decoder mode"
         text_features = self.get_text_features(
@@ -1434,8 +1474,10 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             attention_mask,
             encoder_hidden_states=vision_model_output["last_hidden_state"] if is_decoder else None,
             position_ids=position_ids,
+            vision_start_ids=vision_start_ids,
             decode=decode,
             deterministic=deterministic,
+            model_mode=model_mode,
         )
         text_embeds, text_model_output = text_features["text_embeds"], text_features["text_model_output"]
 
@@ -1472,21 +1514,39 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         attention_mask,
         encoder_hidden_states: Optional[jnp.ndarray] = None,
         position_ids: Optional[jnp.ndarray] = None,
+        vision_start_ids: Optional[Any] = None,
         decode: bool = False,
         deterministic: bool = True,
+        model_mode: str = common_types.MODEL_MODE_TRAIN,
     ):
-        text_outputs = self.text_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            encoder_hidden_states=encoder_hidden_states,
-            position_ids=position_ids,
-            decode=decode,
-            deterministic=deterministic,
-        )
+        if self.maxtext_mesh is None:
+            text_outputs = self.text_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                position_ids=position_ids,
+                decode=decode,
+                deterministic=deterministic,
+            )
 
-        text_embeds = text_outputs["pooled_output"]
-        if self.text_projection is not None:
-            text_embeds = self.text_projection(text_embeds)
+            text_embeds = text_outputs["pooled_output"]
+            if self.text_projection is not None:
+                text_embeds = self.text_projection(text_embeds)
+        else:
+            text_embeds = None
+            last_hidden_state = self.text_model(
+                decoder_input_tokens=input_ids,
+                decoder_positions=position_ids,
+                decoder_segment_ids=attention_mask,
+                enable_dropout=not deterministic,
+                vision_embeddings=encoder_hidden_states,
+                vision_start_ids=vision_start_ids,
+                model_mode=model_mode,
+            )
+            text_outputs = dict(
+                last_hidden_state=last_hidden_state,
+                pooled_output=None,
+            )
 
         return {"text_embeds": text_embeds, "text_model_output": text_outputs}
 
@@ -1505,19 +1565,26 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
 
         return {"image_embeds": image_embeds, "vision_model_output": vision_outputs}
 
-    def init_inputs(config, rng: jax.random.PRNGKey):
+    def init_inputs(config, rng: jax.random.PRNGKey, batch_size=1, max_length=512):
         text_config = config.text_config
         vision_config = config.vision_config
         if isinstance(text_config, dict):
             text_config = SimpleNamespace(**text_config)
         if isinstance(vision_config, dict):
             vision_config = SimpleNamespace(**vision_config)
-        input_ids = jnp.ones((1, text_config.max_length), dtype="i4")
-        attention_mask = jnp.ones((1, text_config.max_length), dtype="i4")
-        pixel_values = jnp.ones((1, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
+        max_len = getattr(text_config, "max_length", max_length)
+        input_ids = jnp.ones((batch_size, max_len), dtype="i4")
+        pixel_values = jnp.ones((batch_size, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
         params_rng, dropout_rng = jax.random.split(rng)
-        rngs = {"params": params_rng, "dropout": dropout_rng}
-        return {"rngs": rngs, "input_ids": input_ids, "pixel_values": pixel_values, "attention_mask": attention_mask}
+        rngs = {"params": params_rng, "dropout": dropout_rng, "aqt": params_rng}
+        return {
+            "rngs": rngs,
+            "input_ids": input_ids,
+            "pixel_values": pixel_values,
+            "attention_mask": jnp.ones_like(input_ids),
+            "position_ids": jnp.ones_like(input_ids),
+            "vision_start_ids": 0,
+        }
 
     def init_weights(self, rng: jax.random.PRNGKey):
         inputs = self.init_inputs(rng)
@@ -1576,6 +1643,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         params,
         past_key_values,
         return_dict=True,
+        vision_start_ids=None,
     ):
         # for generation compatibility, apply inverse
         past_key_values = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
@@ -1590,6 +1658,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             attention_mask=decoder_attention_mask,
             position_ids=decoder_position_ids,
             encoder_hidden_states=encoder_outputs["last_hidden_state"],
+            vision_start_ids=vision_start_ids,
             decode=True,
             deterministic=True,
             method=self.get_text_features,
@@ -1610,18 +1679,130 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         model_kwargs["decoder_position_ids"] = model_kwargs["decoder_position_ids"][:, -1:] + 1
         return model_kwargs
 
-    def generate(self, *args, **kwargs):
-        assert self.text_config["is_decoder"], "generate() only works for decoder mode"
-        generation_config = kwargs.pop("generation_config", None)
-        if generation_config is None:
-            generation_config = GenerationConfig(
-                pad_token_id=self.text_config["pad_token_id"],
-                eos_token_id=self.text_config["eos_token_id"],
-                decoder_start_token_id=self.text_config["bos_token_id"],
-                bos_token_id=self.text_config["bos_token_id"],
-                max_length=self.text_config["max_length"],
+    def generate(
+        self,
+        *args,
+        # for maxtext only
+        decode_sampling_strategy="greedy",
+        decode_sampling_nucleus_p=-1,
+        decode_sampling_top_k=0,
+        decode_sampling_temperature=1.0,
+        decode_force_max_length=False,  # for benchmarking
+        **kwargs,
+    ):
+        assert self.text_config.get("is_decoder", True), "generate() only works for decoder mode"
+        if self.maxtext_mesh is None:
+            generation_config = kwargs.pop("generation_config", None)
+            if generation_config is None:
+                generation_config = GenerationConfig(
+                    pad_token_id=self.text_config["pad_token_id"],
+                    eos_token_id=self.text_config["eos_token_id"],
+                    decoder_start_token_id=self.text_config["bos_token_id"],
+                    bos_token_id=self.text_config["bos_token_id"],
+                    max_length=kwargs.get("max_length", self.text_config["max_length"]),
+                )
+            return super().generate(*args, generation_config=generation_config, **kwargs)
+        else:
+            # get relevant args
+            params = kwargs["params"]
+            input_ids = kwargs["input_ids"]
+            pixel_values = kwargs["pixel_values"]
+            attention_mask = kwargs["attention_mask"]
+            position_ids = kwargs["position_ids"]
+            vision_start_ids = kwargs["vision_start_ids"]
+            rng = kwargs["rng"]
+            batch_size = pixel_values.shape[0]
+            max_prefill_length = input_ids.shape[1]
+            if self.text_config["max_prefill_predict_length"] != max_prefill_length:
+                print(
+                    f"""Warning: max_prefill_predict_length != input shape: {self.text_config["max_prefill_predict_length"]} != {max_prefill_length}"""
+                )
+            max_generate = self.text_config["max_target_length"] - max_prefill_length
+            pad_token_id = self.text_config["pad_token_id"]
+            eos_token_id = self.text_config["eos_token_id"]
+
+            # get encoder outputs
+            encoder_hidden_states = self.encode(pixel_values, params, return_dict=False)
+
+            # set initial_state
+            state = DecodeState(
+                cur_len=0,
+                is_sent_finished=jnp.zeros((batch_size,), dtype=jnp.bool_),
+                sent_result=jnp.full((batch_size, max_generate), pad_token_id, dtype=jnp.int32),
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                encoder_hidden_states=encoder_hidden_states,
+                vision_start_ids=vision_start_ids,
+                cache=None,
             )
-        return super().generate(*args, generation_config=generation_config, **kwargs)
+
+            # decode one step
+            def _decode_one_step(
+                state,
+                model_mode,
+            ):
+                var_params = {"params": params}
+                if state.cache is not None:
+                    var_params["cache"] = state.cache
+                outputs, mutable = self.apply(
+                    var_params,
+                    mutable=["cache"],
+                    input_ids=state.input_ids,
+                    attention_mask=state.attention_mask,
+                    position_ids=state.position_ids,
+                    encoder_hidden_states=state.encoder_hidden_states,
+                    vision_start_ids=state.vision_start_ids,
+                    deterministic=True,
+                    model_mode=model_mode,
+                    method=self.get_text_features,
+                )
+                logits = outputs["text_model_output"]["last_hidden_state"]
+
+                # sample token
+                logits = logits[:, -1:]
+                next_token = sampling(
+                    logits,
+                    rng,
+                    decode_sampling_strategy,
+                    topk=decode_sampling_top_k,
+                    nucleus_topp=decode_sampling_nucleus_p,
+                    temperature=decode_sampling_temperature,
+                )
+                next_token = (
+                    next_token * ~state.is_sent_finished[:, None] + pad_token_id * state.is_sent_finished[:, None]
+                )
+                state = state.replace(
+                    cur_len=state.cur_len + 1,
+                    is_sent_finished=state.is_sent_finished | (next_token[..., 0] == eos_token_id),
+                    sent_result=jax.lax.dynamic_update_slice(state.sent_result, next_token, (0, state.cur_len)),
+                    input_ids=next_token,
+                    attention_mask=None,
+                    position_ids=state.position_ids[:, -1:] + 1,
+                    encoder_hidden_states=None,
+                    vision_start_ids=None,
+                    cache=mutable["cache"],
+                )
+                return state
+
+            # prefill
+            state = _decode_one_step(
+                state,
+                model_mode=common_types.MODEL_MODE_PREFILL,
+            )
+
+            # generate
+            def _cond_fn(state):
+                max_len_reached = state.cur_len >= max_generate
+                if decode_force_max_length:
+                    return ~max_len_reached
+                all_sent_finished = jnp.all(state.is_sent_finished)
+                return ~(all_sent_finished | max_len_reached)
+
+            state = jax.lax.while_loop(
+                _cond_fn, partial(_decode_one_step, model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE), state
+            )
+            return state.sent_result
 
     @classmethod
     def can_generate(cls):

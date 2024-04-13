@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from functools import partial
 from platform import python_version
 from pprint import pformat
@@ -43,7 +43,7 @@ from clip_jax import CLIPModel
 from clip_jax.data import Dataset, logits_to_image, shift_tokens_left
 from clip_jax.partitions import logical_axis_rules
 from clip_jax.tokenizer import AutoTokenizer
-from clip_jax.utils import count_params, load_config
+from clip_jax.utils import count_params, load_config, asdict
 
 try:
     from google.cloud import storage
@@ -75,6 +75,7 @@ class TrainingArguments:
     )
     do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
+    max_length: Optional[int] = field(default=None, metadata={"help": "max length used by tokenizer"})
     n_predict: Optional[int] = field(default=0, metadata={"help": "Number of predictions."})
     n_predict_batch: Optional[int] = field(default=None, metadata={"help": "Batch size for training."})
     predict_num_beams: Optional[int] = field(default=1, metadata={"help": "Num beams used during prediction."})
@@ -102,7 +103,7 @@ class TrainingArguments:
         default="cross_entropy",
         metadata={"help": ("The type of loss to use. Can be 'cross_entropy' (default) or 'sigmoid'.")},
     )
-    gradient_checkpointing: bool = field(default=False, metadata={"help": "Use gradient checkpointing."})
+    remat_policy: str = field(default="none", metadata={"help": "Use gradient checkpointing."})
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate."})
     optim: str = field(
         default="distributed_shampoo",
@@ -459,15 +460,17 @@ def split_scanned_params(data):
     """Split params between scanned and non-scanned"""
     # NOTE: technically this is not needed with Adam (and could be slower) but is required with shampoo
     flat = flatten_dict(data)
-    split = {"text": {}, "vision": {}, "scanned_text": {}, "scanned_vision": {}}
+    split = {"text": {}, "vision": {}, "scanned_text": {}, "scanned_vision": {}, "scanned_maxtext": {}}
     for k, v in flat.items():
         if "layers" in k:
-            if "text" in k:
+            if "text_model" in k:
+                split["scanned_maxtext"][k] = v
+            elif "text" in k:
                 split["scanned_text"][k] = v
             else:
                 split["scanned_vision"][k] = v
         else:
-            if "text" in k:
+            if ("text" in k) or ("text_model" in k):
                 split["text"][k] = v
             else:
                 split["vision"][k] = v
@@ -662,26 +665,51 @@ def main():
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name)
 
+    # Create mesh
+    logger.info(f"Creating a mesh of ({training_args.dp_devices}, {training_args.mp_devices})")
+    dev_mesh = create_device_mesh((training_args.dp_devices, training_args.mp_devices))
+    mesh = Mesh(dev_mesh, ("data", "model"))
+    logger.info(f"Mesh: {mesh.shape}")
+
     # Load config
     clipConfig = load_config(model_args.config_name)
+    isMaxtext = "decoder_block" in clipConfig["text_config"]
 
     # Update config
-    clipConfig["text_config"]["unroll"] = model_args.unroll
-    clipConfig["vision_config"]["unroll"] = model_args.unroll
-    clipConfig["text_config"]["gradient_checkpointing"] = training_args.gradient_checkpointing
-    clipConfig["vision_config"]["gradient_checkpointing"] = training_args.gradient_checkpointing
-    clipConfig["text_config"]["float32_logits"] = model_args.float32_logits
-    clipConfig["vision_config"]["float32_logits"] = model_args.float32_logits
+    maxtext_args = None
+    maxtext_mesh = None
     clipConfig["dtype"] = model_args.dtype
-    if model_args.masked_pred_prob is not None:
-        clipConfig["text_config"]["masked_pred_prob"] = model_args.masked_pred_prob
+    clipConfig["vision_config"]["unroll"] = model_args.unroll
+    clipConfig["text_config"]["remat_policy"] = training_args.remat_policy
+    clipConfig["vision_config"]["remat_policy"] = training_args.remat_policy
+    clipConfig["vision_config"]["float32_logits"] = model_args.float32_logits
+    if isMaxtext:
+        maxtext_mesh = mesh
+        maxtext_args = dict(
+            remat_policy=training_args.remat_policy,
+            activation_partitioning_dims=training_args.activation_partitioning_dims,
+            parameter_partitioning_dims=training_args.parameter_partitioning_dims,
+            mp_devices=training_args.mp_devices,
+        )
+    else:
+        clipConfig["text_config"]["unroll"] = model_args.unroll
+        clipConfig["text_config"]["float32_logits"] = model_args.float32_logits
+        if model_args.masked_pred_prob is not None:
+            clipConfig["text_config"]["masked_pred_prob"] = model_args.masked_pred_prob
 
     # Load model
-    model = CLIPModel(**clipConfig)
-    model_eval = model if model_args.dtype == "float32" else CLIPModel(**{**clipConfig, "dtype": "float32"})
-
-    # Update config with default fields
-    clipConfig = {k: v for k, v in asdict(model).items() if k not in ["parent", "name"]}
+    model = CLIPModel(**clipConfig, maxtext_mesh=maxtext_mesh, maxtext_args=maxtext_args)
+    max_length = training_args.max_length if training_args.max_length is not None else model.text_config["max_length"]
+    model_eval = (
+        model
+        if model_args.dtype == "float32"
+        else CLIPModel(
+            **{**clipConfig, "dtype": "float32", "maxtext_mesh": maxtext_mesh, "maxtext_args": maxtext_args}
+        )
+    )
+    clipConfig = {
+        k: v for k, v in asdict(model).items() if k not in ["parent", "name", "maxtext_mesh", "maxtext_args"]
+    }
 
     # Load state
     state = State.from_config_metadata(model_args.config_metadata, model_args.restore_state)
@@ -695,7 +723,7 @@ def main():
     # Parameter count
     num_params = {
         "Total": count_params(logical_params),
-        "Text": count_params(logical_params["text"]),
+        "Text": count_params(logical_params["text" if "text" in logical_params else "text_model"]),
         "Vision": count_params(logical_params["vision"]),
     }
 
@@ -749,12 +777,6 @@ def main():
 
     # Orbax checkpointer
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-
-    # Create mesh
-    logger.info(f"Creating a mesh of ({training_args.dp_devices}, {training_args.mp_devices})")
-    dev_mesh = create_device_mesh((training_args.dp_devices, training_args.mp_devices))
-    mesh = Mesh(dev_mesh, ("data", "model"))
-    logger.info(f"Mesh: {mesh.shape}")
 
     # Data sharding parameters
     num_local_devices = jax.local_device_count()
@@ -950,6 +972,9 @@ def main():
             if ("scanned_text" in k) or ("scanned_vision" in k):
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
+            elif "scanned_maxtext" in k:
+                # extract 1 layer
+                p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[:, 0], x), p)
             optimizer[k] = (
                 opt_vision_none.init(p)
                 if (k == "vision" and training_args.set_opt_spec_vision_to_none)
@@ -996,6 +1021,8 @@ def main():
         for k, p in split_scanned_params(trainable_params(logical_params, training_args)).items():
             if ("scanned_text" in k) or ("scanned_vision" in k):
                 opt_state_shape[k] = jax.eval_shape(jax.vmap(optimizer[k].init), p)
+            elif "scanned_maxtext" in k:
+                opt_state_shape[k] = jax.eval_shape(jax.vmap(optimizer[k].init, in_axes=1), p)
             else:
                 opt_state_shape[k] = jax.eval_shape(optimizer[k].init, p)
 
@@ -1052,6 +1079,10 @@ def main():
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[0], x), p)
                 p_spec = jax.tree_util.tree_map(lambda y: PartitionSpec(*y[1:]), p_spec)
+            elif "scanned_maxtext" in k:
+                # extract 1 layer
+                p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[:,0], x), p)
+                p_spec = jax.tree_util.tree_map(lambda y: PartitionSpec(y[0], *y[2:]), p_spec)
             _opt_fn = opt_fn[k] if training_args.optim == "distributed_shampoo" else None
             opt_state_spec[k] = _get_spec(
                 params_spec=p_spec,
@@ -1085,7 +1116,7 @@ def main():
         for k, p in split_scanned_params(trainable_params(params, training_args)).items():
             init_fn = optimizer[k].init
             if "scanned" in k:
-                init_fn = jax.vmap(init_fn)
+                init_fn = jax.vmap(init_fn, in_axes=1 if "maxtext" in k else 0)
             opt_state[k] = init_fn(p)
         return opt_state
 
@@ -1114,7 +1145,9 @@ def main():
         new_params = {}
         for k, param in split_params.items():
             update_fn = optimizer[k].update
-            if ("scanned_text" in k) or ("scanned_vision" in k):
+            if "scanned_maxtext" in k:
+                update_fn = jax.vmap(update_fn, in_axes=(1, 1, 1), out_axes=(1, 0))
+            elif ("scanned_text" in k) or ("scanned_vision" in k):
                 update_fn = jax.vmap(update_fn, in_axes=(0, 0, 0), out_axes=(0, 0))
             updates, new_opt_state[k] = update_fn(grads[k], opt_state[k], param)
             new_params[k] = optax.apply_updates(param, updates)
@@ -1220,7 +1253,7 @@ def main():
         label_mask = minibatch.pop("label_mask", None)
         outputs = model_fn.apply({"params": params}, rngs=rngs, deterministic=not train, **minibatch)
         with jax.profiler.TraceAnnotation("Compute_Loss"):
-            if model.text_config["is_decoder"]:
+            if model.text_config.get("is_decoder", True):
                 logits = outputs["text_model_output"]["last_hidden_state"]
                 loss = encoder_decoder_loss(logits, labels, label_mask)
             elif training_args.loss_type == "cross_entropy":
@@ -1437,13 +1470,13 @@ def main():
                 captions,
                 padding="max_length",
                 truncation=True,
-                max_length=model.text_config["max_length"],
+                max_length=max_length,
                 return_tensors="np",
             )
             # keep only input_ids and attention_mask
             txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
             # add labels for decoder
-            if model.text_config["is_decoder"]:
+            if model.text_config.get("is_decoder", True):
                 txt_inputs["labels"] = shift_tokens_left(txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id)
                 txt_inputs["label_mask"] = shift_tokens_left(txt_inputs["attention_mask"], pad_token_id=0)
             batch = {"pixel_values": batch[0], **txt_inputs}
@@ -1519,7 +1552,7 @@ def main():
                 captions,
                 padding="max_length",
                 truncation=True,
-                max_length=model.text_config["max_length"],
+                max_length=max_length,
                 return_tensors="np",
             )
             # keep only input_ids and attention_mask
@@ -1665,13 +1698,13 @@ def main():
                     captions,
                     padding="max_length",
                     truncation=True,
-                    max_length=model.text_config["max_length"],
+                    max_length=max_length,
                     return_tensors="np",
                 )
                 # keep only input_ids and attention_mask
                 txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
                 # add labels for decoder
-                if model.text_config["is_decoder"]:
+                if model.text_config.get("is_decoder", True):
                     txt_inputs["labels"] = shift_tokens_left(
                         txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id
                     )
