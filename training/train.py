@@ -667,7 +667,7 @@ def main():
         )
 
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, padding_side="right")
 
     # Create mesh
     logger.info(f"Creating a mesh of ({training_args.dp_devices}, {training_args.mp_devices})")
