@@ -1405,10 +1405,10 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         return super().__post_init__()
 
     def setup(self):
-        if self.text_config.get("is_decoder", True):
+        if self.config.is_encoder_decoder:
             assert (self.vision_config["pool_type"] is None) or (
                 self.vision_config["pool_type"] == "map" and self.vision_config["num_queries"] > 1
-            ), "pool_type must be None for decoder mode without maxtext"
+            ), "pool_type must be None or map with num_queries > 1 for decoder mode without maxtext"
         dtype = jnp.dtype(self.dtype)
         self.logit_scale = self.param(
             "logit_scale",

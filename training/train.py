@@ -40,10 +40,10 @@ from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from clip_jax import CLIPModel
-from clip_jax.data import Dataset, logits_to_image, shift_tokens_left
+from clip_jax.data import Dataset, logits_to_image, preprocess_batch
 from clip_jax.partitions import logical_axis_rules
 from clip_jax.tokenizer import AutoTokenizer
-from clip_jax.utils import count_params, load_config, asdict
+from clip_jax.utils import asdict, count_params, load_config
 
 try:
     from google.cloud import storage
@@ -437,6 +437,10 @@ class DataTrainingArguments:
     key_image: Optional[str] = field(default="webp", metadata={"help": "Name of the key containing the webp images."})
     key_caption: Optional[str] = field(
         default="caption", metadata={"help": "Name of the key containing the captions."}
+    )
+    key_assistant: Optional[str] = field(
+        default=None,
+        metadata={"help": "Name of the key containing the captions for assistant when using chat template."},
     )
     mean: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The mean of the dataset."})
     std: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The std of the dataset."})
@@ -1081,7 +1085,7 @@ def main():
                 p_spec = jax.tree_util.tree_map(lambda y: PartitionSpec(*y[1:]), p_spec)
             elif "scanned_maxtext" in k:
                 # extract 1 layer
-                p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[:,0], x), p)
+                p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[:, 0], x), p)
                 p_spec = jax.tree_util.tree_map(lambda y: PartitionSpec(y[0], *y[2:]), p_spec)
             _opt_fn = opt_fn[k] if training_args.optim == "distributed_shampoo" else None
             opt_state_spec[k] = _get_spec(
@@ -1465,22 +1469,9 @@ def main():
             disable=jax.process_index() > 0,
         ):
             # preprocess batch
-            captions = [caption.decode("utf-8") for caption in batch[1]]
-            txt_inputs = tokenizer(
-                captions,
-                padding="max_length",
-                truncation=True,
-                max_length=max_length,
-                return_tensors="np",
+            batch = preprocess_batch(
+                batch, tokenizer, max_length, is_decoder=model.text_config.get("is_decoder", True)
             )
-            # keep only input_ids and attention_mask
-            txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
-            # add labels for decoder
-            if model.text_config.get("is_decoder", True):
-                txt_inputs["labels"] = shift_tokens_left(txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id)
-                txt_inputs["label_mask"] = shift_tokens_left(txt_inputs["attention_mask"], pad_token_id=0)
-            batch = {"pixel_values": batch[0], **txt_inputs}
-
             # convert to jax arrays
             data_global_shape_eval = jax.tree_map(_get_global_shape, batch)
             # split per device
@@ -1693,23 +1684,9 @@ def main():
                 evaluation_ran, save_model_ran, metrics_logged = False, False, False
 
                 # preprocess batch
-                captions = [caption.decode("utf-8") for caption in batch[1]]
-                txt_inputs = tokenizer(
-                    captions,
-                    padding="max_length",
-                    truncation=True,
-                    max_length=max_length,
-                    return_tensors="np",
+                batch = preprocess_batch(
+                    batch, tokenizer, max_length, is_decoder=model.text_config.get("is_decoder", True)
                 )
-                # keep only input_ids and attention_mask
-                txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
-                # add labels for decoder
-                if model.text_config.get("is_decoder", True):
-                    txt_inputs["labels"] = shift_tokens_left(
-                        txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id
-                    )
-                    txt_inputs["label_mask"] = shift_tokens_left(txt_inputs["attention_mask"], pad_token_id=0)
-                batch = {"pixel_values": batch[0], **txt_inputs}
 
                 # reshape batch
                 if data_global_shape is None:

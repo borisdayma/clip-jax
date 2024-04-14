@@ -23,6 +23,7 @@ class Dataset:
     format: str = "rgb"  # rgb or lab
     key_image: str = "webp"  # name of key containing image
     key_caption: str = "caption"  # name of key containing captions
+    key_assistant: str = None  # name of key when using chat template data
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     _train: tf.data.Dataset = field(init=False)
@@ -51,8 +52,10 @@ class Dataset:
             self.key_image: tf.io.FixedLenFeature([], tf.string),
             "original_width": tf.io.FixedLenFeature([], tf.int64),
             "original_height": tf.io.FixedLenFeature([], tf.int64),
-            self.key_caption: tf.io.FixedLenFeature([], tf.string, default_value=""),
+            self.key_assistant: tf.io.FixedLenFeature([], tf.string, default_value=""),
         }
+        if self.key_agent:
+            features[self.key_agent] = tf.io.FixedLenFeature([], tf.string, default_value="")
 
         def _parse_function(example_proto):
             parsed_features = tf.io.parse_single_example(example_proto, features)
@@ -61,9 +64,10 @@ class Dataset:
                 parsed_features["original_width"],
                 parsed_features["original_height"],
                 parsed_features[self.key_caption],
+                parsed_features[self.key_assistant] if self.key_assistant else None,
             )
 
-        def _filter_function(image, width, height, caption):
+        def _filter_function(image, width, height, caption, caption_assistant):
             # filter out images that are too small
             if self.min_original_image_size is not None and (tf.minimum(width, height) < self.min_original_image_size):
                 return False
@@ -74,8 +78,8 @@ class Dataset:
                 return False
             return True
 
-        def _parse_image(image, width, height, caption):
-            return tfio.image.decode_webp(image)[..., :3], caption
+        def _parse_image(image, width, height, caption, caption_assistant):
+            return tfio.image.decode_webp(image)[..., :3], caption, caption_assistant
 
         def _parse_no_filter(example_proto):
             # we can combine parsing functions into one
@@ -90,34 +94,39 @@ class Dataset:
             )
 
         # augmentation wrapper
-        def _augment_crop_wrapper(image, caption):
+        def _augment_crop_wrapper(image, caption, caption_assistant):
             seed = self.rng.make_seeds(2)[0]
-            return _augment_crop(image, seed), caption
+            return _augment_crop(image, seed), caption, caption_assistant
 
         # center crop (for validation)
-        def _center_crop(image, caption):
+        def _center_crop(image, caption, caption_assistant):
             return (
                 tf.image.resize_with_crop_or_pad(image, self.image_crop_size, self.image_crop_size),
                 caption,
+                caption_assistant,
             )
 
-        def _resize(image, caption):
+        def _resize(image, caption, caption_assistant):
             # NOTE: area as we will typically be downsampling
             return (
                 tf.image.resize(image, [self.image_crop_resize, self.image_crop_resize], method="area"),
                 caption,
+                caption_assistant,
             )
 
         # normalization
-        def _normalize(image, caption):
+        def _normalize(image, caption, caption_assistant):
             if self.format == "rgb":
                 image = (
                     tf.cast(image, tf.float32) / 255.0 - tf.convert_to_tensor([self.mean], dtype=tf.float32)
                 ) / tf.convert_to_tensor([self.std], dtype=tf.float32)
-
-                return image, caption
             elif self.format == "lab":
                 raise NotImplementedError("LAB not implemented")
+
+            res = {"images": image, "captions": caption}
+            if caption_assistant[0] is not None:
+                res["captions_assistant"] = caption_assistant
+            return res
 
         for folder, dataset, augment, batch_size in zip(
             [self.train_folder, self.valid_folder],
@@ -245,3 +254,52 @@ def shift_tokens_left(logits, pad_token_id):
     shifted_logits[:, :-1] = logits[:, 1:]
     shifted_logits[:, -1] = pad_token_id
     return shifted_logits
+
+
+def preprocess_batch(batch, tokenizer, max_length, is_decoder):
+    # preprocess batch
+    captions = [caption.decode("utf-8") for caption in batch["captions"]]
+    captions_assistant = batch.get("captions_assistant", None)
+    if captions_assistant is not None:
+        captions_assistant = [caption.decode("utf-8") for caption in captions_assistant]
+        messages = [
+            [{"role": "user", "content": caption}, {"role": "assistant", "content": caption_assistant}]
+            for caption, caption_assistant in zip(captions, captions_assistant)
+        ]
+        txt_inputs = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            padding="max_length",
+            truncation=True,
+            max_length=max_length,
+            return_tensors="np",
+            return_dict=True,
+        )
+        txt_inputs_only_mask = tokenizer.apply_chat_template(
+            messages[:1],
+            tokenize=True,
+            padding="max_length",
+            truncation=True,
+            max_length=max_length,
+            return_tensors="np",
+            add_generation_prompt=False,
+            return_dict=True,
+        ).attention_mask
+        label_mask = np.logical_not(txt_inputs_only_mask) * txt_inputs.attention_mask
+    else:
+        txt_inputs = tokenizer(
+            captions,
+            padding="max_length",
+            truncation=True,
+            max_length=max_length,
+            return_tensors="np",
+        )
+        label_mask = txt_inputs.attention_mask
+    # keep only input_ids and attention_mask
+    txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
+    # add labels for decoder
+    if is_decoder:
+        txt_inputs["labels"] = shift_tokens_left(txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id)
+        txt_inputs["label_mask"] = shift_tokens_left(label_mask, pad_token_id=0)
+    batch = {"pixel_values": batch["images"], **txt_inputs}
+    return batch
