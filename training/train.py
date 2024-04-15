@@ -100,6 +100,10 @@ class TrainingArguments:
         default=False,
         metadata={"help": ("Reinit text parameters when loading from a checkpoint.")},
     )
+    reinit_vision_projection: bool = field(
+        default=False,
+        metadata={"help": ("Reinit vision projection parameters when loading from a checkpoint.")},
+    )
     set_opt_spec_vision_to_none: bool = field(
         default=False,
         metadata={"help": "Set the optimizer vision spec to None."},
@@ -834,8 +838,8 @@ def main():
             transforms = {
                 r"(.*)(text|logit_bias|logit_scale|MAPHead)(.*)": orbax.checkpoint.Transform(use_fallback=True)
             }
-        else:
-            transforms = {}
+        elif training_args.reinit_vision_projection:
+            transforms = {r"(.*)(vision_projection)(.*)": orbax.checkpoint.Transform(use_fallback=True)}
         return checkpoint_manager.restore(
             step, ckpt, restore_kwargs={"restore_args": restore_args, "transforms": transforms}
         )
