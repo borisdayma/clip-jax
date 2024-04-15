@@ -92,6 +92,10 @@ class TrainingArguments:
         default=False,
         metadata={"help": ("Freezes vision tower.")},
     )
+    vision_projection_only: bool = field(
+        default=False,
+        metadata={"help": ("Train only vision projection.")},
+    )
     reinit_text: bool = field(
         default=False,
         metadata={"help": ("Reinit text parameters when loading from a checkpoint.")},
@@ -498,6 +502,8 @@ def trainable_params(data, training_args):
     frozen_keys = None
     if training_args.freeze_vision:
         frozen_keys = ["vision:embeddings", "vision:encoder"]
+    if training_args.vision_projection_only:
+        frozen_keys = [k for k in flatten_dict(data, sep=":").keys() if "vision_projection" not in k]
     if frozen_keys is not None:
         data_train = {}
         for k, v in flatten_dict(data, sep=":").items():
