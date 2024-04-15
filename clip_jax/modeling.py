@@ -188,8 +188,8 @@ class RotaryEmbedding(nn.Module):
         timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
         position = position[:, :, jnp.newaxis, jnp.newaxis]
         sinusoid_inp = position / timescale
-        sin = jnp.sin(sinusoid_inp)
-        cos = jnp.cos(sinusoid_inp)
+        sin = jnp.sin(sinusoid_inp).astype(inputs.dtype)
+        cos = jnp.cos(sinusoid_inp).astype(inputs.dtype)
         first_half, second_half = jnp.split(inputs, 2, axis=-1)
         first_part = first_half * cos - second_half * sin
         second_part = second_half * cos + first_half * sin
