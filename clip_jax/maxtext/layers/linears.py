@@ -36,6 +36,7 @@ NdInitializer = initializers.NdInitializer
 
 nd_dense_init = initializers.nd_dense_init
 bias_init = initializers.default_bias_init
+zeros_init = initializers.zeros_init
 
 RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
@@ -170,6 +171,7 @@ class MlpBlock(nn.Module):
     intermediate_dim: int = 2048
     activations: Sequence[Union[str, Callable[..., Any]]] = ("relu",)
     kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal")
+    kernel_init_out: NdInitializer = zeros_init()
     intermediate_dropout_rate: float = 0.1
     dtype: Any = jnp.float32
     weight_dtype: Any = jnp.float32
@@ -247,7 +249,7 @@ class MlpBlock(nn.Module):
             inputs.shape[-1] if self.output_dim is None else self.output_dim,
             dtype=self.dtype,
             weight_dtype=self.weight_dtype,
-            kernel_init=self.kernel_init,
+            kernel_init=self.kernel_init_out,
             kernel_axes=("mlp", "embed"),
             name="wo",
             quant=self.quant,
