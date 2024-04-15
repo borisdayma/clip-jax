@@ -79,6 +79,7 @@ class TrainingArguments:
     n_predict: Optional[int] = field(default=0, metadata={"help": "Number of predictions."})
     n_predict_batch: Optional[int] = field(default=None, metadata={"help": "Batch size for training."})
     predict_num_beams: Optional[int] = field(default=1, metadata={"help": "Num beams used during prediction."})
+    predict_temperature: Optional[float] = field(default=1.0, metadata={"help": "Temperature used during prediction."})
 
     batch_size_per_node: Optional[int] = field(default=64, metadata={"help": "Batch size for training."})
     valid_batch_size_per_node: Optional[int] = field(default=None, metadata={"help": "Batch size for validation."})
@@ -1150,7 +1151,7 @@ def main():
         for k, param in split_params.items():
             update_fn = optimizer[k].update
             if "scanned_maxtext" in k:
-                update_fn = jax.vmap(update_fn, in_axes=(1, 1, 1), out_axes=(1, 0))
+                update_fn = jax.vmap(update_fn, in_axes=(1, 0, 1), out_axes=(1, 0))
             elif ("scanned_text" in k) or ("scanned_vision" in k):
                 update_fn = jax.vmap(update_fn, in_axes=(0, 0, 0), out_axes=(0, 0))
             updates, new_opt_state[k] = update_fn(grads[k], opt_state[k], param)
@@ -1171,7 +1172,9 @@ def main():
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
         loss = loss * label_mask
         # normalize
-        loss /= jnp.sum(label_mask, axis=-1, keepdims=True)
+        loss_div = jnp.sum(label_mask, axis=-1, keepdims=True)
+        loss_div = jnp.maximum(loss_div, 1)
+        loss /= loss_div
         loss = jnp.mean(loss)
         return loss
 
@@ -1436,7 +1439,10 @@ def main():
     # Predict step
     def predict_step(params, batch):
         outputs = model.generate(
-            batch["pixel_values"], params=params, num_beams=training_args.predict_num_beams
+            batch["pixel_values"],
+            params=params,
+            num_beams=training_args.predict_num_beams,
+            temperature=training_args.predict_temperature,
         ).sequences
         return outputs
 
@@ -1538,17 +1544,9 @@ def main():
             batch = jax.tree_map(lambda x: x[:max_batch], batch)
 
             # preprocess batch
-            captions = [caption.decode("utf-8") for caption in batch[1]]
-            txt_inputs = tokenizer(
-                captions,
-                padding="max_length",
-                truncation=True,
-                max_length=max_length,
-                return_tensors="np",
+            batch = preprocess_batch(
+                batch, tokenizer, max_length, is_decoder=model.text_config.get("is_decoder", True)
             )
-            # keep only input_ids and attention_mask
-            txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
-            batch = {"pixel_values": batch[0], **txt_inputs}
 
             # convert to jax arrays
             data_global_shape_eval = jax.tree_map(_get_global_shape, batch)
