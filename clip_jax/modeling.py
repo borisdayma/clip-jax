@@ -1603,11 +1603,10 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         past_key_values = self.init(**model_inputs, method=_decode)["cache"]
         # extend attention mask
         if decoder_attention_mask is not None:
-            print("decoder_attention_mask", decoder_attention_mask.shape)
             position_ids = decoder_attention_mask.cumsum(axis=-1) - 1
+            position_ids = jnp.where(decoder_attention_mask == 0, 0, position_ids)
             extended_mask = jnp.ones((bs, max_length), dtype="i4")
             decoder_attention_mask = jax.lax.dynamic_update_slice(extended_mask, decoder_attention_mask, (0, 0))
-            print("extended_attention_mask", decoder_attention_mask.shape)
         else:
             position_ids = jnp.arange(decoder_input_ids.shape[1])
             position_ids = jnp.broadcast_to(position_ids[None], decoder_input_ids.shape[:2])
