@@ -210,6 +210,17 @@ class Decoder(nn.Module):
         y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
         y = y.astype(cfg.dtype)
 
+        if decoder_positions is None:
+            if decoder_segment_ids is not None:
+                # NOTE: does not support packed sequences
+                print("Setting decoder position ids based on attention mask")
+                decoder_positions = decoder_segment_ids.cumsum(axis=-1) - 1
+                decoder_positions = jnp.where(decoder_segment_ids == 0, 0, decoder_positions)
+            else:
+                print("Setting decoder position ids based on input tokens")
+                decoder_positions = jnp.arange(decoder_input_tokens.shape[1])
+                decoder_positions = decoder_positions[None, :]
+
         if cfg.use_untrainable_positional_embedding:
             y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
 
@@ -238,7 +249,9 @@ class Decoder(nn.Module):
                 quant=self.quant,
                 output_dim=cfg.emb_dim,
             )(vision_embeddings, deterministic=deterministic)
-            vision_embeddings = nn.with_logical_constraint(vision_embeddings, ("activation_batch", "activation_length", "activation_embed"))
+            vision_embeddings = nn.with_logical_constraint(
+                vision_embeddings, ("activation_batch", "activation_length", "activation_embed")
+            )
 
             # set positions to 0
             embed_len = vision_embeddings.shape[1]
