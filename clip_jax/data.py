@@ -286,6 +286,9 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder):
             return_dict=True,
         ).attention_mask
         label_mask = np.logical_not(txt_inputs_only_mask) * txt_inputs.attention_mask
+        # get vision position ids
+        target_id = tokenizer.unk_token_id  # TODO: configure it
+        vision_start_ids = np.where(txt_inputs.input_ids == target_id, 1, 0).argmax(axis=-1)
     else:
         txt_inputs = tokenizer(
             captions,
@@ -295,6 +298,7 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder):
             return_tensors="np",
         )
         label_mask = txt_inputs.attention_mask
+        vision_start_ids = None
     # keep only input_ids and attention_mask
     txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
     # add labels for decoder
@@ -302,4 +306,6 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder):
         txt_inputs["labels"] = shift_tokens_left(txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id)
         txt_inputs["label_mask"] = shift_tokens_left(label_mask, pad_token_id=0)
     batch = {"pixel_values": batch["images"], **txt_inputs}
+    if vision_start_ids is not None:
+        batch["vision_start_ids"] = vision_start_ids
     return batch
