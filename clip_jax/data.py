@@ -52,10 +52,10 @@ class Dataset:
             self.key_image: tf.io.FixedLenFeature([], tf.string),
             "original_width": tf.io.FixedLenFeature([], tf.int64),
             "original_height": tf.io.FixedLenFeature([], tf.int64),
-            self.key_assistant: tf.io.FixedLenFeature([], tf.string, default_value=""),
+            self.key_caption: tf.io.FixedLenFeature([], tf.string, default_value=""),
         }
-        if self.key_agent:
-            features[self.key_agent] = tf.io.FixedLenFeature([], tf.string, default_value="")
+        if self.key_assistant:
+            features[self.key_assistant] = tf.io.FixedLenFeature([], tf.string, default_value="")
 
         def _parse_function(example_proto):
             parsed_features = tf.io.parse_single_example(example_proto, features)
@@ -276,7 +276,7 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder):
             return_dict=True,
         )
         txt_inputs_only_mask = tokenizer.apply_chat_template(
-            messages[:1],
+            [msg[:1] for msg in messages],
             tokenize=True,
             padding="max_length",
             truncation=True,
