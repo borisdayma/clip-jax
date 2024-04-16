@@ -258,10 +258,10 @@ def shift_tokens_left(logits, pad_token_id):
 
 def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_batch=False):
     # preprocess batch
-    captions = [caption.decode("utf-8") for caption in batch["captions"]]
+    captions = [" ".join(caption.decode("utf-8").strip().split()) for caption in batch["captions"]]
     captions_assistant = batch.get("captions_assistant", None)
     if captions_assistant is not None:
-        captions_assistant = [caption.decode("utf-8") for caption in captions_assistant]
+        captions_assistant = [" ".join(caption.decode("utf-8").strip().split()) for caption in captions_assistant]
         messages = [
             [{"role": "user", "content": caption}, {"role": "assistant", "content": caption_assistant}]
             for caption, caption_assistant in zip(captions, captions_assistant)
