@@ -1707,8 +1707,18 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             input_ids = kwargs["input_ids"]
             pixel_values = kwargs["pixel_values"]
             attention_mask = kwargs["attention_mask"]
-            position_ids = kwargs["position_ids"]
             vision_start_ids = kwargs["vision_start_ids"]
+            position_ids = kwargs.get("position_ids", None)
+            if position_ids is None:
+                if attention_mask is not None:
+                    # NOTE: does not support packed sequences
+                    print("Setting decoder position ids based on attention mask")
+                    position_ids = attention_mask.cumsum(axis=-1) - 1
+                    position_ids = jnp.where(attention_mask == 0, 0, position_ids)
+                else:
+                    print("Setting decoder position ids based on input tokens")
+                    position_ids = jnp.arange(input_ids.shape[1])
+                    position_ids = position_ids[None, :]
             rng = kwargs["rng"]
             batch_size = pixel_values.shape[0]
             max_prefill_length = input_ids.shape[1]
