@@ -23,7 +23,9 @@ class Dataset:
     format: str = "rgb"  # rgb or lab
     key_image: str = "webp"  # name of key containing image
     key_caption: str = "caption"  # name of key containing captions
+    key_caption_2: str = None  # name of 2nd key containing captions for chat templates
     key_assistant: str = None  # name of key when using chat template data
+    key_assistant_2: str = None  # name of 2nd key when using chat template data
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     _train: tf.data.Dataset = field(init=False)
@@ -54,8 +56,12 @@ class Dataset:
             "original_height": tf.io.FixedLenFeature([], tf.int64),
             self.key_caption: tf.io.FixedLenFeature([], tf.string, default_value=""),
         }
+        if self.key_caption_2:
+            features[self.key_caption_2] = tf.io.FixedLenFeature([], tf.string, default_value="")
         if self.key_assistant:
             features[self.key_assistant] = tf.io.FixedLenFeature([], tf.string, default_value="")
+        if self.key_assistant_2:
+            features[self.key_assistant_2] = tf.io.FixedLenFeature([], tf.string, default_value="")
 
         def _parse_function(example_proto):
             parsed_features = tf.io.parse_single_example(example_proto, features)
@@ -64,10 +70,12 @@ class Dataset:
                 parsed_features["original_width"],
                 parsed_features["original_height"],
                 parsed_features[self.key_caption],
+                parsed_features[self.key_caption_2] if self.key_caption_2 else None,
                 parsed_features[self.key_assistant] if self.key_assistant else None,
+                parsed_features[self.key_assistant_2] if self.key_assistant_2 else None,
             )
 
-        def _filter_function(image, width, height, caption, caption_assistant):
+        def _filter_function(image, width, height, caption, caption_2, caption_assistant, caption_assistant_2):
             # filter out images that are too small
             if self.min_original_image_size is not None and (tf.minimum(width, height) < self.min_original_image_size):
                 return False
@@ -78,8 +86,8 @@ class Dataset:
                 return False
             return True
 
-        def _parse_image(image, width, height, caption, caption_assistant):
-            return tfio.image.decode_webp(image)[..., :3], caption, caption_assistant
+        def _parse_image(image, width, height, caption, caption_2, caption_assistant, caption_assistant_2):
+            return tfio.image.decode_webp(image)[..., :3], caption, caption_2, caption_assistant, caption_assistant_2
 
         def _parse_no_filter(example_proto):
             # we can combine parsing functions into one
@@ -94,28 +102,32 @@ class Dataset:
             )
 
         # augmentation wrapper
-        def _augment_crop_wrapper(image, caption, caption_assistant):
+        def _augment_crop_wrapper(image, caption, caption_2, caption_assistant, caption_assistant_2):
             seed = self.rng.make_seeds(2)[0]
-            return _augment_crop(image, seed), caption, caption_assistant
+            return _augment_crop(image, seed), caption, caption_2, caption_assistant, caption_assistant_2
 
         # center crop (for validation)
-        def _center_crop(image, caption, caption_assistant):
+        def _center_crop(image, caption, caption_2, caption_assistant, caption_assistant_2):
             return (
                 tf.image.resize_with_crop_or_pad(image, self.image_crop_size, self.image_crop_size),
                 caption,
+                caption_2,
                 caption_assistant,
+                caption_assistant_2,
             )
 
-        def _resize(image, caption, caption_assistant):
+        def _resize(image, caption, caption_2, caption_assistant, caption_assistant_2):
             # NOTE: area as we will typically be downsampling
             return (
                 tf.image.resize(image, [self.image_crop_resize, self.image_crop_resize], method="area"),
                 caption,
+                caption_2,
                 caption_assistant,
+                caption_assistant_2,
             )
 
         # normalization
-        def _normalize(image, caption, caption_assistant):
+        def _normalize(image, caption, caption_2, caption_assistant, caption_assistant_2):
             if self.format == "rgb":
                 image = (
                     tf.cast(image, tf.float32) / 255.0 - tf.convert_to_tensor([self.mean], dtype=tf.float32)
@@ -124,8 +136,12 @@ class Dataset:
                 raise NotImplementedError("LAB not implemented")
 
             res = {"images": image, "captions": caption}
-            if caption_assistant[0] is not None:
+            if caption_2 is not None:
+                res["captions_2"] = caption_2
+            if caption_assistant is not None:
                 res["captions_assistant"] = caption_assistant
+            if caption_assistant_2 is not None:
+                res["captions_assistant_2"] = caption_assistant_2
             return res
 
         for folder, dataset, augment, batch_size in zip(
@@ -261,10 +277,27 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_bat
     captions = [" ".join(caption.decode("utf-8").strip().split()) for caption in batch["captions"]]
     captions_assistant = batch.get("captions_assistant", None)
     if captions_assistant is not None:
+        captions_2 = batch.get("captions_2", None)
+        captions_assistant_2 = batch.get("captions_assistant_2", None)
         captions_assistant = [" ".join(caption.decode("utf-8").strip().split()) for caption in captions_assistant]
+        if captions_2 is not None:
+            captions_2 = [" ".join(caption.decode("utf-8").strip().split()) for caption in captions_2]
+        else:
+            captions_2 = [None] * len(captions_assistant)
+        if captions_assistant_2 is not None:
+            captions_assistant_2 = [
+                " ".join(caption.decode("utf-8").strip().split()) for caption in captions_assistant_2
+            ]
+        else:
+            captions_assistant_2 = [None] * len(captions_assistant)
         messages = [
-            [{"role": "user", "content": caption}, {"role": "assistant", "content": caption_assistant}]
-            for caption, caption_assistant in zip(captions, captions_assistant)
+            [
+                {"role": "user", "content": caption, "content_2": caption_2},
+                {"role": "assistant", "content": caption_assistant, "content_2": caption_assistant_2},
+            ]
+            for caption, caption_2, caption_assistant, caption_assistant_2 in zip(
+                captions, captions_2, captions_assistant, captions_assistant_2
+            )
         ]
         txt_inputs = tokenizer.apply_chat_template(
             messages,
@@ -286,9 +319,6 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_bat
             return_dict=True,
         )
         label_mask = np.logical_not(txt_inputs_only.attention_mask) * txt_inputs.attention_mask
-        # get vision position ids
-        target_id = tokenizer.unk_token_id  # TODO: configure it
-        vision_start_ids = np.where(txt_inputs.input_ids == target_id, 1, 0).argmax(axis=-1)
     else:
         txt_inputs = tokenizer(
             captions,
@@ -312,8 +342,10 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_bat
         if is_decoder:
             txt_inputs["labels"] = shift_tokens_left(txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id)
             txt_inputs["label_mask"] = shift_tokens_left(label_mask, pad_token_id=0)
-    if vision_start_ids is not None:
+    if captions_assistant is not None:
+        # get vision position ids
+        target_id = tokenizer.unk_token_id  # TODO: configure it
+        vision_start_ids = np.where(txt_inputs["input_ids"] == target_id, 1, 0).argmax(axis=-1)
         txt_inputs["vision_start_ids"] = vision_start_ids
     batch = {"pixel_values": batch["images"], **txt_inputs}
-
     return batch
