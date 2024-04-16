@@ -679,6 +679,8 @@ def main():
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, padding_side="right")
+    if training_args.n_predict:
+        tokenizer_predict = AutoTokenizer.from_pretrained(model_args.tokenizer_name, padding_side="left")
 
     # Create mesh
     logger.info(f"Creating a mesh of ({training_args.dp_devices}, {training_args.mp_devices})")
@@ -705,7 +707,12 @@ def main():
             activation_partitioning_dims=training_args.activation_partitioning_dims,
             parameter_partitioning_dims=training_args.parameter_partitioning_dims,
             mp_devices=training_args.mp_devices,
+            max_target_length=training_args.max_length * 2 if training_args.max_length is not None else 1024,
+            max_prefill_predict_length=training_args.max_length if training_args.max_length is not None else 512,
         )
+        # set tokens if not set
+        if clipConfig["text_config"]["pad_token_id"] is None:
+            clipConfig["text_config"]["pad_token_id"] = tokenizer.pad_token_id
     else:
         clipConfig["text_config"]["unroll"] = model_args.unroll
         clipConfig["text_config"]["float32_logits"] = model_args.float32_logits
@@ -720,6 +727,14 @@ def main():
         if model_args.dtype == "float32"
         else CLIPModel(
             **{**clipConfig, "dtype": "float32", "maxtext_mesh": maxtext_mesh, "maxtext_args": maxtext_args}
+        )
+    )
+    # TODO: should not be needed in the future - see https://github.com/google/maxtext/issues/595
+    model_predict = (
+        model
+        if model_args.dtype == "bfloat16"
+        else CLIPModel(
+            **{**clipConfig, "dtype": "bfloat16", "maxtext_mesh": maxtext_mesh, "maxtext_args": maxtext_args}
         )
     )
     clipConfig = {
@@ -840,6 +855,8 @@ def main():
             }
         elif training_args.reinit_vision_projection:
             transforms = {r"(.*)(vision_projection)(.*)": orbax.checkpoint.Transform(use_fallback=True)}
+        else:
+            transforms = {}
         return checkpoint_manager.restore(
             step, ckpt, restore_kwargs={"restore_args": restore_args, "transforms": transforms}
         )
@@ -1448,12 +1465,26 @@ def main():
 
     # Predict step
     def predict_step(params, batch):
-        outputs = model.generate(
-            batch["pixel_values"],
-            params=params,
-            num_beams=training_args.predict_num_beams,
-            temperature=training_args.predict_temperature,
-        ).sequences
+        if isMaxtext:
+            outputs = model_predict.generate(
+                params=params,
+                pixel_values=batch["pixel_values"],
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                vision_start_ids=batch["vision_start_ids"],
+                rng=jax.random.PRNGKey(0),
+                decode_sampling_strategy="weighted",
+                decode_sampling_nucleus_p=-1,
+                decode_sampling_top_k=0,
+                decode_sampling_temperature=training_args.predict_temperature,
+            )
+        else:
+            outputs = model.generate(
+                batch["pixel_values"],
+                params=params,
+                num_beams=training_args.predict_num_beams,
+                temperature=training_args.predict_temperature,
+            ).sequences
         return outputs
 
     # Create parallel version of the train and eval step
@@ -1514,6 +1545,7 @@ def main():
                 metrics_batch = p_eval_step(params, batch)
             metrics_batch = jax.device_get(metrics_batch)
             metrics.append(metrics_batch)
+            break
 
         # get the mean of the metrics
         metrics = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *metrics)
@@ -1555,7 +1587,11 @@ def main():
 
             # preprocess batch
             batch = preprocess_batch(
-                batch, tokenizer, max_length, is_decoder=model.text_config.get("is_decoder", True)
+                batch,
+                tokenizer_predict,
+                max_length,
+                is_decoder=model.text_config.get("is_decoder", True),
+                is_prediction_batch=True,
             )
 
             # convert to jax arrays
@@ -1596,6 +1632,12 @@ def main():
                 input_ids = batch["input_ids"][:n_needed]
                 input_ids = jax.device_get(input_ids)
                 captions = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+                if isMaxtext:
+                    labels_id = batch["labels"][:n_needed]
+                    labels_id = jax.device_get(labels_id)
+                    labels = tokenizer.batch_decode(labels_id, skip_special_tokens=True)
+                    # remove caption from label
+                    captions = [l[len(c) :] for c, l in zip(captions, labels)]
                 captions = [c.strip() for c in captions]
                 predictions.extend(list(zip(images, captions, preds)))
             else:

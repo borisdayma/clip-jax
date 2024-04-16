@@ -256,7 +256,7 @@ def shift_tokens_left(logits, pad_token_id):
     return shifted_logits
 
 
-def preprocess_batch(batch, tokenizer, max_length, is_decoder):
+def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_batch=False):
     # preprocess batch
     captions = [caption.decode("utf-8") for caption in batch["captions"]]
     captions_assistant = batch.get("captions_assistant", None)
@@ -275,7 +275,7 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder):
             return_tensors="np",
             return_dict=True,
         )
-        txt_inputs_only_mask = tokenizer.apply_chat_template(
+        txt_inputs_only = tokenizer.apply_chat_template(
             [msg[:1] for msg in messages],
             tokenize=True,
             padding="max_length",
@@ -284,8 +284,8 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder):
             return_tensors="np",
             add_generation_prompt=False,
             return_dict=True,
-        ).attention_mask
-        label_mask = np.logical_not(txt_inputs_only_mask) * txt_inputs.attention_mask
+        )
+        label_mask = np.logical_not(txt_inputs_only.attention_mask) * txt_inputs.attention_mask
         # get vision position ids
         target_id = tokenizer.unk_token_id  # TODO: configure it
         vision_start_ids = np.where(txt_inputs.input_ids == target_id, 1, 0).argmax(axis=-1)
@@ -299,13 +299,21 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder):
         )
         label_mask = txt_inputs.attention_mask
         vision_start_ids = None
-    # keep only input_ids and attention_mask
-    txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
-    # add labels for decoder
-    if is_decoder:
-        txt_inputs["labels"] = shift_tokens_left(txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id)
-        txt_inputs["label_mask"] = shift_tokens_left(label_mask, pad_token_id=0)
-    batch = {"pixel_values": batch["images"], **txt_inputs}
+    if is_prediction_batch and captions_assistant is not None:
+        # for prediction we just want inputs
+        txt_inputs = {
+            "input_ids": txt_inputs_only.input_ids,
+            "attention_mask": txt_inputs_only.attention_mask,
+            "labels": txt_inputs.input_ids,
+        }
+    else:
+        txt_inputs = {k: txt_inputs[k] for k in ["input_ids", "attention_mask"]}
+        # add labels for decoder
+        if is_decoder:
+            txt_inputs["labels"] = shift_tokens_left(txt_inputs["input_ids"], pad_token_id=tokenizer.pad_token_id)
+            txt_inputs["label_mask"] = shift_tokens_left(label_mask, pad_token_id=0)
     if vision_start_ids is not None:
-        batch["vision_start_ids"] = vision_start_ids
+        txt_inputs["vision_start_ids"] = vision_start_ids
+    batch = {"pixel_values": batch["images"], **txt_inputs}
+
     return batch
