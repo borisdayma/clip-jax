@@ -447,9 +447,16 @@ class DataTrainingArguments:
     key_caption: Optional[str] = field(
         default="caption", metadata={"help": "Name of the key containing the captions."}
     )
+    key_caption_2: Optional[str] = field(
+        default=None, metadata={"help": "Name of the 2nd key containing elements for chat format."}
+    )
     key_assistant: Optional[str] = field(
         default=None,
         metadata={"help": "Name of the key containing the captions for assistant when using chat template."},
+    )
+    key_assistant_2: Optional[str] = field(
+        default=None,
+        metadata={"help": "Name of a 2nd key containing elements for assistant when using chat template."},
     )
     mean: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The mean of the dataset."})
     std: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The std of the dataset."})
