@@ -1513,7 +1513,6 @@ def main():
             desc="Evaluating...",
             position=2,
             leave=False,
-            disable=jax.process_index() > 0,
         ):
             # preprocess batch
             batch = preprocess_batch(
@@ -1580,7 +1579,6 @@ def main():
             desc="Predicting...",
             position=2,
             leave=False,
-            disable=jax.process_index() > 0,
         ):
             # shorten batch if possible
             batch = jax.tree_map(lambda x: x[:max_batch], batch)
@@ -1703,7 +1701,6 @@ def main():
         range(training_args.num_train_epochs),
         desc=f"Epoch ... (1/{training_args.num_train_epochs})",
         position=0,
-        disable=jax.process_index() > 0,
     )
 
     # Training loop
@@ -1728,7 +1725,6 @@ def main():
                 desc="Training...",
                 position=1,
                 leave=False,
-                disable=jax.process_index() > 0,
             ):
                 # reset control variables
                 evaluation_ran, save_model_ran, metrics_logged = False, False, False
