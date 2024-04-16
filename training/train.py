@@ -854,7 +854,7 @@ def main():
                 r"(.*)(text|logit_bias|logit_scale|MAPHead)(.*)": orbax.checkpoint.Transform(use_fallback=True)
             }
         elif training_args.reinit_vision_projection:
-            transforms = {r"(.*)(vision_projection)(.*)": orbax.checkpoint.Transform(use_fallback=True)}
+            transforms = {r"(.*)(vision_projection)(.*)(wo)(.*)": orbax.checkpoint.Transform(use_fallback=True)}
         else:
             transforms = {}
         return checkpoint_manager.restore(
