@@ -88,6 +88,10 @@ class TrainingArguments:
         default=1,
         metadata={"help": ("Number of updates steps to accumulate before performing an update" " pass.")},
     )
+    downcast_frozen_params: bool = field(
+        default=False,
+        metadata={"help": ("Downcast frozen params to bfloat16.")},
+    )
     freeze_vision: bool = field(
         default=False,
         metadata={"help": ("Freezes vision tower.")},
@@ -1168,6 +1172,21 @@ def main():
             params = ckpt["params"]
         if "opt_state" in ckpt:
             opt_state = ckpt["opt_state"]
+
+    # downcast params
+    @partial(pjit, in_shardings=(params_spec,), out_shardings=params_spec, static_argnums=(1,))
+    def cast_params(params, force_dtype):
+        flat_trainable = flatten_dict(trainable_params(params, training_args))
+        flat_params = flatten_dict(params)
+        flat_non_trainable = {k: v for k, v in flat_params.items() if k not in flat_trainable}
+        flat_non_trainable = jax.tree_map(lambda x: x.astype(force_dtype), flat_non_trainable)
+        flat_params = {**flat_trainable, **flat_non_trainable}
+        return unflatten_dict(flat_params)
+
+    if training_args.downcast_frozen_params:
+        print("Converting to bfloat16")
+        with mesh:
+            params = cast_params(params, "bfloat16")
 
     # Define update function
     def update_params(params, opt_state, grads):
