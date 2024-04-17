@@ -280,6 +280,11 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_bat
         captions_2 = batch.get("captions_2", None)
         captions_assistant_2 = batch.get("captions_assistant_2", None)
         captions_assistant = [" ".join(caption.decode("utf-8").strip().split()) for caption in captions_assistant]
+        # create random "choice" that can be leveraged by template
+        if is_prediction_batch or (captions_assistant_2 is None and captions_2 is None):
+            choices = [0] * len(captions)
+        else:
+            choices = [random.randint(0, 1) for _ in range(len(captions))]
         if captions_2 is not None:
             captions_2 = [" ".join(caption.decode("utf-8").strip().split()) for caption in captions_2]
         else:
@@ -292,11 +297,16 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_bat
             captions_assistant_2 = [None] * len(captions_assistant)
         messages = [
             [
-                {"role": "user", "content": caption, "content_2": caption_2},
-                {"role": "assistant", "content": caption_assistant, "content_2": caption_assistant_2},
+                {"role": "user", "content": caption, "content_2": caption_2, "choice": choice},
+                {
+                    "role": "assistant",
+                    "content": caption_assistant,
+                    "content_2": caption_assistant_2,
+                    "choice": choice,
+                },
             ]
-            for caption, caption_2, caption_assistant, caption_assistant_2 in zip(
-                captions, captions_2, captions_assistant, captions_assistant_2
+            for caption, caption_2, caption_assistant, caption_assistant_2, choice in zip(
+                captions, captions_2, captions_assistant, captions_assistant_2, choices
             )
         ]
         txt_inputs = tokenizer.apply_chat_template(
