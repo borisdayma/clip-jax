@@ -281,8 +281,10 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_bat
         captions_assistant_2 = batch.get("captions_assistant_2", None)
         captions_assistant = [" ".join(caption.decode("utf-8").strip().split()) for caption in captions_assistant]
         # create random "choice" that can be leveraged by template
+        # TODO: should just be a random number optionnally used
         if is_prediction_batch or (captions_assistant_2 is None and captions_2 is None):
-            choices = [0] * len(captions)
+            # alternate between 0 and 1
+            choices = [i % 2 for i in range(len(captions))]
         else:
             choices = [random.randint(0, 1) for _ in range(len(captions))]
         if captions_2 is not None:
