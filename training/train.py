@@ -711,17 +711,20 @@ def main():
     clipConfig["text_config"]["remat_policy"] = training_args.remat_policy
     clipConfig["vision_config"]["remat_policy"] = training_args.remat_policy
     clipConfig["vision_config"]["float32_logits"] = model_args.float32_logits
+
+    # prediction length
+    max_target_length = (
+        training_args.max_target_length
+        if training_args.max_target_length is not None
+        else training_args.max_length * 2 if training_args.max_length is not None else 1024
+    )
+    max_prefill_predict_length = (
+        training_args.max_prefill_predict_length
+        if training_args.max_prefill_predict_length is not None
+        else training_args.max_length if training_args.max_length is not None else 512
+    )
+
     if isMaxtext:
-        max_target_length = (
-            training_args.max_target_length
-            if training_args.max_target_length is not None
-            else training_args.max_length * 2 if training_args.max_length is not None else 1024
-        )
-        max_prefill_predict_length = (
-            training_args.max_target_length
-            if training_args.max_target_length is not None
-            else training_args.max_length if training_args.max_length is not None else 512
-        )
         maxtext_mesh = mesh
         maxtext_args = dict(
             remat_policy=training_args.remat_policy,
@@ -1608,7 +1611,7 @@ def main():
             batch = preprocess_batch(
                 batch,
                 tokenizer_predict,
-                max_length,
+                max_prefill_predict_length,
                 is_decoder=model.text_config.get("is_decoder", True),
                 is_prediction_batch=True,
             )
