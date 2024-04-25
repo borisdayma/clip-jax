@@ -1268,7 +1268,7 @@ if __name__ == "__main__":
             continue
 
         # reinit params (due to jit + pmap)
-        params = jax.tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), logical_shape)
+        params = jax.tree.map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), logical_shape)
 
         # restore checkpoint
         print(f"Restoring checkpoint at step {step}...")

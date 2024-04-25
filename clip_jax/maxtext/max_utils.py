@@ -48,7 +48,7 @@ def find_nans_and_infs(pytree):
     def finder(x):
         return jnp.any(jnp.isinf(x) | jnp.isnan(x))
 
-    bad_pytree = jax.tree_map(finder, pytree)
+    bad_pytree = jax.tree.map(finder, pytree)
     return jax.tree_util.tree_flatten(bad_pytree)
 
 

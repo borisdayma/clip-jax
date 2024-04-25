@@ -858,7 +858,7 @@ def main():
             params = model.init_weights(rng)["params"]
         else:
             # init to 0 (faster)
-            params = jax.tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), logical_params)
+            params = jax.tree.map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), logical_params)
         return params
 
     # Set params
@@ -1334,7 +1334,7 @@ def main():
                     x.shape[0] == training_args.batch_size_per_step
                 ), f"{x.shape[0]} != {training_args.batch_size_per_step}"
 
-            jax.tree_map(_check_shape, batch)
+            jax.tree.map(_check_shape, batch)
             offset = grad_idx * training_args.batch_size_per_node
             length = training_args.batch_size_per_node
             return jax.tree_util.tree_map(lambda x: jax.lax.dynamic_slice_in_dim(x, offset, length), batch)
@@ -1434,7 +1434,7 @@ def main():
             return jax.lax.cond(
                 state.step % freq == 0,
                 fn,
-                lambda p: jax.tree_map(lambda v: jnp.zeros_like(v), fn(p)),
+                lambda p: jax.tree.map(lambda v: jnp.zeros_like(v), fn(p)),
                 trainable_val,
             )
 
@@ -1543,17 +1543,17 @@ def main():
                 batch, tokenizer, max_length, is_decoder=model.text_config.get("is_decoder", True)
             )
             # convert to jax arrays
-            data_global_shape_eval = jax.tree_map(_get_global_shape, batch)
+            data_global_shape_eval = jax.tree.map(_get_global_shape, batch)
             # split per device
-            batch = jax.tree_map(lambda x: np.split(x, num_local_devices, axis=0), batch)
+            batch = jax.tree.map(lambda x: np.split(x, num_local_devices, axis=0), batch)
             # put data on device
-            batch = jax.tree_map(
+            batch = jax.tree.map(
                 lambda x: [jax.device_put(arr, d) for arr, d in zip(x, local_addressable_devices)],
                 batch,
                 is_leaf=lambda x: isinstance(x, list),
             )
             # create global array
-            batch = jax.tree_map(
+            batch = jax.tree.map(
                 lambda shape, data: jax.make_array_from_single_device_arrays(shape, data_global_sharding, data),
                 data_global_shape_eval,
                 batch,
@@ -1605,7 +1605,7 @@ def main():
             leave=False,
         ):
             # shorten batch if possible
-            batch = jax.tree_map(lambda x: x[:max_batch], batch)
+            batch = jax.tree.map(lambda x: x[:max_batch], batch)
 
             # preprocess batch
             batch = preprocess_batch(
@@ -1617,17 +1617,17 @@ def main():
             )
 
             # convert to jax arrays
-            data_global_shape_eval = jax.tree_map(_get_global_shape, batch)
+            data_global_shape_eval = jax.tree.map(_get_global_shape, batch)
             # split per device
-            batch = jax.tree_map(lambda x: np.split(x, num_local_devices, axis=0), batch)
+            batch = jax.tree.map(lambda x: np.split(x, num_local_devices, axis=0), batch)
             # put data on device
-            batch = jax.tree_map(
+            batch = jax.tree.map(
                 lambda x: [jax.device_put(arr, d) for arr, d in zip(x, local_addressable_devices)],
                 batch,
                 is_leaf=lambda x: isinstance(x, list),
             )
             # create global array
-            batch = jax.tree_map(
+            batch = jax.tree.map(
                 lambda shape, data: jax.make_array_from_single_device_arrays(shape, data_global_sharding, data),
                 data_global_shape_eval,
                 batch,
@@ -1760,20 +1760,20 @@ def main():
 
                 # reshape batch
                 if data_global_shape is None:
-                    data_global_shape = jax.tree_map(_get_global_shape, batch)
+                    data_global_shape = jax.tree.map(_get_global_shape, batch)
 
                 # split per device
-                batch = jax.tree_map(lambda x: np.split(x, num_local_devices, axis=0), batch)
+                batch = jax.tree.map(lambda x: np.split(x, num_local_devices, axis=0), batch)
 
                 # put data on device
-                batch = jax.tree_map(
+                batch = jax.tree.map(
                     lambda x: [jax.device_put(arr, d) for arr, d in zip(x, local_addressable_devices)],
                     batch,
                     is_leaf=lambda x: isinstance(x, list),
                 )
 
                 # create global array
-                batch = jax.tree_map(
+                batch = jax.tree.map(
                     lambda shape, data: jax.make_array_from_single_device_arrays(shape, data_global_sharding, data),
                     data_global_shape,
                     batch,

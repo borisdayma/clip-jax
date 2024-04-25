@@ -1139,7 +1139,7 @@ if __name__ == "__main__":
     # init params
     @partial(pjit, in_shardings=(), out_shardings=None)
     def init_params():
-        return jax.tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), logical_shape)
+        return jax.tree.map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), logical_shape)
 
     with mesh:
         params = init_params()

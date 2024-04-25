@@ -1612,7 +1612,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             position_ids = jnp.broadcast_to(position_ids[None], decoder_input_ids.shape[:2])
         # for generation compatibility
         # - put batch before scan
-        past_key_values = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
+        past_key_values = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
         # - remove scan dimension from index
         past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"] = past_key_values["text"]["encoder"][
             "layers"
@@ -1645,7 +1645,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         vision_start_ids=None,
     ):
         # for generation compatibility, apply inverse
-        past_key_values = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
+        past_key_values = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
         scan_dim = past_key_values["text"]["encoder"]["layers"]["attention"]["cached_key"].shape[0]
         past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"] = jnp.broadcast_to(
             past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"], (scan_dim,)
@@ -1665,7 +1665,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         logits = outputs["text_model_output"]["last_hidden_state"]
         # for generation compatibility
         past_key_values = mutable["cache"]
-        past_key_values = jax.tree_map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
+        past_key_values = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
         past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"] = past_key_values["text"]["encoder"][
             "layers"
         ]["attention"]["cache_index"][0]
