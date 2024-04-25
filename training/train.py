@@ -76,6 +76,10 @@ class TrainingArguments:
     do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
     max_length: Optional[int] = field(default=None, metadata={"help": "max length used by tokenizer"})
+    max_target_length: Optional[int] = field(default=None, metadata={"help": "max target length used for prediction"})
+    max_prefill_predict_length: Optional[int] = field(
+        default=None, metadata={"help": "max prefill length used for prediction"}
+    )
     n_predict: Optional[int] = field(default=0, metadata={"help": "Number of predictions."})
     n_predict_batch: Optional[int] = field(default=None, metadata={"help": "Batch size for training."})
     predict_num_beams: Optional[int] = field(default=1, metadata={"help": "Num beams used during prediction."})
@@ -708,14 +712,24 @@ def main():
     clipConfig["vision_config"]["remat_policy"] = training_args.remat_policy
     clipConfig["vision_config"]["float32_logits"] = model_args.float32_logits
     if isMaxtext:
+        max_target_length = (
+            training_args.max_target_length
+            if training_args.max_target_length is not None
+            else training_args.max_length * 2 if training_args.max_length is not None else 1024
+        )
+        max_prefill_predict_length = (
+            training_args.max_target_length
+            if training_args.max_target_length is not None
+            else training_args.max_length if training_args.max_length is not None else 512
+        )
         maxtext_mesh = mesh
         maxtext_args = dict(
             remat_policy=training_args.remat_policy,
             activation_partitioning_dims=training_args.activation_partitioning_dims,
             parameter_partitioning_dims=training_args.parameter_partitioning_dims,
             mp_devices=training_args.mp_devices,
-            max_target_length=training_args.max_length * 2 if training_args.max_length is not None else 1024,
-            max_prefill_predict_length=training_args.max_length if training_args.max_length is not None else 512,
+            max_target_length=max_target_length,
+            max_prefill_predict_length=max_prefill_predict_length,
         )
         # set tokens if not set
         if clipConfig["text_config"]["pad_token_id"] is None:
