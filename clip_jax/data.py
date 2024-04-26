@@ -287,7 +287,7 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_bat
             choices = [i % 2 for i in range(len(captions))]
         else:
             # alternate at each epoch
-            choices = [choiceDataset.batch_to_choice(pixel_values) for pixel_values in batch["pixel_values"]]
+            choices = [choiceDataset.batch_to_choice(pixel_values) for pixel_values in batch["images"]]
         if captions_2 is not None:
             captions_2 = [" ".join(caption.decode("utf-8").strip().split()) for caption in captions_2]
         else:
