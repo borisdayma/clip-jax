@@ -1,3 +1,4 @@
+import hashlib
 import pickle
 import random
 from dataclasses import dataclass, field
@@ -281,12 +282,12 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_bat
         captions_assistant_2 = batch.get("captions_assistant_2", None)
         captions_assistant = [" ".join(caption.decode("utf-8").strip().split()) for caption in captions_assistant]
         # create random "choice" that can be leveraged by template
-        # TODO: should just be a random number optionnally used
         if is_prediction_batch or (captions_assistant_2 is None and captions_2 is None):
             # alternate between 0 and 1
             choices = [i % 2 for i in range(len(captions))]
         else:
-            choices = [random.randint(0, 1) for _ in range(len(captions))]
+            # alternate at each epoch
+            choices = [choiceDataset.batch_to_choice(pixel_values) for pixel_values in batch["pixel_values"]]
         if captions_2 is not None:
             captions_2 = [" ".join(caption.decode("utf-8").strip().split()) for caption in captions_2]
         else:
@@ -361,3 +362,16 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_bat
         txt_inputs["vision_start_ids"] = vision_start_ids
     batch = {"pixel_values": batch["images"], **txt_inputs}
     return batch
+
+
+class ChoiceDataset:
+    def __init__(self):
+        self.last_choice = {}
+
+    def batch_to_choice(self, pixel_values):
+        md5 = hashlib.md5(pixel_values).hexdigest()
+        self.last_choice[md5] = self.last_choice.get(md5, random.randint(0, 1)) + 1 % 2
+        return self.last_choice[md5]
+
+
+choiceDataset = ChoiceDataset()
