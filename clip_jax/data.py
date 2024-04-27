@@ -370,7 +370,7 @@ class ChoiceDataset:
 
     def batch_to_choice(self, pixel_values):
         md5 = hashlib.md5(pixel_values).hexdigest()
-        self.last_choice[md5] = self.last_choice.get(md5, random.randint(0, 1)) + 1 % 2
+        self.last_choice[md5] = (self.last_choice.get(md5, random.randint(0, 1)) + 1) % 2
         return self.last_choice[md5]
 
 
