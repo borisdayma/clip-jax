@@ -273,7 +273,7 @@ def shift_tokens_left(logits, pad_token_id):
     return shifted_logits
 
 
-def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_batch=False):
+def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_batch=False, is_validation_batch=False):
     # preprocess batch
     captions = [" ".join(caption.decode("utf-8").strip().split()) for caption in batch["captions"]]
     captions_assistant = batch.get("captions_assistant", None)
@@ -282,7 +282,7 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_bat
         captions_assistant_2 = batch.get("captions_assistant_2", None)
         captions_assistant = [" ".join(caption.decode("utf-8").strip().split()) for caption in captions_assistant]
         # create random "choice" that can be leveraged by template
-        if is_prediction_batch or (captions_assistant_2 is None and captions_2 is None):
+        if is_prediction_batch or is_validation_batch or (captions_assistant_2 is None and captions_2 is None):
             # alternate between 0 and 1
             choices = [i % 2 for i in range(len(captions))]
         else:

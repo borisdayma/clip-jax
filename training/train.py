@@ -1540,7 +1540,11 @@ def main():
         ):
             # preprocess batch
             batch = preprocess_batch(
-                batch, tokenizer, max_length, is_decoder=model.text_config.get("is_decoder", True)
+                batch,
+                tokenizer,
+                max_length,
+                is_decoder=model.text_config.get("is_decoder", True),
+                is_validation_batch=True,
             )
             # convert to jax arrays
             data_global_shape_eval = jax.tree.map(_get_global_shape, batch)
