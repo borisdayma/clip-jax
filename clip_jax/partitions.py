@@ -68,6 +68,21 @@ def logical_axis_rules(
             ("cache_heads", "model"),
             ("cache_kv", None),
         ]
+    # TODO: find better namings, this shards mlp as FSDP and rest is same as 1x1
+    elif activation_partitioning_dims == 3 and parameter_partitioning_dims == 3:
+        rules = [
+            ("batch", "data"),
+            ("vocab", "model"),
+            ("embed", None),
+            ("mlp", "data"),
+            ("mlp", "model"),
+            ("embed_proj", "model"),
+            ("heads", "model"),
+            ("kv", None),
+            ("cache_batch", "data"),
+            ("cache_heads", "model"),
+            ("cache_kv", None),
+        ]
     else:
         raise ValueError(
             f"`activation_partitioning_dims` = {activation_partitioning_dims} "
