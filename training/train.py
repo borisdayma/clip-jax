@@ -869,7 +869,7 @@ def main():
     def _restore_checkpoint(ckpt, dir, step):
         logger.info(f"Restoring checkpoint from {dir} at step {step}")
         restore_args = orbax_utils.restore_args_from_target(ckpt, mesh)
-        orbax_options = orbax.checkpoint.CheckpointManagerOptions()
+        orbax_options = orbax.checkpoint.CheckpointManagerOptions(enable_async_checkpointing=False)
         checkpoint_manager = orbax.checkpoint.CheckpointManager(dir, orbax_checkpointer, orbax_options)
         if training_args.reinit_text:
             logger.info("Text parameters were not restored from checkpoint")
