@@ -31,6 +31,7 @@ parser.add_argument("--tokenizer_name", type=str, default="openai/clip-vit-base-
 parser.add_argument("--train_run", required=True, type=str, help='wandb run id as "entity/project/run_id"')
 parser.add_argument("--latest_only", action="store_true", help="Evaluate all checkpoints")
 parser.add_argument("--fraction", type=float, default=1.0, help="Fraction of dataset to use")
+parser.add_argument("--normalize", action="store_true", help="Normalize classnames")
 args = parser.parse_args()
 
 
@@ -1195,6 +1196,11 @@ if __name__ == "__main__":
 
     # get text inputs
     captions = ds.classes
+    if args.normalize:
+        captions = [
+            c.lower().replace("-", " ").replace(" /", ",").replace(".", ",").replace(")", "").replace(" (", ", ")
+            for c in captions
+        ]
 
     txt_inputs = tokenizer(
         captions,
