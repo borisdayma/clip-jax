@@ -397,6 +397,7 @@ class MultiHeadDotProductAttention(nn.Module):
         mask: Optional[Array] = None,
         position_ids: Optional[Array] = None,
         deterministic: Optional[bool] = None,
+        sow_weights: Optional[bool] = False,
     ):
         """Applies multi-head dot product attention on the input data.
 
@@ -552,7 +553,9 @@ class MultiHeadDotProductAttention(nn.Module):
                 dropout_rate=self.dropout_rate,
                 broadcast_dropout=self.broadcast_dropout,
                 deterministic=m_deterministic,
+                dtype=self.dtype,
                 precision=self.precision,
+                module=self if sow_weights else None,
             )  # pytype: disable=wrong-keyword-args
             # back to the original inputs dimensions
             kernel_init_out = self.kernel_init_out if self.kernel_init_out is not None else self.kernel_init
@@ -896,7 +899,7 @@ class CLIPEncoder(nn.Module):
 
         hidden_states, _ = nn.scan(
             layer,
-            variable_axes={"params": params_spec, "cache": 0},
+            variable_axes={"params": params_spec, "cache": 0, "intermediates": 0},
             split_rngs={"params": True, "dropout": True},
             in_axes=(nn.broadcast, nn.broadcast, nn.broadcast, nn.broadcast),
             length=self.num_layers,
