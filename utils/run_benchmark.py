@@ -31,6 +31,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--tokenizer_name", type=str, default="openai/clip-vit-base-patch32")
 parser.add_argument("--train_run", required=True, type=str, help='wandb run id as "entity/clip/run_id"')
 parser.add_argument("--latest_only", action="store_true", help="Evaluate all checkpoints")
+parser.add_argument("--normalize", action="store_true", help="Normalize classnames")
 args = parser.parse_args()
 
 
@@ -1284,6 +1285,18 @@ if __name__ == "__main__":
         txt_features = []
         for item in tqdm(ds.classes):
             texts = [(t.format(c=item)) for t in zero_shot_classification_template]
+            if args.normalize:
+                texts = [
+                    c.lower()
+                    .replace("-", " ")
+                    .replace(" /", ",")
+                    .replace(".", ",")
+                    .replace(")", ", ")
+                    .replace(" (", ", ")
+                    .replace("  ", " ")
+                    .strip(", ")
+                    for c in texts
+                ]
             txt_inputs = tokenizer(
                 texts,
                 padding="max_length",
