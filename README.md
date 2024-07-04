@@ -1,11 +1,13 @@
 # CLIP-JAX
 
-This repository is used to train custom vision models with JAX:
+This repository is used to train vision models with JAX:
 
-- custom model architectures
-- custom sharding strategies
-- training with constrastive loss such as [CLIP](https://arxiv.org/abs/2103.00020), [chunked sigmoid loss](https://arxiv.org/abs/2303.15343) or captioning loss such as [Cappa](https://arxiv.org/abs/2306.07915)
+- many types of model architectures
+- any sharding strategy
+- training with constrastive loss such as [CLIP](https://arxiv.org/abs/2103.00020), [chunked sigmoid loss](https://arxiv.org/abs/2303.15343) or captioning loss such as [CapPa](https://arxiv.org/abs/2306.07915)
 - downstream fine-tuning
+
+Refer to the report "[CapPa: Training vision models as captioners](https://wandb.ai/craiyon/cappa-jax/reports/CapPa-Training-vision-models-as-captioners--Vmlldzo4NDUyNDUz)" for the open-source reproduction of CapPa.
 
 ## Installation
 
@@ -16,6 +18,10 @@ pip install clip-jax
 Note: this package is currently under active development, install from source for latest version.
 
 ## Usage
+
+### Use a trained model
+
+Refer to [`utils/demo_cappa.ipynb`](utils/demo_cappa.ipynb).
 
 ### Download training data
 
@@ -59,21 +65,6 @@ python train.py \
     --unroll 100 \
     --logging_steps 100 --save_steps 5000
 ```
-
-### Use a trained model
-
-Refer to [`utils/demo.ipynb`](utils/demo.ipynb).
-
-TODO:
-
-- [ ] update demo
-
-### Downstream tasks
-
-TODO:
-
-- [ ] Image classification with `CLIPVisionModelForImageClassification`
-- [ ] Text encoder with `CLIPTextModelForFineTuning`
 
 ## Acknowledgements
 
@@ -162,3 +153,17 @@ TODO:
       primaryClass={cs.CV}
 }
 ```
+
+```bibtex
+@misc{hsieh2023sugarcrepefixinghackablebenchmarks,
+      title={SugarCrepe: Fixing Hackable Benchmarks for Vision-Language Compositionality}, 
+      author={Cheng-Yu Hsieh and Jieyu Zhang and Zixian Ma and Aniruddha Kembhavi and Ranjay Krishna},
+      year={2023},
+      eprint={2306.14610},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2306.14610}, 
+}
+```
+
+```bibtex
