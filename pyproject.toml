@@ -16,6 +16,7 @@ dependencies = [
     "tensorflow-io[tensorflow-cpu]",
     "transformers",
     "aqtp",
+    "wandb",
 ]
 
 [project.optional-dependencies]
@@ -25,7 +26,6 @@ dev = [
     "optax",
     "precondition-opt",
     "tqdm",
-    "wandb",
 ]
 
 [tool.hatch.version]
