@@ -23,6 +23,10 @@ Note: this package is currently under active development, install from source fo
 
 Refer to [`utils/demo_cappa.ipynb`](utils/demo_cappa.ipynb).
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/borisdayma/clip-jax/blob/main/utils/demo_cappa.ipynb)
+
+You can find the [model weights](https://huggingface.co/boris/cappa-large-patch16-256-jax) on Hugging Face.
+
 ### Download training data
 
 You can download training data from [DataComp](https://github.com/mlfoundations/datacomp):
