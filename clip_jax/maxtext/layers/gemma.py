@@ -1,18 +1,18 @@
 """
- Copyright 2023 Google LLC
+Copyright 2023 Google LLC
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-      https://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
 
 from flax import linen as nn
 from .. import common_types
@@ -47,6 +47,7 @@ DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 nd_dense_init = initializers.nd_dense_init
 Quant = quantizations.AqtQuantization
+KVQuant = quantizations.KVQuant
 
 
 # Decoder and Model definitions
@@ -72,7 +73,7 @@ class GemmaDecoderLayer(nn.Module):
 
         # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
         lnx = RMSNorm(
-            dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm", kernel_axes=("embed",)
+            dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm", kernel_axes=("norm",)
         )(inputs)
 
         lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
@@ -93,7 +94,7 @@ class GemmaDecoderLayer(nn.Module):
             float32_qk_product=True,
             float32_logits=True,
             quant=self.quant,
-            quantize_kvcache=cfg.quantize_kvcache,
+            kv_quant=quantizations.configure_kv_quant(cfg),
         )
 
         attention_lnx = attention_layer(
@@ -111,7 +112,7 @@ class GemmaDecoderLayer(nn.Module):
         attention_lnx += inputs
         residual = attention_lnx
         attn_output = RMSNorm(
-            dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_ffw_norm", kernel_axes=("embed",)
+            dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_ffw_norm", kernel_axes=("norm",)
         )(attention_lnx)
 
         # MLP block.

@@ -1,18 +1,18 @@
 """
- Copyright 2023 Google LLC
+Copyright 2023 Google LLC
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-      https://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
 
 # pylint: disable=unused-import
 """SPMD Multihost Dataloading Utilities.
@@ -22,7 +22,7 @@ https://github.com/sholtodouglas/multihost_dataloading
 """
 from functools import lru_cache, partial  # pylint: disable=g-importing-member
 from typing import Callable, Any, Union
-from collections.abc import Iterator
+from collections.abc import Iterator, Iterable
 import tensorflow as tf  # pylint: disable=g-import-not-at-top
 import time
 import numpy as np
@@ -98,15 +98,15 @@ class MultiHostDataLoadIterator:
         self.dataloader = dataloader
         if isinstance(self.dataloader, tf.data.Dataset):
             self.local_iterator = self.dataloader.as_numpy_iterator()
-        elif isinstance(self.dataloader, grain.DataLoader):
+        elif isinstance(self.dataloader, Iterable):
             self.local_iterator = iter(self.dataloader)
         else:
-            raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
+            raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
 
     def reset(self):
         if isinstance(self.dataloader, tf.data.Dataset):
             self.local_iterator = self.dataloader.as_numpy_iterator()
-        elif isinstance(self.dataloader, grain.DataLoader):
+        elif isinstance(self.dataloader, Iterable):
             self.local_iterator = iter(self.dataloader)
         else:
             raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")

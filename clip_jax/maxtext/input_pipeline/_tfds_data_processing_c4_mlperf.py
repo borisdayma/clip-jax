@@ -1,18 +1,18 @@
 """
- Copyright 2023 Google LLC
+Copyright 2023 Google LLC
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-      https://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
 
 """Input pipeline for gpt3 c4 mlperf dataset."""
 
@@ -32,6 +32,7 @@ from jax.experimental import multihost_utils
 from .. import tokenizer
 from .. import multihost_dataloading
 from .. import sequence_packing
+from _input_pipeline_utils import get_tokenizer
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -91,7 +92,7 @@ def reduce_concat_tokens(
 ):
     """Token-preprocessor to concatenate multiple unrelated documents.
     If we want to generate examples of exactly the right length,
-    (to avoid wasting space on padding), then we use this function, folowed by
+    (to avoid wasting space on padding), then we use this function, followed by
     split_tokens.
     Args:
       dataset: a tf.data.Dataset with dictionaries containing the key feature_key.
@@ -201,6 +202,8 @@ def _pad_to_batch_size(
 
 def get_datasets(
     config: ml_collections.ConfigDict,
+    dataloading_host_index,
+    dataloading_host_count,
 ):
     """Load and return dataset of batched examples for use during training."""
     # Training dataset.
@@ -218,11 +221,11 @@ def get_datasets(
     )
 
     # shard the dataset as soon as it is loaded
-    train_ds = train_ds.shard(num_shards=jax.process_count(), index=jax.process_index())
+    train_ds = train_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
     train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
 
-    eval_ds = eval_ds.shard(num_shards=jax.process_count(), index=jax.process_index())
-    # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and splitted to target_length
+    eval_ds = eval_ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
+    # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
     #   mainly to avoid eval sequences change depending on the number of hosts
     eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
 
@@ -240,13 +243,16 @@ def preprocess_dataset(
 ):
     """Pre-process the dataset and return iterators for mlperf training."""
     # tokenize
-    train_ds = train_ds.map(tokenizer.TokenizeOp(sp_tokenizer, data_keys=("targets",)), num_parallel_calls=AUTOTUNE)
+    train_ds = train_ds.map(
+        lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)),
+        num_parallel_calls=AUTOTUNE,
+    )
 
     train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
     train_ds = split_tokens_to_targets_length(train_ds, config.max_target_length)
     train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
 
-    # note eval_ds is pre tokenized, reduce_concated and splitted to target_length
+    # note eval_ds is pre tokenized, reduce_concated and split to target_length
     #   mainly to avoid eval sequences change depending on the number of hosts
     train_ds = sequence_packing.pack_dataset(train_ds, config.max_target_length)
     eval_ds = sequence_packing.pack_dataset(eval_ds, config.max_target_length)
@@ -291,3 +297,23 @@ def preprocess_dataset(
 
     # Return multi-host jax.Array prep iterator
     return train_multihost_gen, eval_multihost_gen
+
+
+def make_c4_mlperf_iterator(
+    config: ml_collections.ConfigDict,
+    global_mesh,
+    add_bos,
+    add_eos,
+    process_indices,
+):
+    """Make train iterator and tokenizer for customized C4 dataset for mlperf gpt3 training."""
+    train_ds, eval_ds = get_datasets(
+        config=config,
+        dataloading_host_index=process_indices.index(jax.process_index()),
+        dataloading_host_count=len(process_indices),
+    )
+    sp_tokenizer = get_tokenizer(config.tokenizer_path, add_bos, add_eos)
+    train_iter, eval_iter = preprocess_dataset(
+        config, global_mesh, train_ds, eval_ds, sp_tokenizer, data_shuffle_seed=config.data_shuffle_seed
+    )
+    return train_iter, eval_iter
