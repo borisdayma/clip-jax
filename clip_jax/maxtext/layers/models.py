@@ -294,12 +294,12 @@ class Decoder(nn.Module):
         if vision_embeddings is not None:
 
             # project vision embeddings (already normalized)
-            vision_embeddings = linears.DenseGeneral(
+            vision_embeddings = nn.DenseGeneral(
                 cfg.emb_dim,
-                weight_dtype=cfg.weight_dtype,
                 dtype=cfg.dtype,
-                kernel_axes=("mlp", "embed"),
-                kernel_init=nn.initializers.zeros_init(),
+                use_bias=False,
+                kernel_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp", "embed")),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                 name="vision_projection",
             )(vision_embeddings)
             vision_embeddings = nn.with_logical_constraint(
