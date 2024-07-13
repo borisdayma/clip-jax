@@ -854,7 +854,11 @@ def main():
 
     @partial(pjit, in_shardings=None, out_shardings=params_spec)
     def init_params():
-        if model_args.model_name_or_path is None or training_args.reinit_text:
+        if (
+            model_args.model_name_or_path is None
+            or training_args.reinit_text
+            or training_args.reinit_vision_projection
+        ):
             params = model.init_weights(rng)["params"]
         else:
             # init to 0 (faster)

@@ -1,18 +1,18 @@
 """
- Copyright 2023 Google LLC
+Copyright 2023 Google LLC
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-      https://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
 
 """Transformer model definition."""
 # pylint: disable=arguments-differ
@@ -38,6 +38,16 @@ Config = common_types.Config
 DType = common_types.DType
 Mesh = common_types.Mesh
 ScanIn = common_types.ScanIn
+
+AxisNames = common_types.AxisNames
+BATCH = common_types.BATCH
+KV_BATCH = common_types.KV_BATCH
+LENGTH = common_types.LENGTH
+HEAD = common_types.HEAD
+KV_HEAD = common_types.KV_HEAD
+D_KV = common_types.D_KV
+KV_HEAD_DIM = common_types.KV_HEAD_DIM
+
 
 Embed = embeddings.Embed
 Attention = attentions.Attention
@@ -74,7 +84,7 @@ class LlamaDecoderLayer(nn.Module):
             dtype=cfg.dtype,
             weight_dtype=cfg.weight_dtype,
             name="pre_self_attention_layer_norm",
-            kernel_axes=("embed",),
+            kernel_axes=("norm",),
             epsilon=cfg.normalization_layer_epsilon,
         )
         lnx = lnx_rms(inputs)
@@ -96,7 +106,11 @@ class LlamaDecoderLayer(nn.Module):
             dropout_rate=cfg.dropout_rate,
             name="self_attention",
             quant=self.quant,
-            quantize_kvcache=cfg.quantize_kvcache,
+            kv_quant=quantizations.configure_kv_quant(cfg),
+            prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
+            ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
+            compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
+            reshape_q=cfg.reshape_q,
         )
 
         attention_lnx = attention_layer(
@@ -118,7 +132,7 @@ class LlamaDecoderLayer(nn.Module):
             dtype=cfg.dtype,
             weight_dtype=cfg.weight_dtype,
             name="post_self_attention_layer_norm",
-            kernel_axes=("embed",),
+            kernel_axes=("norm",),
             epsilon=cfg.normalization_layer_epsilon,
         )(intermediate_inputs)
         hidden_states = nn.with_logical_constraint(

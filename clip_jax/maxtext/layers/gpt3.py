@@ -1,18 +1,18 @@
 """
- Copyright 2023 Google LLC
+Copyright 2023 Google LLC
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-      https://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
 
 """Transformer model definition."""
 # pylint: disable=arguments-differ
@@ -53,6 +53,7 @@ NdInitializer = initializers.NdInitializer
 Initializer = initializers.Initializer
 nd_dense_init = initializers.nd_dense_init
 Quant = quantizations.AqtQuantization
+KVQuant = quantizations.KVQuant
 
 
 # -----------------------------------------
@@ -144,6 +145,7 @@ class Gpt3MultiHeadAttention(nn.Module):
     float32_logits: bool = True  # cast logits in float32 for stability.
     fused_qkv: bool = True
     quant: Optional[Quant] = None
+    kv_quant: Optional[KVQuant] = None
     use_bias: bool = True
 
     query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
@@ -233,7 +235,7 @@ class Gpt3MultiHeadAttention(nn.Module):
             float32_qk_product=self.float32_qk_product,
             float32_logits=self.float32_logits,
             quant=self.quant,
-            quantize_kvcache=self.config.quantize_kvcache,
+            kv_quant=self.kv_quant,
             num_query_heads=self.num_heads,
             num_kv_heads=self.num_heads,
             dtype=self.dtype,
@@ -278,7 +280,7 @@ class Gpt3DecoderLayer(nn.Module):
         lnx_layer_norm = Gpt3LayerNorm(
             dtype=cfg.dtype,
             name="pre_self_attention_norm",
-            kernel_axes=("embed",),
+            kernel_axes=("norm",),
             epsilon=cfg.normalization_layer_epsilon,
             reductions_in_fp32=False,
             use_bias=True,
@@ -306,6 +308,7 @@ class Gpt3DecoderLayer(nn.Module):
             fused_qkv=cfg.fused_qkv,
             use_bias=True,
             quant=self.quant,
+            kv_quant=quantizations.configure_kv_quant(cfg),
         )
 
         attention_lnx = attention_layer(

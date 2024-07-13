@@ -16,15 +16,19 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-import functools
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
+
+from flax import linen as nn
+import functools
 import jax
 import jax.numpy as jnp
-from flax import linen as nn
-
 from .. import common_types
-from . import attentions, embeddings, linears, normalizations, quantizations
+from . import attentions
+from . import embeddings
+from . import linears
+from . import normalizations, quantizations
+from . import pipeline
 
 Array = common_types.Array
 Config = common_types.Config
@@ -70,7 +74,7 @@ class DecoderLayer(nn.Module):
             weight_dtype=cfg.weight_dtype,
             name="pre_self_attention_norm",
             epsilon=cfg.normalization_layer_epsilon,
-            kernel_axes=("embed",),
+            kernel_axes=("norm",),
         )(inputs)
         lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
@@ -87,10 +91,12 @@ class DecoderLayer(nn.Module):
             weight_dtype=cfg.weight_dtype,
             dropout_rate=cfg.dropout_rate,
             name="self_attention",
-            float32_qk_product=True,
-            float32_logits=True,
             quant=self.quant,
-            quantize_kvcache=self.quantize_kvcache,
+            kv_quant=quantizations.configure_kv_quant(cfg),
+            prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
+            ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
+            compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
+            reshape_q=cfg.reshape_q,
         )
 
         attention_lnx = attention_layer(
@@ -140,13 +146,31 @@ class DecoderLayer(nn.Module):
                 jnp.sum(layer_output == 0) / jnp.size(layer_output),
             )
 
-        if cfg.scan_layers:
-            return layer_output, None
+        return layer_output, None if cfg.scan_layers else layer_output
 
-        if cfg.scan_layers:
-            return layer_output, None
-        else:
-            return layer_output
+
+class SequentialBlockDecoderLayers(nn.Module):
+    """Sequential unscanned series of decoder layers."""
+
+    decoder_layer: Any
+    num_decoder_layers: int
+    config: Config
+    mesh: Mesh
+    quant: Quant
+
+    @nn.compact
+    def __call__(
+        self, inputs: jnp.ndarray, decoder_segment_ids, decoder_positions, deterministic, model_mode
+    ) -> jnp.ndarray:
+        for lyr in range(self.num_decoder_layers):
+            inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
+                inputs,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+            )
+        return inputs
 
 
 class Decoder(nn.Module):
@@ -177,11 +201,15 @@ class Decoder(nn.Module):
             from . import gpt3
 
             return gpt3.Gpt3DecoderLayer
+        elif self.config.decoder_block == "simple":
+            from . import simple_layer
+
+            return simple_layer.SimpleDecoderLayer
         else:
             raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
     def get_norm_layer(self):
-        if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
+        if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "simple"):
             return RMSNorm
         elif self.config.decoder_block == "gpt3":
             from . import gpt3
@@ -189,6 +217,34 @@ class Decoder(nn.Module):
             return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
         else:
             raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
+
+    def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh):
+        initializing = self.is_mutable_collection("params")
+        params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
+        cache_spec = 0
+        scan_fn = nn.scan(
+            decoder_layer,
+            variable_axes={
+                "params": params_spec,
+                "cache": cache_spec,
+                "intermediates": 0,
+                "aqt": 0,
+                "_overwrite_with_gradient": 0,
+            },
+            split_rngs={
+                "params": True,
+                "dropout": cfg.enable_dropout,
+            },
+            in_axes=(
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+            ),
+            length=length,
+            metadata_params={nn.PARTITION_NAME: metdata_axis_name},
+        )
+        return scan_fn(config=cfg, mesh=mesh, name="layers", quant=self.quant)
 
     @nn.compact
     def __call__(
@@ -236,19 +292,17 @@ class Decoder(nn.Module):
 
         # use vision tokens
         if vision_embeddings is not None:
+            assert decoder_segment_ids is not None, "Need segment ids to insert vision embeddings"
 
             # project vision embeddings (already normalized)
-            vision_embeddings = linears.MlpBlock(
-                intermediate_dim=cfg.mlp_dim,
-                activations=cfg.mlp_activations,
-                intermediate_dropout_rate=cfg.dropout_rate,
+            vision_embeddings = nn.DenseGeneral(
+                cfg.emb_dim,
                 dtype=cfg.dtype,
-                weight_dtype=cfg.weight_dtype,
+                use_bias=False,
+                kernel_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp", "embed")),
+                bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                 name="vision_projection",
-                config=cfg,
-                quant=self.quant,
-                output_dim=cfg.emb_dim,
-            )(vision_embeddings, deterministic=deterministic)
+            )(vision_embeddings)
             vision_embeddings = nn.with_logical_constraint(
                 vision_embeddings, ("activation_batch", "activation_length", "activation_embed")
             )
@@ -257,19 +311,27 @@ class Decoder(nn.Module):
             embed_len = vision_embeddings.shape[1]
             print(f"Setting {embed_len} position embeddings for vision")
             vision_positions = jnp.zeros_like(decoder_positions[:, :embed_len])
+            # special id for vision
+            # NOTE: we could include prefix (see PaliGemma), would require setting decoder_segment_ids with special id for non-causal attention at input stage
+            vision_segment_ids = jnp.full_like(decoder_segment_ids[:, :embed_len], -1)
             assert vision_start_ids is not None
             if isinstance(vision_start_ids, int) or len(vision_start_ids.shape) == 0:
                 # we passed a single int, same start_id for all samples
                 vision_start_ids = jnp.asarray(vision_start_ids)
                 vision_start_ids = jnp.insert(vision_start_ids, 0, 0)  # 0, start_id
                 decoder_positions = jax.lax.dynamic_update_slice(decoder_positions, vision_positions, vision_start_ids)
+                decoder_segment_ids = jax.lax.dynamic_update_slice(
+                    decoder_segment_ids, vision_segment_ids, vision_start_ids
+                )
                 vision_start_ids = jnp.append(vision_start_ids, 0)  # 0, start_id, 0
                 y = jax.lax.dynamic_update_slice(y, vision_embeddings, vision_start_ids)
-
             else:
                 # one id per sample
                 decoder_positions = jax.vmap(jax.lax.dynamic_update_slice)(
                     decoder_positions, vision_positions, vision_start_ids[..., None]
+                )
+                decoder_segment_ids = jax.vmap(jax.lax.dynamic_update_slice)(
+                    decoder_segment_ids, vision_segment_ids, vision_start_ids[..., None]
                 )
                 _f = lambda a, b, c: jax.lax.dynamic_update_slice(a, b, jnp.append(c, 0))  # start_id, 0
                 y = jax.vmap(_f)(y, vision_embeddings, vision_start_ids[..., None])
@@ -303,44 +365,51 @@ class Decoder(nn.Module):
                     "key_proj",
                     "qkv_proj",
                 )
+            elif cfg.remat_policy == "qkv_proj_offloaded":
+                policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+                    names_which_can_be_saved=[],
+                    names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj"],
+                    offload_src="device",
+                    offload_dst="pinned_host",
+                )
             elif cfg.remat_policy == "minimal_offloaded":
                 policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(
                     offload_src="device", offload_dst="pinned_host"
                 )
+            elif cfg.remat_policy == "minimal_flash":
+                policy = jax.checkpoint_policies.save_from_both_policies(
+                    jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
+                    jax.checkpoint_policies.save_only_these_names(
+                        "context",
+                    ),
+                )
             else:
                 assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
                 policy = None
-            BlockLayer = nn.remat(  # pylint: disable=invalid-name
-                BlockLayer,
-                prevent_cse=not cfg.scan_layers,
-                policy=policy,
-                static_argnums=(-1, -2, -3, -4, -5),
-            )
-        if cfg.scan_layers:
-            initializing = self.is_mutable_collection("params")
-            params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
-            cache_spec = 0
-            y, _ = nn.scan(
-                BlockLayer,
-                variable_axes={
-                    "params": params_spec,
-                    "cache": cache_spec,
-                    "intermediates": 0,
-                    "aqt": 0,
-                },
-                split_rngs={
-                    "params": True,
-                    "dropout": cfg.enable_dropout,
-                },
-                in_axes=(
-                    nn.broadcast,
-                    nn.broadcast,
-                    nn.broadcast,
-                    nn.broadcast,
-                ),
-                length=cfg.num_decoder_layers,
-                metadata_params={nn.PARTITION_NAME: "layers"},
-            )(config=cfg, mesh=mesh, name="layers", quant=self.quant)(
+
+        RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
+            BlockLayer,
+            prevent_cse=not cfg.scan_layers,
+            policy=policy,
+            static_argnums=(-1, -2, -3, -4, -5),
+        )
+        if cfg.using_pipeline_parallelism:
+            if cfg.num_layers_per_pipeline_stage == 1:
+                stage_module = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
+            elif cfg.scan_layers:
+                stage_module = self.scan_decoder_layers(
+                    cfg, RemattedBlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh
+                )
+            elif not cfg.scan_layers:
+                stage_module = SequentialBlockDecoderLayers(
+                    decoder_layer=RemattedBlockLayer,
+                    num_decoder_layers=cfg.num_layers_per_pipeline_stage,
+                    config=cfg,
+                    mesh=mesh,
+                    quant=self.quant,
+                )
+
+            y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
@@ -348,21 +417,30 @@ class Decoder(nn.Module):
                 model_mode,
             )
         else:
-            for lyr in range(cfg.num_decoder_layers):
-                y = BlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+            if cfg.scan_layers:
+                y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
                     y,
                     decoder_segment_ids,
                     decoder_positions,
                     deterministic,
                     model_mode,
                 )
+            else:
+                for lyr in range(cfg.num_decoder_layers):
+                    y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+                        y,
+                        decoder_segment_ids,
+                        decoder_positions,
+                        deterministic,
+                        model_mode,
+                    )
 
         y = self.get_norm_layer()(
             dtype=cfg.dtype,
             weight_dtype=cfg.weight_dtype,
             name="decoder_norm",
             epsilon=cfg.normalization_layer_epsilon,
-            kernel_axes=("embed",),
+            kernel_axes=("norm",),
         )(y)
         y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
@@ -383,7 +461,9 @@ class Decoder(nn.Module):
             )(
                 y
             )  # We do not quantize the logits matmul.
-        logits = nn.with_logical_constraint(logits, ("activation_batch", "activation_length", "activation_vocab"))
+        logits = nn.with_logical_constraint(
+            logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
+        )
         logits = logits.astype(jnp.float32)
         return logits
 
