@@ -386,6 +386,8 @@ class Decoder(nn.Module):
             else:
                 assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
                 policy = None
+        else:
+            policy = None
 
         RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
             BlockLayer,
