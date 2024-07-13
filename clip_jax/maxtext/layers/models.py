@@ -292,6 +292,7 @@ class Decoder(nn.Module):
 
         # use vision tokens
         if vision_embeddings is not None:
+            assert decoder_segment_ids is not None, "Need segment ids to insert vision embeddings"
 
             # project vision embeddings (already normalized)
             vision_embeddings = nn.DenseGeneral(
@@ -310,19 +311,27 @@ class Decoder(nn.Module):
             embed_len = vision_embeddings.shape[1]
             print(f"Setting {embed_len} position embeddings for vision")
             vision_positions = jnp.zeros_like(decoder_positions[:, :embed_len])
+            # special id for vision
+            # NOTE: we could include prefix (see PaliGemma), would require setting decoder_segment_ids with special id for non-causal attention at input stage
+            vision_segment_ids = jnp.full_like(decoder_segment_ids[:, :embed_len], -1)
             assert vision_start_ids is not None
             if isinstance(vision_start_ids, int) or len(vision_start_ids.shape) == 0:
                 # we passed a single int, same start_id for all samples
                 vision_start_ids = jnp.asarray(vision_start_ids)
                 vision_start_ids = jnp.insert(vision_start_ids, 0, 0)  # 0, start_id
                 decoder_positions = jax.lax.dynamic_update_slice(decoder_positions, vision_positions, vision_start_ids)
+                decoder_segment_ids = jax.lax.dynamic_update_slice(
+                    decoder_segment_ids, vision_segment_ids, vision_start_ids
+                )
                 vision_start_ids = jnp.append(vision_start_ids, 0)  # 0, start_id, 0
                 y = jax.lax.dynamic_update_slice(y, vision_embeddings, vision_start_ids)
-
             else:
                 # one id per sample
                 decoder_positions = jax.vmap(jax.lax.dynamic_update_slice)(
                     decoder_positions, vision_positions, vision_start_ids[..., None]
+                )
+                decoder_segment_ids = jax.vmap(jax.lax.dynamic_update_slice)(
+                    decoder_segment_ids, vision_segment_ids, vision_start_ids[..., None]
                 )
                 _f = lambda a, b, c: jax.lax.dynamic_update_slice(a, b, jnp.append(c, 0))  # start_id, 0
                 y = jax.vmap(_f)(y, vision_embeddings, vision_start_ids[..., None])

@@ -151,11 +151,19 @@ class AttentionOp(nn.Module):
     # This mask models (1) separate sequences (decoder_segment_ids) and (2) causality
     def generate_attention_mask(self, query, key, decoder_segment_ids: Array | None, model_mode: str) -> Array | None:
         mask = None
+        # vision mask
+        vision_mask = None
+        if decoder_segment_ids is not None:
+            vision_mask = decoder_segment_ids == -1
+            # replace vision ids to 1 for correct masking - NOTE: no support of packed sequences
+            decoder_segment_ids = jnp.where(decoder_segment_ids == -1, 1, decoder_segment_ids)
         if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
             mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
         elif decoder_segment_ids is not None:
             mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
             mask = mask[:, None, None, :, :]
+            vision_mask = vision_mask[:, :, None] == vision_mask[:, None, :]
+            vision_mask = vision_mask[:, None, None, :, :]
 
         causal_mask = None
         # We enforce causality except for AUTOREGRESSION
@@ -166,10 +174,11 @@ class AttentionOp(nn.Module):
             row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
             col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
             causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
+            # integrate vision mask (vision ids are not causal)
+            if vision_mask is not None:
+                causal_mask = jnp.logical_or(causal_mask, vision_mask)
 
-        # NOTE: last dims are query_length, key/value_length
-        # TODO: don't apply on vision embeddings based on input_positions=0 + non-null decoder_segment_ids/attention_mask
-        print("Warning: vision embeddings currently have causal masking.")
+        # NOTE: vision embeddings do not attend to prefix (see PaliGemma), only to themselves in non-causal way + anything before
         if (mask is not None) and (causal_mask is not None):
             output_mask = jnp.logical_and(mask, causal_mask)
         elif mask is not None:
