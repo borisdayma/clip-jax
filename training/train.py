@@ -80,6 +80,7 @@ class TrainingArguments:
     max_prefill_predict_length: Optional[int] = field(
         default=None, metadata={"help": "max prefill length used for prediction"}
     )
+    checkpoints_to_keep: Optional[int] = field(default=None, metadata={"help": "Number of checkpoints to keep."})
     n_predict: Optional[int] = field(default=0, metadata={"help": "Number of predictions."})
     n_predict_batch: Optional[int] = field(default=None, metadata={"help": "Batch size for training."})
     predict_num_beams: Optional[int] = field(default=1, metadata={"help": "Num beams used during prediction."})
@@ -1683,7 +1684,9 @@ def main():
 
     def run_save_model(params, opt_state):
         def _save_checkpoint(ckpt, dir, step):
-            orbax_options = orbax.checkpoint.CheckpointManagerOptions(create=True)
+            orbax_options = orbax.checkpoint.CheckpointManagerOptions(
+                create=True, max_to_keep=training_args.checkpoints_to_keep, enable_async_checkpointing=False
+            )
             save_checkpoint_manager = orbax.checkpoint.CheckpointManager(dir, orbax_checkpointer, orbax_options)
             save_args = orbax_utils.save_args_from_target(ckpt)
             save_checkpoint_manager.save(step, ckpt, save_kwargs={"save_args": save_args})
