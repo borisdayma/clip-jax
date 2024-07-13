@@ -162,7 +162,7 @@ class AttentionOp(nn.Module):
         elif decoder_segment_ids is not None:
             mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
             mask = mask[:, None, None, :, :]
-            vision_mask = vision_mask[:, :, None] == vision_mask[:, None, :]
+            vision_mask = jnp.logical_and(vision_mask[:, :, None] == vision_mask[:, None, :], vision_mask[:, :, None])
             vision_mask = vision_mask[:, None, None, :, :]
 
         causal_mask = None
