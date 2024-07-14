@@ -142,6 +142,10 @@ class TrainingArguments:
         default=1024,
         metadata={"help": "Chunked size for large layers with Distributed Shampoo."},
     )
+    caspr_variant: bool = field(
+        default=False,
+        metadata={"help": "Use CASPR variant of Distributed Shampoo."},
+    )
     preconditioning_compute_steps: int = field(
         default=20, metadata={"help": "Number of steps to update preconditioner."}
     )
@@ -988,6 +992,7 @@ def main():
             diagonal_epsilon=1e-10,
             matrix_epsilon=1e-6,
             weight_decay=training_args.weight_decay,
+            caspr_variant=training_args.caspr_variant,
             start_preconditioning_step=max(training_args.preconditioning_compute_steps + 1, 101),
             preconditioning_compute_steps=training_args.preconditioning_compute_steps,
             statistics_compute_steps=1,
