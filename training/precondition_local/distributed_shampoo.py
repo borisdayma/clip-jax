@@ -1606,12 +1606,13 @@ class Preconditioner:
         num_preconditioners = sum(should_preconditioned_dims)
         return 2 * num_preconditioners
 
-    def preconditioned_grad(self, grad, preconditioners):
+    def preconditioned_grad(self, grad, preconditioners, caspr_variant: bool):
         """Precondition the gradient.
 
         Args:
           grad: A gradient tensor to precondition.
           preconditioners: A list of preconditioners to apply.
+          caspr_variant: Whether to use the CASPR variant of shampoo.
 
         Returns:
           A preconditioned gradient.
@@ -1628,12 +1629,19 @@ class Preconditioner:
                 start=i * num_preconditioners,
                 end=(i + 1) * num_preconditioners,
             )
-            precond_g = self._precondition_block(g, should_preconditioned_dims, preconditioners_for_grad)
+            if caspr_variant:
+                precond_g = self._precondition_block_caspr(
+                    g, should_preconditioned_dims, preconditioners_for_grad
+                )
+            else:
+                precond_g = self._precondition_block_shampoo(
+                    g, should_preconditioned_dims, preconditioners_for_grad
+                )
             preconditioned_partitioned_grads.append(precond_g)
         merged_grad = self._partitioner.merge_partitions(preconditioned_partitioned_grads)
         return jnp.reshape(merged_grad, self._original_shape)
 
-    def _precondition_block(self, g, should_precondition_dim, preconditioners):
+    def _precondition_block_shampoo(self, g, should_precondition_dim, preconditioners):
         """Perform a preconditioning op on a single gradient block."""
         for j, should_precondition in enumerate(should_precondition_dim):
             # Loop invariant: the dimension to be preconditioned is first; we keep
@@ -1663,6 +1671,36 @@ class Preconditioner:
             # Case: full Shampoo matrix precondition this dimension
             g = jnp.tensordot(g, preconditioners[j], axes=[[0], [0]])
         return g
+
+    def _precondition_block_caspr(self, g, should_precondition_dim, preconditioners):
+        """Perform a preconditioning op on a single gradient block using CASPR.
+
+        https://openreview.net/forum?id=8j9hz8DVi8"""
+
+        def _fori_body(_, g):
+            rank = len(g.shape)
+            summed = None
+            for j, (p, should_precondition) in enumerate(
+                zip(preconditioners, should_precondition_dim)
+            ):
+                if should_precondition:
+                    a = jnp.tensordot(g, p, axes=[[j], [0]])
+                    orig_transpose = (
+                        tuple(range(0, j)) + (rank - 1,) + tuple(range(j, rank - 1))
+                    )
+                    a = jnp.transpose(a, orig_transpose)
+                    if summed is None:
+                        summed = a
+                    else:
+                        summed += a
+            if summed is None:
+                return g
+            return summed
+
+        u = jax.lax.fori_loop(
+            0, 2, _fori_body, jax.tree.map(lambda x: x.astype(jnp.float32), g)
+        )
+        return u
 
 
 def _update_preconditioners_fn(
@@ -1802,6 +1840,7 @@ def distributed_shampoo(
     diagonal_epsilon=1e-10,
     matrix_epsilon=1e-6,
     weight_decay=0.0,
+    caspr_variant=False,
     start_preconditioning_step=5,
     preconditioning_compute_steps=1,
     decay_preconditioning_compute_steps: bool = False,
@@ -1875,6 +1914,8 @@ def distributed_shampoo(
         (recommended today) this can go upto 1e-6. If you have latest hardware
         with native f64 precision, set this upto 1e-12.
       weight_decay: Weight decay for regularization.
+      caspr_variant: Whether to use the CASPR variant of shampoo from
+        https://openreview.net/forum?id=8j9hz8DVi8.
       start_preconditioning_step: When to start Shampoo update before which
         diagonal update is used. This is because we dont have enough information
         to do stable inverse.
@@ -3462,7 +3503,9 @@ def distributed_shampoo(
         precond_grad = grad
         if not _skip_preconditioning(param):
             precond_grad = preconditioner.preconditioned_grad(
-                precond_grad, _maybe_dequantize_preconditioners(state.preconditioners)
+                precond_grad,
+                _maybe_dequantize_preconditioners(state.preconditioners),
+                caspr_variant=caspr_variant,
             )
         else:
             if graft_type == GraftingType.NONE:
