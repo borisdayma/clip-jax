@@ -21,8 +21,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "black[jupyter]",
-    "isort",
     "optax",
     "precondition-opt",
     "tqdm",
@@ -36,8 +34,8 @@ include = [
     "/clip_jax",
 ]
 
-[tool.black]
+[tool.ruff]
 line-length = 119
 
-[tool.isort]
-profile = "black"
+[tool.ruff.lint]
+extend-select = ["E501"]
