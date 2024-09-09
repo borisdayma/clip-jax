@@ -1344,7 +1344,7 @@ class CLIPVisionModelForImageClassification(nn.Module):
         logits = nn.Dense(
             self.num_labels,
             dtype=dtype,
-            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "classifier")),
+            kernel_init=nn.with_logical_partitioning(nn.initializers.zeros, ("embed", "classifier")),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros, ("classifier",)),
             name="classifier",
         )(outputs["pooled_output"])
