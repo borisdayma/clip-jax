@@ -39,7 +39,7 @@ from precondition_local.distributed_shampoo import GraftingType, distributed_sha
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
-from clip_jax import CLIPModel
+from clip_jax import CLIPModel, CLIPVisionModelForImageClassification
 from clip_jax.data import Dataset, logits_to_image, preprocess_batch
 from clip_jax.partitions import logical_axis_rules
 from clip_jax.tokenizer import AutoTokenizer
@@ -181,10 +181,12 @@ class TrainingArguments:
         },
     )
     activation_partitioning_dims: int = field(
-        default=1, metadata={"help": "Number of dimensions to partition activations, 1 or 2."}
+        default=1,
+        metadata={"help": "Number of dimensions to partition activations, 1 or 2."},
     )
     parameter_partitioning_dims: int = field(
-        default=1, metadata={"help": "Number of dimensions to partition parameters, 1 or 2."}
+        default=1,
+        metadata={"help": "Number of dimensions to partition parameters, 1 or 2."},
     )
     num_train_epochs: int = field(default=3, metadata={"help": "Total number of training epochs to perform."})
     warmup_steps: int = field(default=500, metadata={"help": "Linear warmup over warmup_steps."})
@@ -332,8 +334,14 @@ class TrainingArguments:
             "model",
             "2d",
         ], f"Shard shampoo across {self.shard_shampoo_across} not supported."
-        assert self.activation_partitioning_dims in [1, 2], f"Only 1D and 2D activation partitioning supported."
-        assert self.parameter_partitioning_dims in [1, 2], f"Only 1D and 2D parameter partitioning supported."
+        assert self.activation_partitioning_dims in [
+            1,
+            2,
+        ], f"Only 1D and 2D activation partitioning supported."
+        assert self.parameter_partitioning_dims in [
+            1,
+            2,
+        ], f"Only 1D and 2D parameter partitioning supported."
         assert self.mp_devices > 0, f"Number of devices for model parallelism must be > 0"
         assert jax.device_count() % self.mp_devices == 0, (
             f"Number of available devices ({jax.device_count()} must be divisible by"
@@ -396,6 +404,10 @@ class ModelArguments:
         default=False,
         metadata={"help": ("Restore optimizer.")},
     )
+    num_labels: Optional[int] = field(
+        default=None,
+        metadata={"help": ("Number of labels for image classification.")},
+    )
     config_metadata: Dict = field(init=False)
 
     def __post_init__(self):
@@ -426,10 +438,12 @@ class DataTrainingArguments:
     """
 
     train_folder: Optional[str] = field(
-        default=None, metadata={"help": "Path to the root training directory which contains tfrecords."}
+        default=None,
+        metadata={"help": "Path to the root training directory which contains tfrecords."},
     )
     valid_folder: Optional[str] = field(
-        default=None, metadata={"help": "Path to the root validation directory which contains tfrecords."}
+        default=None,
+        metadata={"help": "Path to the root validation directory which contains tfrecords."},
     )
     image_crop_size: Optional[int] = field(
         default=None,
@@ -453,11 +467,16 @@ class DataTrainingArguments:
     )
     format: Optional[str] = field(default="rgb", metadata={"help": "The format of the images (rgb or lab)."})
     key_image: Optional[str] = field(default="webp", metadata={"help": "Name of the key containing the webp images."})
+    key_class: Optional[str] = field(
+        default=None,
+        metadata={"help": "Name of the key containing the class id for classification."},
+    )
     key_caption: Optional[str] = field(
         default="caption", metadata={"help": "Name of the key containing the captions."}
     )
     key_caption_2: Optional[str] = field(
-        default=None, metadata={"help": "Name of the 2nd key containing elements for chat format."}
+        default=None,
+        metadata={"help": "Name of the 2nd key containing elements for chat format."},
     )
     key_assistant: Optional[str] = field(
         default=None,
@@ -489,7 +508,13 @@ def split_scanned_params(data):
     """Split params between scanned and non-scanned"""
     # NOTE: technically this is not needed with Adam (and could be slower) but is required with shampoo
     flat = flatten_dict(data)
-    split = {"text": {}, "vision": {}, "scanned_text": {}, "scanned_vision": {}, "scanned_maxtext": {}}
+    split = {
+        "text": {},
+        "vision": {},
+        "scanned_text": {},
+        "scanned_vision": {},
+        "scanned_maxtext": {},
+    }
     for k, v in flat.items():
         if "layers" in k:
             if "text_model" in k:
@@ -707,26 +732,33 @@ def main():
     # Load config
     clipConfig = load_config(model_args.config_name)
     isMaxtext = "decoder_block" in clipConfig["text_config"]
+    is_classification = dataset.key_class is not None
+    assert not (isMaxtext and is_classification), "Cannot be both MaxText and classification."
 
     # Update config
     maxtext_args = None
     maxtext_mesh = None
     clipConfig["dtype"] = model_args.dtype
     clipConfig["vision_config"]["unroll"] = model_args.unroll
-    clipConfig["text_config"]["remat_policy"] = training_args.remat_policy
     clipConfig["vision_config"]["remat_policy"] = training_args.remat_policy
     clipConfig["vision_config"]["float32_logits"] = model_args.float32_logits
+    if not is_classification:
+        clipConfig["text_config"]["remat_policy"] = training_args.remat_policy
 
     # prediction length
     max_target_length = (
         training_args.max_target_length
         if training_args.max_target_length is not None
-        else training_args.max_length * 2 if training_args.max_length is not None else 1024
+        else training_args.max_length * 2
+        if training_args.max_length is not None
+        else 1024
     )
     max_prefill_predict_length = (
         training_args.max_prefill_predict_length
         if training_args.max_prefill_predict_length is not None
-        else training_args.max_length if training_args.max_length is not None else 512
+        else training_args.max_length
+        if training_args.max_length is not None
+        else 512
     )
 
     if isMaxtext:
@@ -742,6 +774,8 @@ def main():
         # set tokens if not set
         if clipConfig["text_config"]["pad_token_id"] is None:
             clipConfig["text_config"]["pad_token_id"] = tokenizer.pad_token_id
+    elif is_classification:
+        clipConfig["num_labels"] = model_args.num_labels
     else:
         clipConfig["text_config"]["unroll"] = model_args.unroll
         clipConfig["text_config"]["float32_logits"] = model_args.float32_logits
@@ -749,21 +783,32 @@ def main():
             clipConfig["text_config"]["masked_pred_prob"] = model_args.masked_pred_prob
 
     # Load model
-    model = CLIPModel(**clipConfig, maxtext_mesh=maxtext_mesh, maxtext_args=maxtext_args)
+    model_fn = CLIPVisionModelForImageClassification if is_classification else CLIPModel
+    model = model_fn(**clipConfig, maxtext_mesh=maxtext_mesh, maxtext_args=maxtext_args)
     max_length = training_args.max_length if training_args.max_length is not None else model.text_config["max_length"]
     model_eval = (
         model
         if model_args.dtype == "float32"
-        else CLIPModel(
-            **{**clipConfig, "dtype": "float32", "maxtext_mesh": maxtext_mesh, "maxtext_args": maxtext_args}
+        else model_fn(
+            **{
+                **clipConfig,
+                "dtype": "float32",
+                "maxtext_mesh": maxtext_mesh,
+                "maxtext_args": maxtext_args,
+            }
         )
     )
     # TODO: should not be needed in the future - see https://github.com/google/maxtext/issues/595
     model_predict = (
         model
         if model_args.dtype == "bfloat16"
-        else CLIPModel(
-            **{**clipConfig, "dtype": "bfloat16", "maxtext_mesh": maxtext_mesh, "maxtext_args": maxtext_args}
+        else model_fn(
+            **{
+                **clipConfig,
+                "dtype": "bfloat16",
+                "maxtext_mesh": maxtext_mesh,
+                "maxtext_args": maxtext_args,
+            }
         )
     )
     clipConfig = {
@@ -846,7 +891,11 @@ def main():
     data_mesh_sharding = NamedSharding(mesh, data_mesh_spec)
     local_addressable_devices = data_global_sharding.addressable_devices
     data_global_shape = None  # will be set at first batch
-    reshard_data = pjit(lambda x: x, in_shardings=(data_global_sharding,), out_shardings=data_mesh_sharding)
+    reshard_data = pjit(
+        lambda x: x,
+        in_shardings=(data_global_sharding,),
+        out_shardings=data_mesh_sharding,
+    )
 
     def _get_global_shape(x):
         shape = x.shape
@@ -891,7 +940,9 @@ def main():
         else:
             transforms = {}
         return checkpoint_manager.restore(
-            step, ckpt, restore_kwargs={"restore_args": restore_args, "transforms": transforms}
+            step,
+            ckpt,
+            restore_kwargs={"restore_args": restore_args, "transforms": transforms},
         )
 
     ckpt = {}
@@ -950,7 +1001,8 @@ def main():
             schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
         elif training_args.lr_decay == "cosine":
             new_schedule = optax.cosine_decay_schedule(
-                init_value=training_args.learning_rate, decay_steps=training_args.lr_transition_steps
+                init_value=training_args.learning_rate,
+                decay_steps=training_args.lr_transition_steps,
             )
             schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
         else:
@@ -980,7 +1032,9 @@ def main():
         preconditioner_axis = (
             training_args.shard_shampoo_across
             if training_args.shard_shampoo_across != "2d"
-            else "model" if training_args.mp_devices > training_args.dp_devices else "data"
+            else "model"
+            if training_args.mp_devices > training_args.dp_devices
+            else "data"
         )
         preconditioner_num_devices = (
             training_args.mp_devices if preconditioner_axis == "model" else training_args.dp_devices
@@ -1227,6 +1281,13 @@ def main():
         return new_params, new_opt_state
 
     # Define loss
+    def classification_loss(logits, labels):
+        if clipConfig["num_labels"] == 1:
+            loss = optax.sigmoid_binary_cross_entropy(logits, labels)
+        else:
+            loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
+        return loss
+
     def encoder_decoder_loss(logits, labels, label_mask):
         """Cross entropy for language models"""
         logits = logits.astype(jnp.float64)
@@ -1290,18 +1351,30 @@ def main():
             axis_size = jax.lax.psum(1, axis_name="data")
 
             # calculate local device loss
-            loss = mini_batch_sigmoid_loss(text_embeds, image_embeds, logit_scale, logit_bias, negative_samples=False)
+            loss = mini_batch_sigmoid_loss(
+                text_embeds,
+                image_embeds,
+                logit_scale,
+                logit_bias,
+                negative_samples=False,
+            )
 
             # add negative losses
             def add_negative_loss(i, carrys):
                 cumul_loss, image_embeds = carrys
                 # shift image_embeds
                 image_embeds = jax.lax.ppermute(
-                    image_embeds, axis_name="data", perm=[(j, (j - 1) % axis_size) for j in range(axis_size)]
+                    image_embeds,
+                    axis_name="data",
+                    perm=[(j, (j - 1) % axis_size) for j in range(axis_size)],
                 )
                 # add loss (all negative samples)
                 cumul_loss += mini_batch_sigmoid_loss(
-                    text_embeds, image_embeds, logit_scale, logit_bias, negative_samples=True
+                    text_embeds,
+                    image_embeds,
+                    logit_scale,
+                    logit_bias,
+                    negative_samples=True,
                 )
                 return cumul_loss, image_embeds
 
@@ -1317,11 +1390,17 @@ def main():
 
     def compute_loss(params, minibatch, dropout_rng, model_fn, train):
         rngs = {"dropout": dropout_rng} if train else None
-        labels = minibatch.pop("labels", None)
-        label_mask = minibatch.pop("label_mask", None)
+        if is_classification:
+            labels = minibatch["class_id"]
+        else:
+            labels = minibatch.pop("labels", None)
+            label_mask = minibatch.pop("label_mask", None)
         outputs = model_fn.apply({"params": params}, rngs=rngs, deterministic=not train, **minibatch)
         with jax.profiler.TraceAnnotation("Compute_Loss"):
-            if model.text_config.get("is_decoder", True):
+            if is_classification:
+                logits = outputs["logits"]
+                loss = classification_loss(logits, labels)
+            elif model.text_config.get("is_decoder", True):
                 logits = outputs["text_model_output"]["last_hidden_state"]
                 loss = encoder_decoder_loss(logits, labels, label_mask)
             elif training_args.loss_type == "cross_entropy":
@@ -1690,7 +1769,9 @@ def main():
     def run_save_model(params, opt_state):
         def _save_checkpoint(ckpt, dir, step):
             orbax_options = orbax.checkpoint.CheckpointManagerOptions(
-                create=True, max_to_keep=training_args.checkpoints_to_keep, enable_async_checkpointing=False
+                create=True,
+                max_to_keep=training_args.checkpoints_to_keep,
+                enable_async_checkpointing=False,
             )
             save_checkpoint_manager = orbax.checkpoint.CheckpointManager(dir, orbax_checkpointer, orbax_options)
             save_args = orbax_utils.save_args_from_target(ckpt)
@@ -1732,7 +1813,12 @@ def main():
         state.log({"saved_checkpoint": state.step})
 
     # Init training variables
-    evaluation_ran, save_model_ran, metrics_logged, stop_training = False, False, False, False
+    evaluation_ran, save_model_ran, metrics_logged, stop_training = (
+        False,
+        False,
+        False,
+        False,
+    )
     step, samples = state.step, state.samples  # separate copies for timing metrics
     opt_state_step = 0  # ensure it is defined in evaluation mode
     step_start = step  # define it for test mode
@@ -1771,7 +1857,10 @@ def main():
 
                 # preprocess batch
                 batch = preprocess_batch(
-                    batch, tokenizer, max_length, is_decoder=model.text_config.get("is_decoder", True)
+                    batch,
+                    tokenizer,
+                    max_length,
+                    is_decoder=model.text_config.get("is_decoder", True),
                 )
 
                 # reshape batch
