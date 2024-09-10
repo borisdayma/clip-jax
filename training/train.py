@@ -362,6 +362,7 @@ class TrainingArguments:
             self.lr_transition_steps = (
                 self.ds_train_size_for_transition_steps * self.num_train_epochs // self.batch_size_per_step
             )
+            self.warmup_steps = int(self.lr_transition_steps * 0.1)
 
 
 @dataclass
@@ -1306,7 +1307,7 @@ def main():
     # Define loss
     def classification_loss(logits, labels):
         if clipConfig["num_labels"] == 1:
-            loss = optax.sigmoid_binary_cross_entropy(logits, labels)
+            loss = optax.sigmoid_binary_cross_entropy(logits[:, 0], labels)
         else:
             loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
         loss = jnp.mean(loss)
@@ -1598,7 +1599,7 @@ def main():
                 model_fn=model_eval,
                 train=False,
             )
-            metrics = {"eval/loss": loss}
+            metrics = {}
             if is_classification:
                 loss, logits = loss
                 if clipConfig["num_labels"] == 1:
@@ -1608,6 +1609,7 @@ def main():
                     preds = jnp.argmax(logits, axis=1)
                     accuracy = jnp.mean(preds == labels)
                 metrics["eval/accuracy"] = accuracy
+            metrics["eval/loss"] = loss
             return metrics
 
         metrics = compute_eval_loss(batch)
