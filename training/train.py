@@ -341,12 +341,12 @@ class TrainingArguments:
         assert self.activation_partitioning_dims in [
             1,
             2,
-        ], f"Only 1D and 2D activation partitioning supported."
+        ], "Only 1D and 2D activation partitioning supported."
         assert self.parameter_partitioning_dims in [
             1,
             2,
-        ], f"Only 1D and 2D parameter partitioning supported."
-        assert self.mp_devices > 0, f"Number of devices for model parallelism must be > 0"
+        ], "Only 1D and 2D parameter partitioning supported."
+        assert self.mp_devices > 0, "Number of devices for model parallelism must be > 0"
         assert jax.device_count() % self.mp_devices == 0, (
             f"Number of available devices ({jax.device_count()} must be divisible by"
             f" number of devices used for model parallelism ({self.mp_devices})."
@@ -359,7 +359,9 @@ class TrainingArguments:
         self.train_batch_size = batch_size_per_node_per_step
         self.valid_batch_size = self.valid_batch_size_per_node or self.batch_size_per_node
         if self.ds_train_size_for_transition_steps is not None:
-            self.lr_transition_steps = self.ds_train_size_for_transition_steps // self.batch_size_per_step
+            self.lr_transition_steps = (
+                self.ds_train_size_for_transition_steps * self.num_train_epochs // self.batch_size_per_step
+            )
 
 
 @dataclass
@@ -1587,6 +1589,8 @@ def main():
     # Evaluation step
     def eval_step(params, batch):
         def compute_eval_loss(batch):
+            if is_classification:
+                labels = batch["class_id"]
             loss = compute_loss(
                 params,
                 batch,
@@ -1597,7 +1601,6 @@ def main():
             metrics = {"eval/loss": loss}
             if is_classification:
                 loss, logits = loss
-                labels = batch["class_id"]
                 if clipConfig["num_labels"] == 1:
                     preds = (logits > 0).astype(jnp.float32)
                     accuracy = jnp.mean(preds == labels)
