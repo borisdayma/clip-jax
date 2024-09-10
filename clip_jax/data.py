@@ -330,6 +330,7 @@ def preprocess_batch(
     # for classification
     if "class_id" in batch.keys():
         batch = {k: v for k, v in batch.items() if k in ["class_id", "images"]}
+        batch["pixel_values"] = batch.pop("images")
         return batch
     # preprocess batch
     captions = [" ".join(caption.decode("utf-8").strip().split()) for caption in batch["captions"]]
