@@ -1346,7 +1346,7 @@ class CLIPVisionModelForImageClassification(nn.Module):
             dtype=dtype,
             kernel_init=nn.with_logical_partitioning(nn.initializers.zeros, ("embed", "classifier")),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros, ("classifier",)),
-            name="classifier",
+            name="vision_projection",
         )(outputs["pooled_output"])
 
         return dict(logits=logits)
