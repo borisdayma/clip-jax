@@ -1400,6 +1400,9 @@ def main():
             if is_classification:
                 logits = outputs["logits"]
                 loss = classification_loss(logits, labels)
+                if not train:
+                    # we can compute accuracy
+                    return loss, logits
             elif model.text_config.get("is_decoder", True):
                 logits = outputs["text_model_output"]["last_hidden_state"]
                 loss = encoder_decoder_loss(logits, labels, label_mask)
@@ -1569,9 +1572,18 @@ def main():
                 model_fn=model_eval,
                 train=False,
             )
-            return {
-                "eval/loss": loss,
-            }
+            metrics = {"eval/loss": loss}
+            if is_classification:
+                loss, logits = loss
+                labels = batch["class_id"]
+                if clipConfig["num_labels"] == 1:
+                    preds = (logits > 0).astype(jnp.float32)
+                    accuracy = jnp.mean(preds == labels)
+                else:
+                    preds = jnp.argmax(logits, axis=1)
+                    accuracy = jnp.mean(preds == labels)
+                metrics["eval/accuracy"] = accuracy
+            return metrics
 
         metrics = compute_eval_loss(batch)
         return metrics
@@ -1937,6 +1949,18 @@ def main():
                 # end training
                 if stop_training:
                     break
+
+        # end of epoch evaluation
+        if training_args.do_eval and not evaluation_ran:
+            state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+            run_evaluation(params, mesh)
+            evaluation_ran = True
+
+        # end of epoch save model
+        if not save_model_ran:
+            state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+            run_save_model(params, opt_state)
+            save_model_ran = True
 
     # log final metrics
     if not metrics_logged:
