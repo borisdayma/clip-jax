@@ -793,8 +793,8 @@ def main():
             clipConfig["text_config"]["masked_pred_prob"] = model_args.masked_pred_prob
 
     # Load model
-    model_fn = CLIPVisionModelForImageClassification if is_classification else CLIPModel
-    model = model_fn(
+    class_fn = CLIPVisionModelForImageClassification if is_classification else CLIPModel
+    model = class_fn(
         **{
             **clipConfig,
             "maxtext_mesh": maxtext_mesh,
@@ -811,7 +811,7 @@ def main():
     model_eval = (
         model
         if model_args.dtype == "float32"
-        else model_fn(
+        else class_fn(
             **{
                 **clipConfig,
                 "dtype": "float32",
@@ -824,7 +824,7 @@ def main():
     model_predict = (
         model
         if model_args.dtype == "bfloat16"
-        else model_fn(
+        else class_fn(
             **{
                 **clipConfig,
                 "dtype": "bfloat16",
