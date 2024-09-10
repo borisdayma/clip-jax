@@ -200,6 +200,10 @@ class TrainingArguments:
         default=None,
         metadata={"help": ("Number of transition steps associated with learning rate decay when applicable.")},
     )
+    ds_train_size_for_transition_steps: int = field(
+        default=None,
+        metadata={"help": ("Number of training samples for calculating transition steps for learning rate decay.")},
+    )
     lr_decay_rate: float = field(
         default=None,
         metadata={"help": ("Decay rate associated with learning rate when using exponential decay.")},
@@ -354,6 +358,8 @@ class TrainingArguments:
         # define batch size for data loader
         self.train_batch_size = batch_size_per_node_per_step
         self.valid_batch_size = self.valid_batch_size_per_node or self.batch_size_per_node
+        if self.ds_train_size_for_transition_steps is not None:
+            self.lr_transition_steps = self.ds_train_size_for_transition_steps // self.batch_size_per_step
 
 
 @dataclass
@@ -776,6 +782,7 @@ def main():
             clipConfig["text_config"]["pad_token_id"] = tokenizer.pad_token_id
     elif is_classification:
         clipConfig["num_labels"] = model_args.num_labels
+        clipConfig = {k: clipConfig[k] for k in ["num_labels", "vision_config", "dtype"]}
     else:
         clipConfig["text_config"]["unroll"] = model_args.unroll
         clipConfig["text_config"]["float32_logits"] = model_args.float32_logits
@@ -784,8 +791,20 @@ def main():
 
     # Load model
     model_fn = CLIPVisionModelForImageClassification if is_classification else CLIPModel
-    model = model_fn(**clipConfig, maxtext_mesh=maxtext_mesh, maxtext_args=maxtext_args)
-    max_length = training_args.max_length if training_args.max_length is not None else model.text_config["max_length"]
+    model = model_fn(
+        **{
+            **clipConfig,
+            "maxtext_mesh": maxtext_mesh,
+            "maxtext_args": maxtext_args,
+        }
+    )
+    max_length = (
+        1
+        if is_classification
+        else training_args.max_length
+        if training_args.max_length is not None
+        else model.text_config["max_length"]
+    )
     model_eval = (
         model
         if model_args.dtype == "float32"
@@ -827,7 +846,9 @@ def main():
     # Parameter count
     num_params = {
         "Total": count_params(logical_params),
-        "Text": count_params(logical_params["text" if "text" in logical_params else "text_model"]),
+        "Text": 0
+        if is_classification
+        else count_params(logical_params["text" if "text" in logical_params else "text_model"]),
         "Vision": count_params(logical_params["vision"]),
     }
 
@@ -1286,6 +1307,7 @@ def main():
             loss = optax.sigmoid_binary_cross_entropy(logits, labels)
         else:
             loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
+        loss = jnp.mean(loss)
         return loss
 
     def encoder_decoder_loss(logits, labels, label_mask):
@@ -1391,7 +1413,7 @@ def main():
     def compute_loss(params, minibatch, dropout_rng, model_fn, train):
         rngs = {"dropout": dropout_rng} if train else None
         if is_classification:
-            labels = minibatch["class_id"]
+            labels = minibatch.pop("class_id")
         else:
             labels = minibatch.pop("labels", None)
             label_mask = minibatch.pop("label_mask", None)
@@ -1501,9 +1523,9 @@ def main():
         # update params
         new_params, new_opt_state = update_params(params, opt_state, grads)
 
-        # get opt_state_step - TODO: only shampoo is supported at the moment
+        # get opt_state_step
         if training_args.optim == "distributed_shampoo":
-            opt_state_step = new_opt_state["text"][0]
+            opt_state_step = new_opt_state["text"][0] if "text" in new_opt_state else new_opt_state["vision"][0]
         elif training_args.optim == "adafactor":
             opt_state_step = new_opt_state["text"][2].count
         else:
@@ -1644,7 +1666,7 @@ def main():
                 batch,
                 tokenizer,
                 max_length,
-                is_decoder=model.text_config.get("is_decoder", True),
+                is_decoder=False if is_classification else model.text_config.get("is_decoder", True),
                 is_validation_batch=True,
             )
             # convert to jax arrays
@@ -1717,7 +1739,7 @@ def main():
                 batch,
                 tokenizer_predict,
                 max_prefill_predict_length,
-                is_decoder=model.text_config.get("is_decoder", True),
+                is_decoder=False if is_classification else model.text_config.get("is_decoder", True),
                 is_prediction_batch=True,
             )
 
@@ -1872,7 +1894,7 @@ def main():
                     batch,
                     tokenizer,
                     max_length,
-                    is_decoder=model.text_config.get("is_decoder", True),
+                    is_decoder=False if is_classification else model.text_config.get("is_decoder", True),
                 )
 
                 # reshape batch
