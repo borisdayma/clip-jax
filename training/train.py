@@ -1700,7 +1700,6 @@ def main():
                 metrics_batch = p_eval_step(params, batch)
             metrics_batch = jax.device_get(metrics_batch)
             metrics.append(metrics_batch)
-            break
 
         # get the mean of the metrics
         metrics = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *metrics)
