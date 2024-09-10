@@ -1603,7 +1603,7 @@ def main():
             if is_classification:
                 loss, logits = loss
                 if clipConfig["num_labels"] == 1:
-                    preds = (logits > 0).astype(jnp.float32)
+                    preds = (logits[:, 0] > 0).astype(jnp.float32)
                     accuracy = jnp.mean(preds == labels)
                 else:
                     preds = jnp.argmax(logits, axis=1)
