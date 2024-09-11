@@ -202,12 +202,10 @@ class Dataset:
                 if folder.endswith(".pkl"):
                     with open(folder, "rb") as f:
                         files = pickle.load(f)
-                elif "gs://" in folder:
+                else:
                     if folder[-1] != "/":
                         folder += "/"
                     files = tf.io.gfile.glob(f"{folder}*.tfrecord")
-                else:
-                    files = [f"{Path(f)}" for f in Path(folder).glob("*.tfrecord")]
                 assert len(files) > 0, f"No files found at folder: {folder}"
 
                 # sort files
