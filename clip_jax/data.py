@@ -27,6 +27,7 @@ class Dataset:
     key_caption_2: str = None  # name of 2nd key containing captions for chat templates
     key_assistant: str = None  # name of key when using chat template data
     key_assistant_2: str = None  # name of 2nd key when using chat template data
+    key_class: str = None  # used for classification
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     _train: tf.data.Dataset = field(init=False)
@@ -63,6 +64,8 @@ class Dataset:
             features[self.key_assistant] = tf.io.FixedLenFeature([], tf.string, default_value="")
         if self.key_assistant_2:
             features[self.key_assistant_2] = tf.io.FixedLenFeature([], tf.string, default_value="")
+        if self.key_class:
+            features[self.key_class] = tf.io.FixedLenFeature([], tf.int64, default_value=0)
 
         def _parse_function(example_proto):
             parsed_features = tf.io.parse_single_example(example_proto, features)
@@ -74,9 +77,19 @@ class Dataset:
                 parsed_features[self.key_caption_2] if self.key_caption_2 else None,
                 parsed_features[self.key_assistant] if self.key_assistant else None,
                 parsed_features[self.key_assistant_2] if self.key_assistant_2 else None,
+                parsed_features[self.key_class] if self.key_class else None,
             )
 
-        def _filter_function(image, width, height, caption, caption_2, caption_assistant, caption_assistant_2):
+        def _filter_function(
+            image,
+            width,
+            height,
+            caption,
+            caption_2,
+            caption_assistant,
+            caption_assistant_2,
+            class_id,
+        ):
             # filter out images that are too small
             if self.min_original_image_size is not None and (tf.minimum(width, height) < self.min_original_image_size):
                 return False
@@ -87,8 +100,24 @@ class Dataset:
                 return False
             return True
 
-        def _parse_image(image, width, height, caption, caption_2, caption_assistant, caption_assistant_2):
-            return tfio.image.decode_webp(image)[..., :3], caption, caption_2, caption_assistant, caption_assistant_2
+        def _parse_image(
+            image,
+            width,
+            height,
+            caption,
+            caption_2,
+            caption_assistant,
+            caption_assistant_2,
+            class_id,
+        ):
+            return (
+                tfio.image.decode_webp(image)[..., :3],
+                caption,
+                caption_2,
+                caption_assistant,
+                caption_assistant_2,
+                class_id,
+            )
 
         def _parse_no_filter(example_proto):
             # we can combine parsing functions into one
@@ -99,36 +128,51 @@ class Dataset:
             new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
             # apply random crop
             return tf.image.stateless_random_crop(
-                image, size=[self.image_crop_size, self.image_crop_size, 3], seed=new_seed
+                image,
+                size=[self.image_crop_size, self.image_crop_size, 3],
+                seed=new_seed,
             )
 
         # augmentation wrapper
-        def _augment_crop_wrapper(image, caption, caption_2, caption_assistant, caption_assistant_2):
+        def _augment_crop_wrapper(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
             seed = self.rng.make_seeds(2)[0]
-            return _augment_crop(image, seed), caption, caption_2, caption_assistant, caption_assistant_2
+            return (
+                _augment_crop(image, seed),
+                caption,
+                caption_2,
+                caption_assistant,
+                caption_assistant_2,
+                class_id,
+            )
 
         # center crop (for validation)
-        def _center_crop(image, caption, caption_2, caption_assistant, caption_assistant_2):
+        def _center_crop(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
             return (
                 tf.image.resize_with_crop_or_pad(image, self.image_crop_size, self.image_crop_size),
                 caption,
                 caption_2,
                 caption_assistant,
                 caption_assistant_2,
+                class_id,
             )
 
-        def _resize(image, caption, caption_2, caption_assistant, caption_assistant_2):
+        def _resize(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
             # NOTE: area as we will typically be downsampling
             return (
-                tf.image.resize(image, [self.image_crop_resize, self.image_crop_resize], method="area"),
+                tf.image.resize(
+                    image,
+                    [self.image_crop_resize, self.image_crop_resize],
+                    method="area",
+                ),
                 caption,
                 caption_2,
                 caption_assistant,
                 caption_assistant_2,
+                class_id,
             )
 
         # normalization
-        def _normalize(image, caption, caption_2, caption_assistant, caption_assistant_2):
+        def _normalize(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
             if self.format == "rgb":
                 image = (
                     tf.cast(image, tf.float32) / 255.0 - tf.convert_to_tensor([self.mean], dtype=tf.float32)
@@ -143,6 +187,8 @@ class Dataset:
                 res["captions_assistant"] = caption_assistant
             if caption_assistant_2 is not None:
                 res["captions_assistant_2"] = caption_assistant_2
+            if class_id is not None:
+                res["class_id"] = class_id
             return res
 
         for folder, dataset, augment, batch_size in zip(
@@ -156,12 +202,10 @@ class Dataset:
                 if folder.endswith(".pkl"):
                     with open(folder, "rb") as f:
                         files = pickle.load(f)
-                elif "gs://" in folder:
+                else:
                     if folder[-1] != "/":
                         folder += "/"
                     files = tf.io.gfile.glob(f"{folder}*.tfrecord")
-                else:
-                    files = [f"{Path(f)}" for f in Path(folder).glob("*.tfrecord")]
                 assert len(files) > 0, f"No files found at folder: {folder}"
 
                 # sort files
@@ -273,7 +317,19 @@ def shift_tokens_left(logits, pad_token_id):
     return shifted_logits
 
 
-def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_batch=False, is_validation_batch=False):
+def preprocess_batch(
+    batch,
+    tokenizer,
+    max_length,
+    is_decoder,
+    is_prediction_batch=False,
+    is_validation_batch=False,
+):
+    # for classification
+    if "class_id" in batch.keys():
+        batch = {k: v for k, v in batch.items() if k in ["class_id", "images"]}
+        batch["pixel_values"] = batch.pop("images")
+        return batch
     # preprocess batch
     captions = [" ".join(caption.decode("utf-8").strip().split()) for caption in batch["captions"]]
     captions_assistant = batch.get("captions_assistant", None)
@@ -300,7 +356,12 @@ def preprocess_batch(batch, tokenizer, max_length, is_decoder, is_prediction_bat
             captions_assistant_2 = [None] * len(captions_assistant)
         messages = [
             [
-                {"role": "user", "content": caption, "content_2": caption_2, "choice": choice},
+                {
+                    "role": "user",
+                    "content": caption,
+                    "content_2": caption_2,
+                    "choice": choice,
+                },
                 {
                     "role": "assistant",
                     "content": caption_assistant,

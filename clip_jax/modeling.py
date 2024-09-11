@@ -233,7 +233,8 @@ class CLIPVisionEmbeddings(nn.Module):
             use_bias=self.use_bias,
             dtype=self.dtype,
             kernel_init=nn.with_logical_partitioning(
-                nn.initializers.lecun_normal(), ("conv_height", "conv_width", "input_channels", "embed")
+                nn.initializers.lecun_normal(),
+                ("conv_height", "conv_width", "input_channels", "embed"),
             ),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
             name="patch_embeds",
@@ -248,19 +249,24 @@ class CLIPVisionEmbeddings(nn.Module):
             position_height, position_width = height, width
             if self.position_embedding_shape is not None:
                 num_positions = self.position_embedding_shape[0] * self.position_embedding_shape[1]
-                position_height, position_width = self.position_embedding_shape[0], self.position_embedding_shape[1]
+                position_height, position_width = (
+                    self.position_embedding_shape[0],
+                    self.position_embedding_shape[1],
+                )
             if self.position_embedding_factorized:
                 position_embeds_height = self.param(
                     "position_embeds_height",
                     nn.with_logical_partitioning(
-                        nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, "height", "embed")
+                        nn.initializers.normal(1 / np.sqrt(self.hidden_size)),
+                        (None, "height", "embed"),
                     ),
                     (1, position_height, self.hidden_size),
                 )
                 position_embeds_width = self.param(
                     "position_embeds_width",
                     nn.with_logical_partitioning(
-                        nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, "width", "embed")
+                        nn.initializers.normal(1 / np.sqrt(self.hidden_size)),
+                        (None, "width", "embed"),
                     ),
                     (1, position_width, self.hidden_size),
                 )
@@ -280,19 +286,30 @@ class CLIPVisionEmbeddings(nn.Module):
                 position_embeds_height = position_embeds[:, :, None, :]
                 position_embeds_width = position_embeds[:, None, :, :]
                 position_embeds = position_embeds_height + position_embeds_width
-                assert position_embeds.shape == (batch_size, height, width, self.hidden_size)
+                assert position_embeds.shape == (
+                    batch_size,
+                    height,
+                    width,
+                    self.hidden_size,
+                )
             else:
                 position_embeds = self.param(
                     "position_embeds",
                     nn.with_logical_partitioning(
-                        nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, "vocab", "embed")
+                        nn.initializers.normal(1 / np.sqrt(self.hidden_size)),
+                        (None, "vocab", "embed"),
                     ),
                     (1, num_positions, self.hidden_size),
                 )
                 if num_positions != num_patches:
                     position_embeds = jnp.reshape(
                         position_embeds,
-                        (1, self.position_embedding_shape[0], self.position_embedding_shape[1], self.hidden_size),
+                        (
+                            1,
+                            self.position_embedding_shape[0],
+                            self.position_embedding_shape[1],
+                            self.hidden_size,
+                        ),
                     )
                     position_embeds = nn.with_logical_constraint(
                         position_embeds, ("batch", "height", "width", "embed")
@@ -321,7 +338,8 @@ class CLIPVisionEmbeddings(nn.Module):
             registers = self.param(
                 "registers",
                 nn.with_logical_partitioning(
-                    nn.initializers.normal(1 / np.sqrt(self.hidden_size)), (None, None, "embed")
+                    nn.initializers.normal(1 / np.sqrt(self.hidden_size)),
+                    (None, None, "embed"),
                 ),
                 (1, self.registers, self.hidden_size),
             )
@@ -353,7 +371,10 @@ class CLIPTextEmbeddings(nn.Module):
         if self.position_embedding_type == "learnt":
             position_embeds = self.param(
                 "position_embeds",
-                nn.with_logical_partitioning(nn.initializers.normal(1 / np.sqrt(embed_dim)), (None, "vocab", "embed")),
+                nn.with_logical_partitioning(
+                    nn.initializers.normal(1 / np.sqrt(embed_dim)),
+                    (None, "vocab", "embed"),
+                ),
                 (1, self.max_length, embed_dim),
             )
             embeddings += position_embeds
@@ -651,7 +672,10 @@ class CLIPMLP(nn.Module):
     @nn.compact
     def __call__(self, inputs, deterministic: bool = False):
         """Applies Transformer MlpBlock module."""
-        assert self.ln_type in ["normformer", "preln"], f"ln_type {self.ln_type} not supported."
+        assert self.ln_type in [
+            "normformer",
+            "preln",
+        ], f"ln_type {self.ln_type} not supported."
         # Iterate over specified MLP input activation functions.
         # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
         with jax.profiler.TraceAnnotation("MLP_Block"):
@@ -739,7 +763,10 @@ class CLIPEncoderLayer(nn.Module):
         position_ids: Optional[Array] = None,
         deterministic: bool = True,
     ):
-        assert self.ln_type in ["normformer", "preln"], f"ln_type {self.ln_type} not supported."
+        assert self.ln_type in [
+            "normformer",
+            "preln",
+        ], f"ln_type {self.ln_type} not supported."
         assert self.position_embedding_type in [
             "learnt",
             "rotary",
@@ -815,7 +842,11 @@ class CLIPEncoderLayer(nn.Module):
                 normalize_qk=self.normalize_qk,
                 float32_logits=self.float32_logits,
                 name="cross_attention",
-            )(inputs_q=hidden_states, inputs_kv=encoder_hidden_states, deterministic=deterministic)
+            )(
+                inputs_q=hidden_states,
+                inputs_kv=encoder_hidden_states,
+                deterministic=deterministic,
+            )
             hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
             if self.ln_type == "normformer":
                 hidden_states = norm(self.use_rmsnorm)(
@@ -895,7 +926,12 @@ class CLIPEncoder(nn.Module):
             else:
                 assert self.remat_policy == "full", "Remat policy needs to be on list of remat policies"
                 policy = None
-            layer = nn.remat(layer, prevent_cse=not use_scan, policy=policy, static_argnums=(-1, -2, -3, -4, -5))
+            layer = nn.remat(
+                layer,
+                prevent_cse=not use_scan,
+                policy=policy,
+                static_argnums=(-1, -2, -3, -4, -5),
+            )
 
         hidden_states, _ = nn.scan(
             layer,
@@ -923,7 +959,11 @@ class CLIPEncoder(nn.Module):
             decode=self.decode,
             name="layers",
         )(
-            hidden_states, attention_mask, encoder_hidden_states, position_ids, deterministic
+            hidden_states,
+            attention_mask,
+            encoder_hidden_states,
+            position_ids,
+            deterministic,
         )
 
         return dict(
@@ -1089,7 +1129,8 @@ class CLIPTextTransformer(nn.Module):
                     return jnp.where(mat == id, 1, 0).argmax(axis=-1)
 
                 pooled_output = last_hidden_state[
-                    jnp.arange(last_hidden_state.shape[0]), _get_id_pos(input_ids, self.eos_token_id)
+                    jnp.arange(last_hidden_state.shape[0]),
+                    _get_id_pos(input_ids, self.eos_token_id),
                 ]
             elif self.pool_type == "map":
                 # TODO: should allow custom heads/dim when using as queries for llm
@@ -1269,9 +1310,13 @@ class CLIPVisionModelForImageClassification(nn.Module):
     vision_config: Any
     num_labels: int
     dtype: str = "float32"
+    maxtext_mesh: Any = None
+    maxtext_args: Any = None
 
     def __post_init__(self):
         # add default fields vision_config
+        assert self.maxtext_mesh is None, "maxtext_mesh should not be set for classification"
+        assert self.maxtext_args is None, "maxtext_args should not be set for classification"
         default_fields = dataclasses.fields(CLIPVisionTransformer)
         default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
         default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
@@ -1299,9 +1344,9 @@ class CLIPVisionModelForImageClassification(nn.Module):
         logits = nn.Dense(
             self.num_labels,
             dtype=dtype,
-            kernel_init=nn.with_logical_partitioning(default_kernel_init, ("embed", "classifier")),
+            kernel_init=nn.with_logical_partitioning(nn.initializers.zeros, ("embed", "classifier")),
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros, ("classifier",)),
-            name="classifier",
+            name="vision_projection",
         )(outputs["pooled_output"])
 
         return dict(logits=logits)
@@ -1467,7 +1512,10 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         model_mode: str = common_types.MODEL_MODE_TRAIN,
     ):
         image_features = self.get_image_features(pixel_values, deterministic=deterministic)
-        image_embeds, vision_model_output = image_features["image_embeds"], image_features["vision_model_output"]
+        image_embeds, vision_model_output = (
+            image_features["image_embeds"],
+            image_features["vision_model_output"],
+        )
 
         is_decoder = self.text_config.get("is_decoder", True)
         if decode:
@@ -1482,7 +1530,10 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             deterministic=deterministic,
             model_mode=model_mode,
         )
-        text_embeds, text_model_output = text_features["text_embeds"], text_features["text_model_output"]
+        text_embeds, text_model_output = (
+            text_features["text_embeds"],
+            text_features["text_model_output"],
+        )
 
         # temperature scaling
         logit_scale = jnp.exp(self.logit_scale)
@@ -1577,7 +1628,10 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             vision_config = SimpleNamespace(**vision_config)
         max_len = getattr(text_config, "max_length", max_length)
         input_ids = jnp.ones((batch_size, max_len), dtype="i4")
-        pixel_values = jnp.ones((batch_size, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
+        pixel_values = jnp.ones(
+            (batch_size, vision_config.image_size, vision_config.image_size, 3),
+            dtype="f4",
+        )
         params_rng, dropout_rng = jax.random.split(rng)
         rngs = {"params": params_rng, "dropout": dropout_rng, "aqt": params_rng}
         return {
@@ -1595,7 +1649,11 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
 
     # Methods for FlaxGenerationMixin
     def prepare_inputs_for_generation(
-        self, decoder_input_ids, max_length, encoder_outputs, decoder_attention_mask=None
+        self,
+        decoder_input_ids,
+        max_length,
+        encoder_outputs,
+        decoder_attention_mask=None,
     ):
         # initialize cache
         model_inputs = self.init_inputs(jax.random.PRNGKey(0))
@@ -1651,7 +1709,8 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         past_key_values = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1) if x.ndim >= 2 else x, past_key_values)
         scan_dim = past_key_values["text"]["encoder"]["layers"]["attention"]["cached_key"].shape[0]
         past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"] = jnp.broadcast_to(
-            past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"], (scan_dim,)
+            past_key_values["text"]["encoder"]["layers"]["attention"]["cache_index"],
+            (scan_dim,),
         )
         outputs, mutable = self.apply(
             {"params": params, "cache": past_key_values},
@@ -1812,7 +1871,9 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
                 return ~(all_sent_finished | max_len_reached)
 
             state = jax.lax.while_loop(
-                _cond_fn, partial(_decode_one_step, model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE), state
+                _cond_fn,
+                partial(_decode_one_step, model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE),
+                state,
             )
             return state.sent_result
 

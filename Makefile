@@ -1,5 +1,5 @@
 check_dirs := ./
 
 style:
-	black $(check_dirs)
-	isort $(check_dirs)
+	ruff check --select I --fix $(check_dirs)
+	ruff format $(check_dirs)
