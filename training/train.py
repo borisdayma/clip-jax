@@ -1172,9 +1172,7 @@ def main():
 
         # utility functions for Adam
         def _adam_opt_state_spec_per_leaf(x, spec):
-            raise NotImplementedError
-            # TODO: no use of FrozenDict anymore so this needs to be updated
-            if isinstance(x, FrozenDict):
+            if isinstance(x, dict):
                 # variables with same structure as params
                 return spec
             else:
@@ -1529,7 +1527,7 @@ def main():
         # get opt_state_step
         if training_args.optim == "distributed_shampoo":
             opt_state_step = new_opt_state["text"][0] if "text" in new_opt_state else new_opt_state["vision"][0]
-        elif training_args.optim == "adafactor":
+        elif training_args.optim in ["adam", "adafactor"]:
             opt_state_step = new_opt_state["text"][2].count
         else:
             raise NotImplementedError
