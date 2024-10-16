@@ -20,7 +20,7 @@
     "is_decoder": true,
     "pool_type": null,
     "vocab_size": 65536,
-    "hidden_size": 512,
+    "hidden_size": 1024,
     "max_length": 64,
     "num_layers": 12,
     "use_rmsnorm": true,
@@ -28,7 +28,7 @@
     "num_heads": 16,
     "position_embedding_type": "rotary",
     "use_causal_mask": true,
-    "mlp_dim": 1024
+    "mlp_dim": 2048
   },
   "vision_config": {
     "float32_logits": true,
@@ -50,14 +50,14 @@
     "registers": 0,
     "keep_registers": false,
     "image_size": 256,
-    "hidden_size": 512,
+    "hidden_size": 1024,
     "patch_size": 16,
     "num_layers": 24,
     "use_rmsnorm": true,
     "ln_type": "normformer",
     "num_heads": 16,
     "use_causal_mask": false,
-    "mlp_dim": 1024
+    "mlp_dim": 2048
   },
   "projection_dim": 512,
   "logit_scale_init_value": 2.3,
