@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import time
+import random
 from dataclasses import dataclass, field
 from functools import partial
 from platform import python_version
@@ -26,7 +27,6 @@ import wandb
 from flax.core import FrozenDict
 from flax.training import orbax_utils
 from flax.traverse_util import flatten_dict, unflatten_dict
-from jax import numpy as jnp
 from jax.experimental import multihost_utils
 from jax.experimental.compilation_cache import compilation_cache as cc
 from jax.experimental.mesh_utils import create_device_mesh
@@ -684,6 +684,11 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # set seeds
+    random.seed(data_args.seed_dataset)
+    np.random.seed(data_args.seed_dataset)
+    tf.random.set_seed(data_args.seed_dataset)
 
     # Use jax cache
     if not training_args.no_cache:
