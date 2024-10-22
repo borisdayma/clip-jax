@@ -4,7 +4,6 @@ import logging
 import os
 import sys
 import time
-import random
 from dataclasses import dataclass, field
 from functools import partial
 from platform import python_version
@@ -684,11 +683,6 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
-    # set seeds
-    random.seed(data_args.seed_dataset)
-    np.random.seed(data_args.seed_dataset)
-    tf.random.set_seed(data_args.seed_dataset)
 
     # Use jax cache
     if not training_args.no_cache:
