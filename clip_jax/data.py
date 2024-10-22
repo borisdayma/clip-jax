@@ -1,8 +1,6 @@
 import hashlib
 import pickle
-import random
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import jax
 import numpy as np
@@ -42,9 +40,13 @@ class Dataset:
         assert self.format in ["rgb", "lab"], f"Invalid format: {self.format}"
 
         # define rng
+        self.deterministic = True
         if self.seed_dataset is None:
-            self.seed_dataset = random.randint(0, 2**32 - 1)
-        self.rng = tf.random.Generator.from_seed(self.seed_dataset, alg="philox")
+            self.deterministic = False
+            self.seed_dataset = np.random.randint(0, 2**32 - 1)
+        self.rng = tf.random.Generator.from_seed(self.seed_dataset)
+        np.random.seed(self.seed_dataset)
+        tf.random.set_seed(self.seed_dataset)
 
         # check if we are on multi-hosts
         self.multi_hosts = jax.process_count() > 1
@@ -214,7 +216,7 @@ class Dataset:
                 # shuffle files and select subset
                 if augment:
                     files = files[self.process_index :: self.process_count]
-                    random.shuffle(files)
+                    np.random.shuffle(files)
 
                 # load dataset
                 ds = tf.data.TFRecordDataset(
@@ -225,7 +227,7 @@ class Dataset:
                 # non deterministic read (faster)
                 if augment:
                     ignore_order = tf.data.Options()
-                    ignore_order.deterministic = False
+                    ignore_order.deterministic = self.deterministic
                     ds = ds.with_options(ignore_order)
 
                     if self.multi_hosts:
@@ -431,7 +433,8 @@ class ChoiceDataset:
 
     def batch_to_choice(self, pixel_values):
         md5 = hashlib.md5(pixel_values).hexdigest()
-        self.last_choice[md5] = (self.last_choice.get(md5, random.randint(0, 1)) + 1) % 2
+        rand_int = np.random.randint(0, 2)
+        self.last_choice[md5] = (self.last_choice.get(md5, rand_int) + 1) % 2
         return self.last_choice[md5]
 
 
