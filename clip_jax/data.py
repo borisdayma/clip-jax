@@ -40,7 +40,9 @@ class Dataset:
         assert self.format in ["rgb", "lab"], f"Invalid format: {self.format}"
 
         # define rng
+        self.deterministic = True
         if self.seed_dataset is None:
+            self.deterministic = False
             self.seed_dataset = np.random.randint(0, 2**32 - 1)
         self.rng = tf.random.Generator.from_seed(self.seed_dataset, alg="philox")
         np.random.seed(self.seed_dataset)
@@ -225,7 +227,7 @@ class Dataset:
                 # non deterministic read (faster)
                 if augment:
                     ignore_order = tf.data.Options()
-                    ignore_order.deterministic = self.seed_dataset is not None
+                    ignore_order.deterministic = self.deterministic
                     ds = ds.with_options(ignore_order)
 
                     if self.multi_hosts:
