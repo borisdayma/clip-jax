@@ -44,7 +44,7 @@ class Dataset:
         if self.seed_dataset is None:
             self.deterministic = False
             self.seed_dataset = np.random.randint(0, 2**32 - 1)
-        self.rng = tf.random.Generator.from_seed(self.seed_dataset, alg="philox")
+        self.rng = tf.random.Generator.from_seed(self.seed_dataset)
         np.random.seed(self.seed_dataset)
         tf.random.set_seed(self.seed_dataset)
 
