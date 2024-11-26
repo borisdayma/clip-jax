@@ -20,7 +20,7 @@ if __name__ == "__main__":
 
     params = {
         "dense1": jnp.ones((16, 128, 256, 50)),
-        "dense2": jnp.ones((4, 64, 50000, 64)),
+        "dense2": jnp.ones((4, 64, 1024, 64)),
         "bias": jnp.zeros(4),
     }
 
@@ -55,7 +55,7 @@ if __name__ == "__main__":
         weight_decay_mask=None,
         normalize_grads=True,
         preconditioner_update_probability=1.0,
-        max_size_triangular=8192,
+        max_size_triangular=1000,
         min_ndim_triangular=2,
         memory_save_mode=None,
         mu_dtype=None,

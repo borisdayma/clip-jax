@@ -252,7 +252,7 @@ def scale_by_kron(
         output = jax.tree.map(
             lambda _, ps, dd, sh: list(
                 _init_Q_exprs(
-                    ps,
+                    ps[1:] if partition_grads_into_blocks else ps,
                     preconditioner_init_scale,
                     dd,
                     precond_dtype,
@@ -333,7 +333,6 @@ def scale_by_kron(
                         f"PSGD Momentum size: {mu_n_elements} elements, {mu_size_MB:.2f} MB"
                     )
 
-        # initial state
         if return_partition_specs_only:
             return dict(
                 count=PartitionSpec(),
