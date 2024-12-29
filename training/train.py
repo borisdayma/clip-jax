@@ -416,6 +416,14 @@ class ModelArguments:
         default=None,
         metadata={"help": ("Number of labels for image classification.")},
     )
+    position_embedding_factorized: Optional[bool] = field(
+        default=None,
+        metadata={"help": ("Whether to use factorized position embeddings.")},
+    )
+    position_embedding_shape: Optional[str] = field(
+        default=None,
+        metadata={"help": ("The shape of the position embeddings.")},
+    )
     config_metadata: Dict = field(init=False)
 
     def __post_init__(self):
@@ -437,6 +445,8 @@ class ModelArguments:
                 self.model_name_or_path = self.config_metadata["output_dir"]
         if self.restore_state is True:
             assert self.config_metadata is not None, "Cannot restore state without config restored from W&B."
+        if self.position_embedding_shape is not None:
+            self.position_embedding_shape = tuple(int(i) for i in self.position_embedding_shape.split("x"))
 
 
 @dataclass
@@ -752,6 +762,10 @@ def main():
     clipConfig["vision_config"]["float32_logits"] = model_args.float32_logits
     if not is_classification:
         clipConfig["text_config"]["remat_policy"] = training_args.remat_policy
+    if model_args.position_embedding_factorized is not None:
+        clipConfig["vision_config"]["position_embedding_factorized"] = training_args.position_embedding_factorized
+    if model_args.position_embedding_shape is not None:
+        clipConfig["vision_config"]["position_embedding_shape"] = training_args.position_embedding_shape
 
     # prediction length
     max_target_length = (
