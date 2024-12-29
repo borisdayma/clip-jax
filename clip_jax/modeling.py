@@ -32,9 +32,9 @@ from flax.linen.partitioning import ScanIn
 from jax.ad_checkpoint import checkpoint_name
 from transformers import FlaxGenerationMixin, GenerationConfig
 
-from .maxtext.layers.models import Transformer
 from .maxtext import common_types
 from .maxtext.inference_utils import sampling
+from .maxtext.layers.models import Transformer
 
 remat = nn_partitioning.remat
 
@@ -272,19 +272,19 @@ class CLIPVisionEmbeddings(nn.Module):
                 )
                 if position_height != height:
                     # interpolate
-                    position_embeds_height = jax.image.resize(position_embeds, (height,), method="linear")
+                    position_embeds_height = jax.image.resize(position_embeds_height, (height,), method="linear")
                     position_embeds_height = nn.with_logical_constraint(
                         position_embeds_height, ("batch", "height", "embed")
                     )
                 if position_width != width:
                     # interpolate
-                    position_embeds_width = jax.image.resize(position_embeds, (width,), method="linear")
+                    position_embeds_width = jax.image.resize(position_embeds_width, (width,), method="linear")
                     position_embeds_width = nn.with_logical_constraint(
                         position_embeds_width, ("batch", "width", "embed")
                     )
                 # make it 2d
-                position_embeds_height = position_embeds[:, :, None, :]
-                position_embeds_width = position_embeds[:, None, :, :]
+                position_embeds_height = position_embeds_height[:, :, None, :]
+                position_embeds_width = position_embeds_width[:, None, :, :]
                 position_embeds = position_embeds_height + position_embeds_width
                 assert position_embeds.shape == (
                     batch_size,
@@ -1304,6 +1304,54 @@ class CLIPVisionTransformer(nn.Module):
             pooled_output=pooled_output,
             # TODO: add hidden states (for down-stream tasks)
         )
+
+
+class CLIPVisionModelForFineTuning(nn.Module):
+    vision_config: Any
+    dtype: str = "float32"
+    maxtext_mesh: Any = None
+    maxtext_args: Any = None
+
+    def __post_init__(self):
+        # add default fields vision_config
+        assert self.maxtext_mesh is None, "maxtext_mesh should not be set for classification"
+        assert self.maxtext_args is None, "maxtext_args should not be set for classification"
+        default_fields = dataclasses.fields(CLIPVisionTransformer)
+        default_fields = {f.name: f.default for f in default_fields if f.default is not dataclasses.MISSING}
+        default_fields = {k: v for k, v in default_fields.items() if k not in ["parent", "name"]}
+        vision_config = {**default_fields, **self.vision_config}
+        if self.dtype is not None:
+            vision_config["dtype"] = self.dtype
+        self.vision_config = vision_config
+        return super().__post_init__()
+
+    @nn.compact
+    def __call__(
+        self,
+        pixel_values=None,
+        deterministic: bool = True,
+    ):
+        outputs = CLIPVisionTransformer(
+            **self.vision_config,
+            name="vision",
+        )(
+            pixel_values=pixel_values,
+            deterministic=deterministic,
+        )
+        return outputs
+
+    def init_inputs(config, rng: jax.random.PRNGKey):
+        vision_config = config.vision_config
+        if isinstance(vision_config, dict):
+            vision_config = SimpleNamespace(**vision_config)
+        pixel_values = jnp.ones((1, vision_config.image_size, vision_config.image_size, 3), dtype="f4")
+        params_rng, dropout_rng = jax.random.split(rng)
+        rngs = {"params": params_rng, "dropout": dropout_rng}
+        return {"rngs": rngs, "pixel_values": pixel_values}
+
+    def init_weights(self, rng: jax.random.PRNGKey):
+        inputs = self.init_inputs(rng)
+        return self.init(**inputs)
 
 
 class CLIPVisionModelForImageClassification(nn.Module):
