@@ -19,6 +19,7 @@ import jaxlib
 import numpy as np
 import optax
 import orbax.checkpoint
+from kron import precond_update_prob_schedule, scale_by_kron, get_opt_state_partition_specs
 import tensorflow as tf
 import tensorflow_io as tfio
 import transformers
@@ -120,7 +121,9 @@ class TrainingArguments:
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate."})
     optim: str = field(
         default="distributed_shampoo",
-        metadata={"help": ('The optimizer to use. Can be "distributed_shampoo" (default), "adam" or "adafactor"')},
+        metadata={
+            "help": ('The optimizer to use. Can be "distributed_shampoo" (default), "adam", "adafactor" or "kron"')
+        },
     )
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay applied to parameters."})
     beta1: float = field(
@@ -178,6 +181,26 @@ class TrainingArguments:
         metadata={
             "help": ("Whether to shard the optimizer across data devices (data), model devices (model) or both (2d).")
         },
+    )
+    kron_mem_save_mode: Optional[str] = field(
+        default=None,
+        metadata={"help": "Kron memory save mode, can be None, 'one_diag', or 'all_diag'."},
+    )
+    kron_merge_small_dims: bool = field(
+        default=False,
+        metadata={"help": "Merge small dimensions for Kron."},
+    )
+    kron_normalize_grads: bool = field(
+        default=False,
+        metadata={"help": "Normalize grads for Kron."},
+    )
+    kron_partition_grads_into_blocks: bool = field(
+        default=False,
+        metadata={"help": "Partition grads into blocks for Kron."},
+    )
+    lax_map_batch_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "Batch size for lax.map."},
     )
     activation_partitioning_dims: int = field(
         default=1,
@@ -321,6 +344,7 @@ class TrainingArguments:
             "distributed_shampoo",
             "adam",
             "adafactor",
+            "kron",
         ], f"Unknown optimizer {self.optim}"
         if self.optim == "adafactor" and self.weight_decay == 0:
             self.weight_decay = None
@@ -558,6 +582,18 @@ def unsplit_scanned_params(data):
     for k in data.keys():
         flat.update(flatten_dict(data[k]))
     return unflatten_dict(flat)
+
+
+def scanned_params_bool(data):
+    """Get pytree of booleans indicating scanned layers"""
+    flat = flatten_dict(data)
+    scanned = {}
+    for k, v in flat.items():
+        if "layers" in k:
+            scanned[k] = True
+        else:
+            scanned[k] = False
+    return unflatten_dict(scanned)
 
 
 def trainable_params(data, training_args):
@@ -1147,6 +1183,37 @@ def main():
                 update_fn_vision if any(name in k for name in ["vision", "scanned_vision"]) else update_fn_text,
             )
 
+    elif training_args.optim == "kron":
+        # psgd kron handles scanned layers internally so we pass in a tree of booleans
+        # indicating which layers to scan
+        scanned_layers_arg = scanned_params_bool(trainable_params(logical_params, training_args))
+        kron_min_prob = 1 / training_args.preconditioning_compute_steps
+        kron_max_prob = kron_min_prob if training_args.do_test_steps else 1.0
+        kron_kwargs = dict(
+            b1=training_args.beta1,
+            preconditioner_update_probability=precond_update_prob_schedule(
+                min_prob=kron_min_prob, max_prob=kron_max_prob
+            ),
+            max_size_triangular=training_args.skip_preconditioning_dim_size_gt,
+            memory_save_mode=training_args.kron_mem_save_mode,
+            merge_small_dims=training_args.kron_merge_small_dims,
+            scanned_layers=scanned_layers_arg,
+            block_size=training_args.block_size_text,
+            partition_grads_into_blocks=training_args.kron_partition_grads_into_blocks,
+            lax_map_scanned_layers=True if training_args.lax_map_batch_size is not None else False,
+            lax_map_batch_size=training_args.lax_map_batch_size if training_args.lax_map_batch_size is not None else 8,
+            normalize_grads=training_args.kron_normalize_grads,
+            params_sharding=trainable_params(params_spec),
+            preconditioner_sharding=PartitionSpec(None, None),
+        )
+        _opt = [
+            scale_by_kron(**kron_kwargs),
+        ]
+        if training_args.weight_decay > 0:
+            _opt.append(optax.add_decayed_weights(training_args.weight_decay))
+        _opt.append(optax.scale_by_learning_rate(learning_rate_fn))
+        optimizer = optax.chain(*_opt)
+
     elif training_args.optim == "adam":
         _opt = partial(
             optax.adamw,
@@ -1173,6 +1240,10 @@ def main():
 
     # get PartitionSpecof optimizer state
     def get_opt_state_spec():
+        if training_args.optim == "kron":
+            return get_opt_state_partition_specs(
+                trainable_params(logical_params, training_args), weight_decay=training_args.weight_decay, **kron_kwargs
+            )
         # get opt_state shape without actual init
         opt_state_shape = {}
         for k, p in split_scanned_params(trainable_params(logical_params, training_args)).items():
@@ -1267,6 +1338,8 @@ def main():
 
     @partial(pjit, in_shardings=(params_spec,), out_shardings=opt_state_spec)
     def init_opt_state(params):
+        if training_args.optim == "kron":
+            return optimizer.init(trainable_params(params, training_args))
         opt_state = {}
         for k, p in split_scanned_params(trainable_params(params, training_args)).items():
             init_fn = optimizer[k].init
@@ -1542,6 +1615,14 @@ def main():
             opt_state_step = new_opt_state["text"][0] if "text" in new_opt_state else new_opt_state["vision"][0]
         elif training_args.optim in ["adam", "adafactor"]:
             opt_state_step = new_opt_state["text"][2].count
+        elif training_args.optim == "kron":
+            psgd_idx = 0
+            for part in new_opt_state:
+                if isinstance(part, dict):  # kron state is a dict
+                    if "Qs_preconditioners" in part:
+                        break
+                psgd_idx += 1
+            return new_opt_state[psgd_idx]["count"]
         else:
             raise NotImplementedError
 
