@@ -1261,6 +1261,9 @@ def main():
         )
         _opt = [
             scale_by_kron(**kron_kwargs),
+            # Instead of normalizing incoming grads since this gets rid of useful information, clip outgoing
+            # update by RMS. PSGD output is usually 1.0, if surprisingly large grad comes through, this will catch it
+            optax.clip_by_block_rms(1.1),
         ]
         if training_args.weight_decay > 0:
             _opt.append(optax.add_decayed_weights(training_args.weight_decay))
