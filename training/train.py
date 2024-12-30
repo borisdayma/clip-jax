@@ -799,9 +799,9 @@ def main():
     if not is_classification:
         clipConfig["text_config"]["remat_policy"] = training_args.remat_policy
     if model_args.position_embedding_factorized is not None:
-        clipConfig["vision_config"]["position_embedding_factorized"] = training_args.position_embedding_factorized
+        clipConfig["vision_config"]["position_embedding_factorized"] = model_args.position_embedding_factorized
     if model_args.position_embedding_shape is not None:
-        clipConfig["vision_config"]["position_embedding_shape"] = training_args.position_embedding_shape
+        clipConfig["vision_config"]["position_embedding_shape"] = model_args.position_embedding_shape
 
     try:
         del clipConfig["vision_config"]["gradient_checkpointing"]

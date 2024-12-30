@@ -272,13 +272,17 @@ class CLIPVisionEmbeddings(nn.Module):
                 )
                 if position_height != height:
                     # interpolate
-                    position_embeds_height = jax.image.resize(position_embeds_height, (height,), method="linear")
+                    position_embeds_height = jax.image.resize(
+                        position_embeds_height, (1, height, self.hidden_size), method="linear"
+                    )
                     position_embeds_height = nn.with_logical_constraint(
                         position_embeds_height, ("batch", "height", "embed")
                     )
                 if position_width != width:
                     # interpolate
-                    position_embeds_width = jax.image.resize(position_embeds_width, (width,), method="linear")
+                    position_embeds_width = jax.image.resize(
+                        position_embeds_width, (1, width, self.hidden_size), method="linear"
+                    )
                     position_embeds_width = nn.with_logical_constraint(
                         position_embeds_width, ("batch", "width", "embed")
                     )
@@ -286,12 +290,16 @@ class CLIPVisionEmbeddings(nn.Module):
                 position_embeds_height = position_embeds_height[:, :, None, :]
                 position_embeds_width = position_embeds_width[:, None, :, :]
                 position_embeds = position_embeds_height + position_embeds_width
-                assert position_embeds.shape == (
-                    batch_size,
-                    height,
-                    width,
-                    self.hidden_size,
-                )
+                assert (
+                    position_embeds.shape
+                    == (
+                        1,
+                        height,
+                        width,
+                        self.hidden_size,
+                    )
+                ), f"Position embeds shape: {position_embeds.shape}, expected: (1, {height}, {width}, {self.hidden_size})"
+                position_embeds = jnp.reshape(position_embeds, (1, num_patches, self.hidden_size))
             else:
                 position_embeds = self.param(
                     "position_embeds",
