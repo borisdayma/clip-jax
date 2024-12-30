@@ -646,12 +646,11 @@ class State:
     time_per_eval: float = 0.0
     time_per_save: float = 0.0
     time_per_predict: float = 0.0
-    ds_idx_counter: dict[int, int] = field(init=False)
+    ds_idx_counter: dict[int, int] = field(default_factory=dict)
     timestamp: float = field(init=False)
     offset_time: float = field(init=False)  # used to substract eval and save times
 
     def __post_init__(self):
-        self.ds_idx_counter = {}
         self.timestamp = time.perf_counter()
         self.offset_time = 0.0
 
@@ -665,6 +664,7 @@ class State:
             init_state = {}
         if not restore_state:
             init_state["opt_state_step"] = 0
+        init_state["ds_idx_counter"] = {}
         return cls(**init_state)
 
     def update(self, **kwargs):
@@ -1807,7 +1807,7 @@ def main():
     def run_evaluation(params, mesh):
         start_eval_time = time.perf_counter()
         metrics = []
-        for batch in tqdm(
+        for batch, ds_idx, ds_name in tqdm(
             dataset.valid,
             desc="Evaluating...",
             position=2,
@@ -1876,7 +1876,7 @@ def main():
         max_batch = n_predict_batch // jax.process_count()
         max_batch = max(max_batch, num_local_devices)
 
-        for batch, ds_idx in tqdm(
+        for batch, ds_idx, ds_name in tqdm(
             dataset.valid,
             desc="Predicting...",
             position=2,
@@ -2031,9 +2031,9 @@ def main():
                 batch_iterator = dataset.train
             else:
                 # we don't want tensorflow loading in the profile
-                sample, ds_idx = next(iter(dataset.train))
-                batch_iterator = itertools.repeat((sample, ds_idx))
-            for batch, ds_idx in tqdm(
+                sample, ds_idx, ds_name = next(iter(dataset.train))
+                batch_iterator = itertools.repeat((sample, ds_idx, ds_name))
+            for batch, ds_idx, ds_name in tqdm(
                 batch_iterator,
                 desc="Training...",
                 position=1,
@@ -2051,8 +2051,7 @@ def main():
                 )
 
                 # reshape batch
-                if data_global_shape is None:
-                    data_global_shape = jax.tree.map(_get_global_shape, batch)
+                data_global_shape = jax.tree.map(_get_global_shape, batch)
 
                 # split per device
                 batch = jax.tree.map(lambda x: np.split(x, num_local_devices, axis=0), batch)
@@ -2099,7 +2098,7 @@ def main():
                     has_compiled = True
                     step += 1
                     samples += training_args.batch_size_per_step[ds_idx]
-                    ds_idx_counter[ds_idx] += 1
+                    ds_idx_counter[ds_name] += 1
 
                 # log metrics
                 if step % training_args.logging_steps == 0:

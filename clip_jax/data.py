@@ -6,6 +6,9 @@ import jax
 import numpy as np
 import tensorflow as tf
 import tensorflow_io as tfio
+from jaxfusion.text import TextNormalizer
+
+tn = TextNormalizer()
 
 
 class DatasetWrapper:
@@ -28,6 +31,7 @@ class DatasetWrapper:
             self.datasets = [
                 Dataset(
                     ds_idx=0,
+                    ds_name="default",
                     prefetch_buffer_size=prefetch_buffer_size,
                     **kwargs,
                 )
@@ -78,7 +82,11 @@ class DatasetWrapper:
                 batch_size_per_node_per_step = batch_size_per_node * gradient_accumulation_steps
                 if batch_size_per_node_per_step == 0:
                     print(f"Skipping {ds_name} due to batch size per node per step being 0")
-                    continue
+                    train_folder = None
+                    valid_folder = None
+                    count_ds = 0
+                else:
+                    count_ds = ds_config["n"] / batch_size_per_node_per_step
                 batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
                 train_batch_size = batch_size_per_node_per_step
                 valid_batch_size = batch_size_per_node
@@ -87,6 +95,7 @@ class DatasetWrapper:
                 dataset_kwargs = {
                     **kwargs,
                     "ds_idx": i,
+                    "ds_name": ds_name,
                     "prefetch_buffer_size": prefetch_buffer_size,
                     "train_folder": train_folder,
                     "valid_folder": valid_folder,
@@ -99,7 +108,7 @@ class DatasetWrapper:
                 self.valid_batch_size.append(valid_batch_size)
                 self.batch_size_per_step.append(batch_size_per_step)
                 self.batch_size_per_node.append(batch_size_per_node)
-                counts.append(ds_config["n"] / batch_size_per_node_per_step)
+                counts.append(count_ds)
             # calculate weights from counts
             weights = np.asarray(counts, dtype=np.float32)
             weights = weights / weights.sum()
@@ -127,17 +136,23 @@ class DatasetWrapper:
             ds = self.datasets[0]._train
             ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
         else:
-            dataset_iterators = [dataset._train for dataset in self.datasets]
-            if self.n_batch > 1:
-                dataset_iterators = [ds.batch(self.n_batch) for ds in dataset_iterators]
-            weights = self.weights
+            dataset_iterators = []
+            weights = []
+            for dataset, weight in zip(self.datasets, self.weights):
+                if weight > 0:
+                    ds_train = dataset._train
+                    if self.n_batch > 1:
+                        ds_train = ds_train.batch(self.n_batch)
+                    dataset_iterators.append(ds_train)
+                    weights.append(weight)
             ds = tf.data.Dataset.sample_from_datasets(dataset_iterators, weights=weights, seed=0)
             ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
             if self.n_batch > 1:
                 ds = ds.unbatch()
         for item in ds.as_numpy_iterator():
             ds_idx = item.pop("ds_idx")
-            yield item, ds_idx
+            ds_name = item.pop("ds_name").decode("utf-8")
+            yield item, ds_idx, ds_name
 
     @property
     def valid(self):
@@ -145,7 +160,8 @@ class DatasetWrapper:
             try:
                 for item in dataset.valid:
                     ds_idx = item.pop("ds_idx")
-                    yield item, ds_idx
+                    ds_name = item.pop("ds_name").decode("utf-8")
+                    yield item, ds_idx, ds_name
             except:
                 # no valid set
                 pass
@@ -154,6 +170,7 @@ class DatasetWrapper:
 @dataclass
 class Dataset:
     ds_idx: int = 0
+    ds_name: str = "default"
     prefetch_buffer_size: int = None
     train_folder: str = None
     valid_folder: str = None
@@ -337,6 +354,7 @@ class Dataset:
             if class_id is not None:
                 res["class_id"] = class_id
             res["ds_idx"] = self.ds_idx
+            res["ds_name"] = self.ds_name
             return res
 
         for folder, dataset, augment, batch_size in zip(
@@ -481,7 +499,8 @@ def preprocess_batch(
         batch["pixel_values"] = batch.pop("images")
         return batch
     # preprocess batch
-    captions = [" ".join(caption.decode("utf-8").strip().split()) for caption in batch["captions"]]
+    # captions = [" ".join(caption.decode("utf-8").strip().split()) for caption in batch["captions"]]
+    captions = [tn(caption.decode("utf-8").strip()) for caption in batch["captions"]]
     captions_assistant = batch.get("captions_assistant", None)
     if captions_assistant is not None:
         captions_2 = batch.get("captions_2", None)
