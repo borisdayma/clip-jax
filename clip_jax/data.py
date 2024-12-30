@@ -59,6 +59,7 @@ class DatasetWrapper:
                 gradient_accumulation_steps_splits = None
                 print("Using batch size per split file")
 
+            ds_idx = 0
             for i, (ds_name, ds_config) in enumerate(ds_configs.items()):
 
                 def _folder_from_files(files, is_train):
@@ -82,11 +83,8 @@ class DatasetWrapper:
                 batch_size_per_node_per_step = batch_size_per_node * gradient_accumulation_steps
                 if batch_size_per_node_per_step == 0:
                     print(f"Skipping {ds_name} due to batch size per node per step being 0")
-                    train_folder = None
-                    valid_folder = None
-                    count_ds = 0
-                else:
-                    count_ds = ds_config["n"] / batch_size_per_node_per_step
+                    continue
+                count_ds = ds_config["n"] / batch_size_per_node_per_step
                 batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
                 train_batch_size = batch_size_per_node_per_step
                 valid_batch_size = batch_size_per_node
@@ -94,7 +92,7 @@ class DatasetWrapper:
                     valid_batch_size = int(valid_batch_size_per_node_splits)
                 dataset_kwargs = {
                     **kwargs,
-                    "ds_idx": i,
+                    "ds_idx": ds_idx,
                     "ds_name": ds_name,
                     "prefetch_buffer_size": prefetch_buffer_size,
                     "train_folder": train_folder,
@@ -102,6 +100,7 @@ class DatasetWrapper:
                     "train_batch_size": train_batch_size,
                     "valid_batch_size": valid_batch_size,
                 }
+                ds_idx += 1
                 self.datasets.append(Dataset(**dataset_kwargs))
                 self.gradient_accumulation_steps.append(gradient_accumulation_steps)
                 self.train_batch_size.append(train_batch_size)
@@ -136,15 +135,10 @@ class DatasetWrapper:
             ds = self.datasets[0]._train
             ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
         else:
-            dataset_iterators = []
-            weights = []
-            for dataset, weight in zip(self.datasets, self.weights):
-                if weight > 0:
-                    ds_train = dataset._train
-                    if self.n_batch > 1:
-                        ds_train = ds_train.batch(self.n_batch)
-                    dataset_iterators.append(ds_train)
-                    weights.append(weight)
+            dataset_iterators = [dataset._train for dataset in self.datasets]
+            if self.n_batch > 1:
+                dataset_iterators = [ds.batch(self.n_batch) for ds in dataset_iterators]
+            weights = self.weights
             ds = tf.data.Dataset.sample_from_datasets(dataset_iterators, weights=weights, seed=0)
             ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
             if self.n_batch > 1:
