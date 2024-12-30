@@ -50,7 +50,7 @@ class DatasetWrapper:
             assert ds_splits.endswith(".pkl")
             with open(ds_splits, "rb") as f:
                 ds_configs = pickle.load(f)
-                ds_configs = sorted(ds_configs.items(), key=lambda x: x[0])
+                # ds_configs = sorted(ds_configs.items(), key=lambda x: x[0])
 
             # overwrite bs and gradient accumulation
             batch_size_per_node_splits = str(batch_size_per_node_splits).split(",")
