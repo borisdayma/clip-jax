@@ -10,7 +10,7 @@ from jaxfusion.text import TextNormalizer
 
 tn = TextNormalizer()
 
-DEBUG = True
+DEBUG = False
 
 
 class DatasetWrapper:
