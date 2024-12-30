@@ -526,6 +526,10 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "The seed used to augment the dataset."},
     )
+    prefetch_buffer_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of batches to prefetch."},
+    )
     format: Optional[str] = field(default="rgb", metadata={"help": "The format of the images (rgb or lab)."})
     key_image: Optional[str] = field(default="webp", metadata={"help": "Name of the key containing the webp images."})
     key_class: Optional[str] = field(
