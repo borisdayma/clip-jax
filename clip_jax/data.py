@@ -147,7 +147,7 @@ class DatasetWrapper:
             weights = self.weights
             ds = tf.data.Dataset.sample_from_datasets(
                 dataset_iterators, weights=weights, seed=0, stop_on_empty_dataset=True
-            ).apply(tf.data.experimental.assert_cardinality(tf.data.UNKNOWN_CARDINALITY))
+            )
             # Add deterministic options
             options = tf.data.Options()
             options.deterministic = True
