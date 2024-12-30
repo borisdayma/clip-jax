@@ -153,6 +153,7 @@ class DatasetWrapper:
             ds_name = item.pop("ds_name").decode("utf-8")
             if DEBUG:
                 print(f"\n\n\nTensorflow version: {tf.__version__}, ds_name: {ds_name}, ds_idx: {ds_idx}\n\n\n")
+                exit()
             yield item, ds_idx, ds_name
 
     @property
