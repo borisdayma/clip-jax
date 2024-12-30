@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from functools import partial
 from platform import python_version
@@ -19,11 +20,11 @@ import jaxlib
 import numpy as np
 import optax
 import orbax.checkpoint
-from kron import precond_update_prob_schedule, scale_by_kron, get_opt_state_partition_specs
 import tensorflow as tf
 import tensorflow_io as tfio
 import transformers
 import wandb
+from einshape import jax_einshape as einshape
 from flax.core import FrozenDict
 from flax.training import orbax_utils
 from flax.traverse_util import flatten_dict, unflatten_dict
@@ -34,13 +35,14 @@ from jax.experimental.pjit import pjit
 from jax.experimental.shard_map import shard_map
 from jax.lax import with_sharding_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from kron import get_opt_state_partition_specs, precond_update_prob_schedule, scale_by_kron
 from PIL import Image
 from precondition_local.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
 from clip_jax import CLIPModel, CLIPVisionModelForImageClassification
-from clip_jax.data import Dataset, logits_to_image, preprocess_batch
+from clip_jax.data import DatasetWrapper, logits_to_image, preprocess_batch
 from clip_jax.partitions import logical_axis_rules
 from clip_jax.tokenizer import AutoTokenizer
 from clip_jax.utils import asdict, count_params, load_config
@@ -86,11 +88,11 @@ class TrainingArguments:
     predict_num_beams: Optional[int] = field(default=1, metadata={"help": "Num beams used during prediction."})
     predict_temperature: Optional[float] = field(default=1.0, metadata={"help": "Temperature used during prediction."})
 
-    batch_size_per_node: Optional[int] = field(default=64, metadata={"help": "Batch size for training."})
-    valid_batch_size_per_node: Optional[int] = field(default=None, metadata={"help": "Batch size for validation."})
+    batch_size_per_node: Optional[str] = field(default="64", metadata={"help": "Batch size for training."})
+    valid_batch_size_per_node: Optional[str] = field(default=None, metadata={"help": "Batch size for validation."})
 
-    gradient_accumulation_steps: int = field(
-        default=1,
+    gradient_accumulation_steps: str = field(
+        default="1",
         metadata={"help": ("Number of updates steps to accumulate before performing an update" " pass.")},
     )
     freeze_vision: bool = field(
@@ -376,11 +378,20 @@ class TrainingArguments:
         )
         self.dp_devices = jax.device_count() // self.mp_devices
         # batch sizes
-        batch_size_per_node_per_step = self.batch_size_per_node * self.gradient_accumulation_steps
-        self.batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
-        # define batch size for data loader
-        self.train_batch_size = batch_size_per_node_per_step
-        self.valid_batch_size = self.valid_batch_size_per_node or self.batch_size_per_node
+        try:
+            self.valid_batch_size = int(self.valid_batch_size_per_node or self.batch_size_per_node)
+            self.batch_size_per_node = int(self.batch_size_per_node)
+            self.gradient_accumulation_steps = int(self.gradient_accumulation_steps)
+            batch_size_per_node_per_step = self.batch_size_per_node * self.gradient_accumulation_steps
+            self.batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
+            # define batch size for data loader
+            self.train_batch_size = batch_size_per_node_per_step
+        except:
+            print("Batch size will be handled through splits file")
+            self.batch_size_per_step = 1
+            self.train_batch_size = 1
+            self.valid_batch_size = 1
+
         if self.ds_train_size_for_transition_steps is not None:
             self.lr_transition_steps = (
                 self.ds_train_size_for_transition_steps * self.num_train_epochs // self.batch_size_per_step
@@ -454,15 +465,7 @@ class ModelArguments:
         assert self.config_name is not None, "config_name is required and is not inferred from model_name_or_path"
         assert self.tokenizer_name is not None, "Tokenizer name is required."
         # get config metadata
-        if ":" in self.config_name and not os.path.isdir(self.config_name):
-            # wandb artifact
-            if wandb.run is not None:
-                artifact = wandb.run.use_artifact(self.config_name)
-            else:
-                artifact = wandb.Api().artifact(self.config_name)
-            self.config_metadata = artifact.metadata
-        else:
-            self.config_metadata = None
+        self.set_config_metadata()
         # get checkpoint path
         if self.model_name_or_path is None:
             if self.config_metadata is not None:
@@ -471,6 +474,18 @@ class ModelArguments:
             assert self.config_metadata is not None, "Cannot restore state without config restored from W&B."
         if self.position_embedding_shape is not None:
             self.position_embedding_shape = tuple(int(i) for i in self.position_embedding_shape.split("x"))
+
+    def set_config_metadata(self):
+        if ":" in self.config_name and not os.path.isdir(self.config_name):
+            # wandb artifact
+            if wandb.run is not None:
+                # NOTE: typically not called as wandb not init yet
+                artifact = wandb.run.use_artifact(self.config_name)
+            else:
+                artifact = wandb.Api().artifact(self.config_name)
+            self.config_metadata = artifact.metadata
+        else:
+            self.config_metadata = None
 
 
 @dataclass
@@ -486,6 +501,10 @@ class DataTrainingArguments:
     valid_folder: Optional[str] = field(
         default=None,
         metadata={"help": "Path to the root validation directory which contains tfrecords."},
+    )
+    ds_splits: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to the splits of datasets when more complex than training/validation sets."},
     )
     image_crop_size: Optional[int] = field(
         default=None,
@@ -532,6 +551,8 @@ class DataTrainingArguments:
     std: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The std of the dataset."})
 
     def __post_init__(self):
+        if self.ds_splits is not None:
+            assert self.train_folder is None and self.valid_folder is None
         # correctly use defaults
         if self.mean is None:
             self.mean = (0.5, 0.5, 0.5)
@@ -625,10 +646,12 @@ class State:
     time_per_eval: float = 0.0
     time_per_save: float = 0.0
     time_per_predict: float = 0.0
+    ds_idx_counter: dict[int, int] = field(init=False)
     timestamp: float = field(init=False)
     offset_time: float = field(init=False)  # used to substract eval and save times
 
     def __post_init__(self):
+        self.ds_idx_counter = {}
         self.timestamp = time.perf_counter()
         self.offset_time = 0.0
 
@@ -656,7 +679,10 @@ class State:
             self.time_per_train_step = delta_time / (kwargs["step"] - self.step)
         # update state
         for k, v in kwargs.items():
-            if isinstance(v, jnp.ndarray):
+            if k == "ds_idx_counter":
+                v = dict(sorted(v.items()))
+            elif isinstance(v, jnp.ndarray):
+                v = jax.device_get(v)
                 v = v.item()
             setattr(self, k, v)
 
@@ -697,7 +723,7 @@ class State:
 
             log_metrics = flatten_dict({"state": self.to_dict()}, sep="/")
             for k, v in metrics.items():
-                if "_norm" in k:
+                if "gradients_norm" in k:
                     log_metrics[f"{k}/"] = v
                 elif "_hist" in k:
                     v = jax.tree_util.tree_map(
@@ -757,11 +783,28 @@ def main():
     logger.info(f"Global TPUs/GPUs: {jax.device_count()}")
 
     # Initialize datasets and pre-processing transforms
-    dataset = Dataset(
+    dataset = DatasetWrapper(
         train_batch_size=training_args.train_batch_size,
         valid_batch_size=training_args.valid_batch_size,
+        batch_size_per_node_splits=training_args.batch_size_per_node,
+        valid_batch_size_per_node_splits=training_args.valid_batch_size_per_node,
+        gradient_accumulation_steps_splits=training_args.gradient_accumulation_steps,
         **asdict(data_args),
     )
+    ds_train_config = dataset.training_config
+    if ds_train_config is not None:
+        for k, v in ds_train_config.items():
+            setattr(training_args, k, v)
+    else:
+        # use an array format for convenience
+        for k in [
+            "gradient_accumulation_steps",
+            "train_batch_size",
+            "valid_batch_size",
+            "batch_size_per_step",
+            "batch_size_per_node",
+        ]:
+            setattr(training_args, k, [getattr(training_args, k)])
 
     # Set up wandb run
     if jax.process_index() == 0:
@@ -771,6 +814,8 @@ def main():
             job_type=training_args.wandb_job_type,
             config=flat_args(model_args, data_args, training_args),
         )
+        # show artifact lineage
+        model_args.set_config_metadata()
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, padding_side="right")
@@ -909,11 +954,13 @@ def main():
         else count_params(logical_params["text" if "text" in logical_params else "text_model"]),
         "Vision": count_params(logical_params["vision"]),
     }
+    num_hosts = jax.process_count()
 
     # Log some info
     logger.info(f"Num epochs: {training_args.num_train_epochs}")
     logger.info(f"Batch size per node = {training_args.batch_size_per_node}")
     logger.info(f"Number of devices = {jax.device_count()}")
+    logger.info(f"Number of nodes = {num_hosts}")
     logger.info(f"Gradient accumulation steps = {training_args.gradient_accumulation_steps}")
     logger.info(f"Batch size per update = {training_args.batch_size_per_step}")
     logger.info(
@@ -932,6 +979,7 @@ def main():
                 "num_params": num_params,
                 "model_config": clipConfig,
                 "num_devices": jax.device_count(),
+                "num_hosts": num_hosts,
                 "versions": {
                     "python": python_version(),
                     "jax": jax.__version__,
@@ -963,7 +1011,6 @@ def main():
 
     # Data sharding parameters
     num_local_devices = jax.local_device_count()
-    num_hosts = jax.process_count()
     data_global_spec = PartitionSpec(("data", "model"))
     data_global_sharding = NamedSharding(mesh, data_global_spec)
     data_mesh_spec = PartitionSpec("data")
@@ -1539,18 +1586,18 @@ def main():
             return loss
 
     # Define gradient update step fn
-    def train_step(rng, params, opt_state, batch, step):
+    @partial(
+        pjit,
+        in_shardings=(None, params_spec, opt_state_spec, data_spec),
+        out_shardings=(None, params_spec, opt_state_spec, None),
+        donate_argnames=("params", "opt_state", "batch"),
+        static_argnames=("gradient_accumulation_steps",),
+    )
+    def train_step(rng, params, opt_state, batch, gradient_accumulation_steps):
         # get a minibatch (one gradient accumulation slice)
         def get_minibatch(batch, grad_idx):
-            def _check_shape(x):
-                assert (
-                    x.shape[0] == training_args.batch_size_per_step
-                ), f"{x.shape[0]} != {training_args.batch_size_per_step}"
-
-            jax.tree.map(_check_shape, batch)
-            offset = grad_idx * training_args.batch_size_per_node
-            length = training_args.batch_size_per_node
-            return jax.tree_util.tree_map(lambda x: jax.lax.dynamic_slice_in_dim(x, offset, length), batch)
+            batch = jax.tree.map(lambda x: einshape("(bg)...->gb...", x, g=gradient_accumulation_steps), batch)
+            return jax.tree.map(lambda x: x[grad_idx], batch)
 
         train_compute_loss = partial(compute_loss, train=True)
         grad_fn = jax.value_and_grad(train_compute_loss)
@@ -1569,7 +1616,7 @@ def main():
             # return loss and grads
             return loss, grads, dropout_rng
 
-        if training_args.gradient_accumulation_steps == 1:
+        if gradient_accumulation_steps == 1:
             loss, grads, rng = loss_and_grad(None, rng)
         else:
             # create initial state for cumul_minibatch_step loop
@@ -1605,14 +1652,14 @@ def main():
             # loop over gradients
             loss, grads, rng = jax.lax.fori_loop(
                 0,
-                training_args.gradient_accumulation_steps,
+                gradient_accumulation_steps,
                 cumul_minibatch_step,
                 init_state,
             )
             grads = with_sharding_constraint(grads, params_spec)
             # sum -> mean
             loss, grads = jax.tree_util.tree_map(
-                lambda x: x / training_args.gradient_accumulation_steps,
+                lambda x: x / gradient_accumulation_steps,
                 (loss, grads),
             )
 
@@ -1638,14 +1685,16 @@ def main():
         else:
             raise NotImplementedError
 
+        # get global norm
+        gradients_norm = jnp.sqrt(
+            jnp.sum(jnp.asarray([jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grads)]))
+        )
         # get metrics
         metrics = {
             "train/loss": loss,
             "train/learning_rate": learning_rate_fn(opt_state_step),
+            "train/grads_norm": gradients_norm,
         }
-
-        # increment step
-        step += 1
 
         # extract norms and histograms
 
@@ -1692,6 +1741,11 @@ def main():
         return metrics, new_params, new_opt_state, opt_state_step
 
     # Evaluation step
+    @partial(
+        pjit,
+        in_shardings=(params_spec, data_spec),
+        out_shardings=None,
+    )
     def eval_step(params, batch):
         def compute_eval_loss(batch):
             if is_classification:
@@ -1744,17 +1798,6 @@ def main():
         return outputs
 
     # Create parallel version of the train and eval step
-    p_train_step = pjit(
-        train_step,
-        in_shardings=(None, params_spec, opt_state_spec, data_spec, None),
-        out_shardings=(None, params_spec, opt_state_spec, None),
-        donate_argnums=(1, 2),
-    )
-    p_eval_step = pjit(
-        eval_step,
-        in_shardings=(params_spec, data_spec),
-        out_shardings=None,
-    )
     p_predict_step = pjit(
         predict_step,
         in_shardings=(params_spec, data_spec),
@@ -1801,7 +1844,7 @@ def main():
 
             # accumulate losses async
             with mesh:
-                metrics_batch = p_eval_step(params, batch)
+                metrics_batch = eval_step(params, batch)
             metrics_batch = jax.device_get(metrics_batch)
             metrics.append(metrics_batch)
 
@@ -1833,7 +1876,7 @@ def main():
         max_batch = n_predict_batch // jax.process_count()
         max_batch = max(max_batch, num_local_devices)
 
-        for batch in tqdm(
+        for batch, ds_idx in tqdm(
             dataset.valid,
             desc="Predicting...",
             position=2,
@@ -1911,7 +1954,6 @@ def main():
     def run_save_model(params, opt_state):
         def _save_checkpoint(ckpt, dir, step):
             orbax_options = orbax.checkpoint.CheckpointManagerOptions(
-                create=True,
                 max_to_keep=training_args.checkpoints_to_keep,
                 enable_async_checkpointing=False,
             )
@@ -1967,6 +2009,7 @@ def main():
     opt_state_step = 0  # ensure it is defined in evaluation mode
     step_start = step  # define it for test mode
     metrics = {}  # ensure it is defined in evaluation mode
+    ds_idx_counter = Counter()
     epochs = tqdm(
         range(training_args.num_train_epochs),
         desc=f"Epoch ... (1/{training_args.num_train_epochs})",
@@ -1988,9 +2031,9 @@ def main():
                 batch_iterator = dataset.train
             else:
                 # we don't want tensorflow loading in the profile
-                sample = next(iter(dataset.train))
-                batch_iterator = itertools.repeat(sample)
-            for batch in tqdm(
+                sample, ds_idx = next(iter(dataset.train))
+                batch_iterator = itertools.repeat((sample, ds_idx))
+            for batch, ds_idx in tqdm(
                 batch_iterator,
                 desc="Training...",
                 position=1,
@@ -2046,8 +2089,8 @@ def main():
                 step_rng, rng = jax.random.split(rng)
                 with jax.profiler.StepTraceAnnotation("train", step_num=step):
                     with mesh:
-                        metrics, params, opt_state, opt_state_step = p_train_step(
-                            step_rng, params, opt_state, batch, step
+                        metrics, params, opt_state, opt_state_step = train_step(
+                            step_rng, params, opt_state, batch, training_args.gradient_accumulation_steps[ds_idx]
                         )
                     if not has_compiled:
                         time_compiled = time.perf_counter() - start_time
@@ -2055,12 +2098,16 @@ def main():
                         wandb.log({"state/time_to_compile": time_compiled})
                     has_compiled = True
                     step += 1
-                    samples += training_args.batch_size_per_step
+                    samples += training_args.batch_size_per_step[ds_idx]
+                    ds_idx_counter[ds_idx] += 1
 
                 # log metrics
                 if step % training_args.logging_steps == 0:
-                    state.update(step=step, samples=samples, opt_state_step=opt_state_step)
+                    state.update(
+                        step=step, samples=samples, opt_state_step=opt_state_step, ds_idx_counter=ds_idx_counter
+                    )
                     if jax.process_index() == 0:
+                        metrics[f"train/loss_{ds_idx}"] = metrics["train/loss"]
                         state.log(metrics)
                     metrics_logged = True
                     stop_training = should_stop_training(metrics)
