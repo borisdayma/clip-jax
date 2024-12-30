@@ -849,7 +849,7 @@ def get_opt_state_partition_specs(params: base.Params, scale_by_kron_only: bool 
         specs = (specs,)
         if kwargs.get("weight_decay", 0.0) > 0.0:
             specs += (None,)
-        specs += (None,)
+        specs += (None, None)
 
     return specs
 
