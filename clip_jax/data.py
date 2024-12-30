@@ -50,7 +50,7 @@ class DatasetWrapper:
             assert ds_splits.endswith(".pkl")
             with open(ds_splits, "rb") as f:
                 ds_configs = pickle.load(f)
-                # ds_configs = sorted(ds_configs.items(), key=lambda x: x[0])
+                ds_configs = dict(sorted(ds_configs.items(), key=lambda x: x[0]))
 
             # overwrite bs and gradient accumulation
             batch_size_per_node_splits = str(batch_size_per_node_splits).split(",")
@@ -140,7 +140,7 @@ class DatasetWrapper:
         else:
             dataset_iterators = [dataset._train for dataset in self.datasets]
             if DEBUG:
-                print(f"ds_names: {[dataset.ds_name for dataset in self.datasets]}")
+                print(f"\n\n\nds_names: {[dataset.ds_name for dataset in self.datasets]}\n\n\n")
             if self.n_batch > 1:
                 dataset_iterators = [ds.batch(self.n_batch) for ds in dataset_iterators]
             weights = self.weights
@@ -152,7 +152,7 @@ class DatasetWrapper:
             ds_idx = item.pop("ds_idx")
             ds_name = item.pop("ds_name").decode("utf-8")
             if DEBUG:
-                print(f"Tensorflow version: {tf.__version__}, ds_name: {ds_name}, ds_idx: {ds_idx}")
+                print(f"\n\n\nTensorflow version: {tf.__version__}, ds_name: {ds_name}, ds_idx: {ds_idx}\n\n\n")
             yield item, ds_idx, ds_name
 
     @property
