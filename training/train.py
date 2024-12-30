@@ -803,6 +803,12 @@ def main():
     if model_args.position_embedding_shape is not None:
         clipConfig["vision_config"]["position_embedding_shape"] = training_args.position_embedding_shape
 
+    try:
+        del clipConfig["vision_config"]["gradient_checkpointing"]
+        del clipConfig["text_config"]["gradient_checkpointing"]
+    except KeyError:
+        pass
+
     # prediction length
     max_target_length = (
         training_args.max_target_length
@@ -1203,7 +1209,7 @@ def main():
             lax_map_scanned_layers=True if training_args.lax_map_batch_size is not None else False,
             lax_map_batch_size=training_args.lax_map_batch_size if training_args.lax_map_batch_size is not None else 8,
             normalize_grads=training_args.kron_normalize_grads,
-            params_sharding=trainable_params(params_spec),
+            params_sharding=trainable_params(params_spec, training_args),
             preconditioner_sharding=PartitionSpec(None, None),
         )
         _opt = [
@@ -1367,19 +1373,25 @@ def main():
 
     # Define update function
     def update_params(params, opt_state, grads):
-        grads = split_scanned_params(trainable_params(grads, training_args))
-        split_params = split_scanned_params(trainable_params(params, training_args))
-        new_opt_state = {}
-        new_params = {}
-        for k, param in split_params.items():
-            update_fn = optimizer[k].update
-            if "scanned_maxtext" in k:
-                update_fn = jax.vmap(update_fn, in_axes=(1, 0, 1), out_axes=(1, 0))
-            elif ("scanned_text" in k) or ("scanned_vision" in k):
-                update_fn = jax.vmap(update_fn, in_axes=(0, 0, 0), out_axes=(0, 0))
-            updates, new_opt_state[k] = update_fn(grads[k], opt_state[k], param)
-            new_params[k] = optax.apply_updates(param, updates)
-        new_params = unsplit_scanned_params(new_params)
+        if training_args.optim == "kron":
+            grads = trainable_params(grads, training_args)
+            new_params = trainable_params(params, training_args)
+            updates, new_opt_state = optimizer.update(grads, opt_state, new_params)
+            new_params = optax.apply_updates(new_params, updates)
+        else:
+            grads = split_scanned_params(trainable_params(grads, training_args))
+            split_params = split_scanned_params(trainable_params(params, training_args))
+            new_opt_state = {}
+            new_params = {}
+            for k, param in split_params.items():
+                update_fn = optimizer[k].update
+                if "scanned_maxtext" in k:
+                    update_fn = jax.vmap(update_fn, in_axes=(1, 0, 1), out_axes=(1, 0))
+                elif ("scanned_text" in k) or ("scanned_vision" in k):
+                    update_fn = jax.vmap(update_fn, in_axes=(0, 0, 0), out_axes=(0, 0))
+                updates, new_opt_state[k] = update_fn(grads[k], opt_state[k], param)
+                new_params[k] = optax.apply_updates(param, updates)
+            new_params = unsplit_scanned_params(new_params)
         # merge with non-trainable params
         # NOTE: this is only for future compatibility if we want to train only certain parameters
         params, new_params = flatten_dict(params), flatten_dict(new_params)
@@ -1622,7 +1634,7 @@ def main():
                     if "Qs_preconditioners" in part:
                         break
                 psgd_idx += 1
-            return new_opt_state[psgd_idx]["count"]
+            opt_state_step = new_opt_state[psgd_idx]["count"]
         else:
             raise NotImplementedError
 
@@ -1943,12 +1955,14 @@ def main():
         state.log({"saved_checkpoint": state.step})
 
     # Init training variables
-    evaluation_ran, save_model_ran, metrics_logged, stop_training = (
+    has_compiled, evaluation_ran, save_model_ran, metrics_logged, stop_training = (
+        False,
         False,
         False,
         False,
         False,
     )
+    start_time = time.perf_counter()
     step, samples = state.step, state.samples  # separate copies for timing metrics
     opt_state_step = 0  # ensure it is defined in evaluation mode
     step_start = step  # define it for test mode
@@ -2035,6 +2049,11 @@ def main():
                         metrics, params, opt_state, opt_state_step = p_train_step(
                             step_rng, params, opt_state, batch, step
                         )
+                    if not has_compiled:
+                        time_compiled = time.perf_counter() - start_time
+                        print(f"Time to compile: {time_compiled:.2f} seconds")
+                        wandb.log({"state/time_to_compile": time_compiled})
+                    has_compiled = True
                     step += 1
                     samples += training_args.batch_size_per_step
 
