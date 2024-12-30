@@ -767,11 +767,8 @@ def main():
         level=logging.INFO,
     )
     # Setup logging, we only want one process per machine to log things on the screen.
-    logger.setLevel(logging.INFO if jax.process_index() == 0 else logging.ERROR)
-    if jax.process_index() == 0:
-        transformers.utils.logging.set_verbosity_info()
-    else:
-        transformers.utils.logging.set_verbosity_error()
+    logger.setLevel(logging.INFO)
+    transformers.utils.logging.set_verbosity_info()
 
     # Show arguments
     logger.info(f"Training/evaluation parameters:\n{pformat(asdict(training_args))}")
