@@ -87,7 +87,7 @@ class DatasetWrapper:
                 if batch_size_per_node_per_step == 0:
                     print(f"Skipping {ds_name} due to batch size per node per step being 0")
                     continue
-                count_ds = ds_config["n"] / batch_size_per_node_per_step
+                count_ds = ds_config["n"] // batch_size_per_node_per_step
                 batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
                 train_batch_size = batch_size_per_node_per_step
                 valid_batch_size = batch_size_per_node
@@ -145,7 +145,14 @@ class DatasetWrapper:
             if self.n_batch > 1:
                 dataset_iterators = [ds.batch(self.n_batch) for ds in dataset_iterators]
             weights = self.weights
-            ds = tf.data.Dataset.sample_from_datasets(dataset_iterators, weights=weights, seed=0)
+            ds = tf.data.Dataset.sample_from_datasets(
+                dataset_iterators, weights=weights, seed=0, stop_on_empty_dataset=True
+            ).apply(tf.data.experimental.assert_cardinality(tf.data.UNKNOWN_CARDINALITY))
+            # Add deterministic options
+            options = tf.data.Options()
+            options.deterministic = True
+            options.experimental_optimization.map_parallelization = False  # Disable parallel mapping
+            ds = ds.with_options(options)
             ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
             if self.n_batch > 1:
                 ds = ds.unbatch()
