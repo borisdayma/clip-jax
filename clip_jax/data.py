@@ -140,7 +140,8 @@ class DatasetWrapper:
         else:
             dataset_iterators = [dataset._train for dataset in self.datasets]
             if DEBUG:
-                print(f"\n\n\nds_names: {[dataset.ds_name for dataset in self.datasets]}\n\n\n")
+                print("***")
+                print(f"ds_names: {[dataset.ds_name for dataset in self.datasets]}, weights: {self.weights}")
             if self.n_batch > 1:
                 dataset_iterators = [ds.batch(self.n_batch) for ds in dataset_iterators]
             weights = self.weights
@@ -152,7 +153,8 @@ class DatasetWrapper:
             ds_idx = item.pop("ds_idx")
             ds_name = item.pop("ds_name").decode("utf-8")
             if DEBUG:
-                print(f"\n\n\nTensorflow version: {tf.__version__}, ds_name: {ds_name}, ds_idx: {ds_idx}\n\n\n")
+                print(f"Tensorflow version: {tf.__version__}, ds_name: {ds_name}, ds_idx: {ds_idx}")
+                print("***")
                 exit()
             yield item, ds_idx, ds_name
 
