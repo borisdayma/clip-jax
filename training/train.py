@@ -2094,7 +2094,8 @@ def main():
                     if not has_compiled:
                         time_compiled = time.perf_counter() - start_time
                         print(f"Time to compile: {time_compiled:.2f} seconds")
-                        wandb.log({"state/time_to_compile": time_compiled})
+                        if jax.process_index() == 0:
+                            wandb.log({"state/time_to_compile": time_compiled})
                     has_compiled = True
                     step += 1
                     samples += training_args.batch_size_per_step[ds_idx]
