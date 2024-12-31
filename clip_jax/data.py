@@ -47,6 +47,7 @@ class DatasetWrapper:
                     **kwargs,
                 )
             ]
+            self.weights = [1.0]
         else:
             self.datasets = []
             self.gradient_accumulation_steps = []
@@ -125,6 +126,12 @@ class DatasetWrapper:
             weights = np.asarray(counts, dtype=np.float32)
             weights = weights / weights.sum()
             self.weights = weights
+        # global info
+        ds_names = [dataset.ds_name for dataset in self.datasets]
+        weights = self.weights
+        self.ds_names = ds_names
+        self.weights = weights
+        print(f"ds_names: {ds_names}, weights: {weights}")
 
     @property
     def training_config(self):
@@ -138,6 +145,8 @@ class DatasetWrapper:
                 "valid_batch_size",
                 "batch_size_per_step",
                 "batch_size_per_node",
+                "ds_names",
+                "weights",
             ]
         }
 
