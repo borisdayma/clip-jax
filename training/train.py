@@ -736,7 +736,7 @@ class State:
 
             log_metrics = flatten_dict({"state": self.to_dict()}, sep="/")
             for k, v in metrics.items():
-                if "gradients_norm" in k:
+                if ("gradients_norm" in k) or ("params_norm" in k):
                     log_metrics[f"{k}/"] = v
                 elif "_hist" in k:
                     v = jax.tree_util.tree_map(
