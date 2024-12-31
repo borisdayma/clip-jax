@@ -647,16 +647,19 @@ class State:
     time_total: float = 0.0
     time_train: float = 0.0
     time_per_train_step: float = 0.0
+    time_per_sample: float = 0.0
     time_per_eval: float = 0.0
     time_per_save: float = 0.0
     time_per_predict: float = 0.0
     ds_idx_counter: dict[int, int] = field(default_factory=dict)
     timestamp: float = field(init=False)
+    samples_last: int = field(init=False)
     offset_time: float = field(init=False)  # used to substract eval and save times
 
     def __post_init__(self):
         self.timestamp = time.perf_counter()
         self.offset_time = 0.0
+        self.samples_last = self.samples
 
     @classmethod
     def from_config_metadata(cls, config_metadata, restore_state):
@@ -681,6 +684,12 @@ class State:
             self.offset_time = 0.0
             self.timestamp = now
             self.time_per_train_step = delta_time / (kwargs["step"] - self.step)
+            samples = kwargs.get("samples")
+            if samples is not None:
+                delta_samples = samples - self.samples_last
+                self.samples_last = samples
+                self.time_per_sample = delta_time / delta_samples
+
         # update state
         for k, v in kwargs.items():
             if k == "ds_idx_counter":
