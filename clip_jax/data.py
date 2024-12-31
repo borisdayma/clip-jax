@@ -23,8 +23,14 @@ class DatasetWrapper:
         gradient_accumulation_steps_splits=None,
         prefetch_buffer_size=None,
         key_class=None,
+        seed_dataset=None,
         **kwargs,
     ):
+        # define rng
+        global_seed = seed_dataset or np.random.randint(0, 2**32 - 1)
+        np.random.seed(global_seed)
+        tf.random.set_seed(global_seed)
+
         self.n_batch = n_batch
         self.key_class = key_class
         self.ds_splits = ds_splits
@@ -35,6 +41,7 @@ class DatasetWrapper:
                     ds_idx=0,
                     ds_name="default",
                     prefetch_buffer_size=prefetch_buffer_size,
+                    seed_dataset=seed_dataset,
                     **kwargs,
                 )
             ]
@@ -102,6 +109,7 @@ class DatasetWrapper:
                     "valid_folder": valid_folder,
                     "train_batch_size": train_batch_size,
                     "valid_batch_size": valid_batch_size,
+                    "seed_dataset": seed_dataset,
                 }
                 ds_idx += 1
                 self.datasets.append(Dataset(**dataset_kwargs))
@@ -211,7 +219,6 @@ class Dataset:
             self.deterministic = False
             self.seed_dataset = np.random.randint(0, 2**32 - 1)
         self.rng = tf.random.Generator.from_seed(self.seed_dataset)
-        np.random.seed(self.seed_dataset)
 
         # check if we are on multi-hosts
         self.multi_hosts = jax.process_count() > 1
