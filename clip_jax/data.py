@@ -145,14 +145,7 @@ class DatasetWrapper:
             if self.n_batch > 1:
                 dataset_iterators = [ds.batch(self.n_batch) for ds in dataset_iterators]
             weights = self.weights
-            ds = tf.data.Dataset.sample_from_datasets(
-                dataset_iterators, weights=weights, seed=0, stop_on_empty_dataset=True
-            )
-            # Add deterministic options
-            options = tf.data.Options()
-            options.deterministic = True
-            options.experimental_optimization.map_parallelization = False  # Disable parallel mapping
-            ds = ds.with_options(options)
+            ds = tf.data.Dataset.sample_from_datasets(dataset_iterators, weights=weights, seed=0)
             ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
             if self.n_batch > 1:
                 ds = ds.unbatch()
