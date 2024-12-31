@@ -219,7 +219,6 @@ class Dataset:
             self.seed_dataset = np.random.randint(0, 2**32 - 1)
         self.rng = tf.random.Generator.from_seed(self.seed_dataset)
         np.random.seed(self.seed_dataset)
-        tf.random.set_seed(self.seed_dataset)
 
         # check if we are on multi-hosts
         self.multi_hosts = jax.process_count() > 1
