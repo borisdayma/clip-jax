@@ -2120,7 +2120,7 @@ def main():
                         step=step, samples=samples, opt_state_step=opt_state_step, ds_idx_counter=ds_idx_counter
                     )
                     if jax.process_index() == 0:
-                        metrics[f"train/loss_{ds_idx}"] = metrics["train/loss"]
+                        metrics[f"train/loss_{ds_name}"] = metrics["train/loss"]
                         state.log(metrics)
                     metrics_logged = True
                     stop_training = should_stop_training(metrics)
