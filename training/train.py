@@ -1938,6 +1938,7 @@ def main():
                 preds = tokenizer.batch_decode(predictions_batch, skip_special_tokens=True)
                 preds = [c.strip() for c in preds]
                 pixel_values = batch["pixel_values"][:n_needed]
+                # TODO: not always addressable (can be on other hosts), extract images with pjit -> None
                 images = jax.device_get(pixel_values)
                 images = images[:n_needed]
                 images = logits_to_image(images)
