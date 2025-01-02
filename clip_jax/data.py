@@ -131,7 +131,8 @@ class DatasetWrapper:
         weights = self.weights
         self.ds_names = ds_names
         self.weights = weights
-        print(f"ds_names: {ds_names}, weights: {weights}")
+        for ds_name, weight in zip(ds_names, weights):
+            print(f"ds_name: {ds_name}, weight: {weight}")
 
     @property
     def training_config(self):
