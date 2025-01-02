@@ -13,7 +13,6 @@ dependencies = [
     "jax",
     "numpy",
     "orbax-checkpoint",
-    "tensorflow-io[tensorflow-cpu]",
     "transformers",
     "aqtp",
     "wandb",
