@@ -651,7 +651,7 @@ class State:
     time_per_eval: float = 0.0
     time_per_save: float = 0.0
     time_per_predict: float = 0.0
-    ds_idx_counter: dict[int, int] = field(default_factory=dict)
+    ds_idx_counter: dict[str, int] = field(default_factory=dict)
     timestamp: float = field(init=False)
     samples_last: int = field(init=False)
     offset_time: float = field(init=False)  # used to substract eval and save times
