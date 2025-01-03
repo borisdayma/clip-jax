@@ -35,6 +35,7 @@ from transformers import FlaxGenerationMixin, GenerationConfig
 from .maxtext import common_types
 from .maxtext.inference_utils import sampling
 from .maxtext.layers.models import Transformer
+from .utils import with_logical_constraint
 
 remat = nn_partitioning.remat
 
@@ -239,11 +240,11 @@ class CLIPVisionEmbeddings(nn.Module):
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
             name="patch_embeds",
         )(pixel_values)
-        patch_embeds = nn.with_logical_constraint(patch_embeds, ("batch", "height", "width", "embed"))
+        patch_embeds = with_logical_constraint(patch_embeds, ("batch", "height", "width", "embed"))
         batch_size, height, width, channels = patch_embeds.shape
         num_patches = height * width
         patch_embeds = jnp.reshape(patch_embeds, (batch_size, num_patches, channels))
-        patch_embeds = nn.with_logical_constraint(patch_embeds, ("batch", "length", "embed"))
+        patch_embeds = with_logical_constraint(patch_embeds, ("batch", "length", "embed"))
         if self.position_embedding_type == "learnt":
             num_positions = num_patches
             position_height, position_width = height, width
@@ -275,7 +276,7 @@ class CLIPVisionEmbeddings(nn.Module):
                     position_embeds_height = jax.image.resize(
                         position_embeds_height, (1, height, self.hidden_size), method="linear"
                     )
-                    position_embeds_height = nn.with_logical_constraint(
+                    position_embeds_height = with_logical_constraint(
                         position_embeds_height, ("batch", "height", "embed")
                     )
                 if position_width != width:
@@ -283,9 +284,7 @@ class CLIPVisionEmbeddings(nn.Module):
                     position_embeds_width = jax.image.resize(
                         position_embeds_width, (1, width, self.hidden_size), method="linear"
                     )
-                    position_embeds_width = nn.with_logical_constraint(
-                        position_embeds_width, ("batch", "width", "embed")
-                    )
+                    position_embeds_width = with_logical_constraint(position_embeds_width, ("batch", "width", "embed"))
                 # make it 2d
                 position_embeds_height = position_embeds_height[:, :, None, :]
                 position_embeds_width = position_embeds_width[:, None, :, :]
@@ -319,21 +318,17 @@ class CLIPVisionEmbeddings(nn.Module):
                             self.hidden_size,
                         ),
                     )
-                    position_embeds = nn.with_logical_constraint(
-                        position_embeds, ("batch", "height", "width", "embed")
-                    )
+                    position_embeds = with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
                     # interpolate
                     position_embeds = jax.image.resize(position_embeds, (height, width), method="linear")
-                    position_embeds = nn.with_logical_constraint(
-                        position_embeds, ("batch", "height", "width", "embed")
-                    )
+                    position_embeds = with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
                     position_embeds = jnp.reshape(position_embeds, (1, num_patches, self.hidden_size))
         elif self.position_embedding_type == "sincos2d":
             position_embeds = posemb_sincos_2d(height, width, self.hidden_size, dtype=self.dtype)
         else:
             raise ValueError(f"Unknown position embedding type {self.position_embedding_type}")
         embeddings = patch_embeds + position_embeds
-        embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
+        embeddings = with_logical_constraint(embeddings, ("batch", "length", "embed"))
         if self.pool_type == "tok":
             cls_token = self.param(
                 "cls_token",
@@ -341,7 +336,7 @@ class CLIPVisionEmbeddings(nn.Module):
                 (1, 1, self.hidden_size),
             )
             embeddings = jnp.concatenate([jnp.tile(cls_token, [batch_size, 1, 1]), embeddings], axis=1)
-            embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
+            embeddings = with_logical_constraint(embeddings, ("batch", "length", "embed"))
         if self.registers:
             registers = self.param(
                 "registers",
@@ -352,7 +347,7 @@ class CLIPVisionEmbeddings(nn.Module):
                 (1, self.registers, self.hidden_size),
             )
             embeddings = jnp.concatenate([embeddings, jnp.tile(registers, [batch_size, 1, 1])], axis=1)
-            embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
+            embeddings = with_logical_constraint(embeddings, ("batch", "length", "embed"))
         return embeddings
 
 
@@ -375,7 +370,7 @@ class CLIPTextEmbeddings(nn.Module):
             ),
             name="embeddings",
         )(input_ids.astype("i4"))
-        embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
+        embeddings = with_logical_constraint(embeddings, ("batch", "length", "embed"))
         if self.position_embedding_type == "learnt":
             position_embeds = self.param(
                 "position_embeds",
@@ -386,7 +381,7 @@ class CLIPTextEmbeddings(nn.Module):
                 (1, self.max_length, embed_dim),
             )
             embeddings += position_embeds
-            embeddings = nn.with_logical_constraint(embeddings, ("batch", "length", "embed"))
+            embeddings = with_logical_constraint(embeddings, ("batch", "length", "embed"))
         return embeddings
 
 
@@ -475,8 +470,8 @@ class MultiHeadDotProductAttention(nn.Module):
                 dense(name="value")(inputs_kv),
             )
             if self.normalize_qk:
-                query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
-                key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+                query = with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+                key = with_logical_constraint(key, ("batch", "length", "heads", "kv"))
                 query = norm(use_rmsnorm=True)(
                     dtype=self.dtype,
                     use_bias=False,
@@ -495,9 +490,9 @@ class MultiHeadDotProductAttention(nn.Module):
                 )(key)
 
             # ensure correct sharding
-            query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
-            key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
-            value = nn.with_logical_constraint(value, ("batch", "length", "heads", "kv"))
+            query = with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+            key = with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+            value = with_logical_constraint(value, ("batch", "length", "heads", "kv"))
 
             if self.use_rotary:
                 if position_ids is not None:
@@ -518,8 +513,8 @@ class MultiHeadDotProductAttention(nn.Module):
                 key = key.astype(self.dtype)
 
                 # ensure sharding
-                query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
-                key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+                query = with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+                key = with_logical_constraint(key, ("batch", "length", "heads", "kv"))
 
             # checkpoint policies
             query = checkpoint_name(query, "query_proj")
@@ -632,7 +627,7 @@ class MAPHead(nn.Module):
             (1, self.num_queries, embed_dim),
         )
         probe = jnp.tile(probe, [batch, self.num_queries, 1])
-        probe = nn.with_logical_constraint(probe, ("batch", None, "embed"))
+        probe = with_logical_constraint(probe, ("batch", None, "embed"))
         if mask is not None:
             mask = nn.make_attention_mask(jnp.ones((batch, 1), dtype="i4"), mask, dtype=self.dtype)
         x = MultiHeadDotProductAttention(
@@ -648,7 +643,7 @@ class MAPHead(nn.Module):
             kernel_init_out=default_kernel_init,
             name="attention",
         )(inputs_q=probe, inputs_kv=x, mask=mask, deterministic=deterministic)
-        x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
+        x = with_logical_constraint(x, ("batch", "length", "embed"))
         y = CLIPMLP(
             mlp_dim=self.mlp_dim,
             ln_type=self.ln_type,
@@ -660,9 +655,9 @@ class MAPHead(nn.Module):
             dtype=self.dtype,
             name="mlp",
         )(x, deterministic=deterministic)
-        y = nn.with_logical_constraint(y, ("batch", "length", "embed"))
+        y = with_logical_constraint(y, ("batch", "length", "embed"))
         x = x + y
-        x = nn.with_logical_constraint(x, ("batch", "length", "embed"))
+        x = with_logical_constraint(x, ("batch", "length", "embed"))
         return x
 
 
@@ -697,7 +692,7 @@ class CLIPMLP(nn.Module):
                     bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                     name="pre_mlp_norm",
                 )(inputs)
-                inputs = nn.with_logical_constraint(inputs, ("batch", "length", "embed"))
+                inputs = with_logical_constraint(inputs, ("batch", "length", "embed"))
             activations = []
             for idx, act_fn in enumerate(self.activations):
                 dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
@@ -709,13 +704,13 @@ class CLIPMLP(nn.Module):
                     bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp",)),
                     name=dense_name,
                 )(inputs)
-                x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+                x = with_logical_constraint(x, ("batch", "length", "mlp"))
                 x = _convert_to_activation_function(act_fn)(x)
-                x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+                x = with_logical_constraint(x, ("batch", "length", "mlp"))
                 activations.append(x)
             # Take elementwise product of above intermediate activations.
             x = functools.reduce(operator.mul, activations)
-            x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+            x = with_logical_constraint(x, ("batch", "length", "mlp"))
 
             # layer norm
             if self.ln_type == "normformer":
@@ -727,12 +722,12 @@ class CLIPMLP(nn.Module):
                     bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("mlp",)),
                     name="mid_mlp_norm",
                 )(x)
-                x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+                x = with_logical_constraint(x, ("batch", "length", "mlp"))
             # Apply dropout and final dense output projection.
             x = nn.Dropout(rate=self.mlp_dropout_rate, broadcast_dims=(-2,), name="mlp_dropout")(
                 x, deterministic=deterministic
             )  # Broadcast along length.
-            x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
+            x = with_logical_constraint(x, ("batch", "length", "mlp"))
             output = nn.DenseGeneral(
                 embed_dim,
                 dtype=self.dtype,
@@ -741,7 +736,7 @@ class CLIPMLP(nn.Module):
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                 name="wo",
             )(x)
-            output = nn.with_logical_constraint(output, ("batch", "length", "embed"))
+            output = with_logical_constraint(output, ("batch", "length", "embed"))
             return output
 
 
@@ -782,7 +777,7 @@ class CLIPEncoderLayer(nn.Module):
         ], f"position_embedding_type {self.position_embedding_type} not supported."
 
         # Self attention
-        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         residual = hidden_states
         if self.ln_type in ["preln", "normformer"]:
             hidden_states = norm(self.use_rmsnorm)(
@@ -793,7 +788,7 @@ class CLIPEncoderLayer(nn.Module):
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                 name="pre_attention_norm",
             )(hidden_states)
-            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+            hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = MultiHeadDotProductAttention(
             num_heads=self.num_heads,
             dtype=self.dtype,
@@ -812,7 +807,7 @@ class CLIPEncoderLayer(nn.Module):
             position_ids=position_ids,
             deterministic=deterministic,
         )
-        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         if self.ln_type == "normformer":
             hidden_states = norm(self.use_rmsnorm)(
                 dtype=self.dtype,
@@ -822,9 +817,9 @@ class CLIPEncoderLayer(nn.Module):
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                 name="post_attention_norm",
             )(hidden_states)
-        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = residual + hidden_states
-        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
 
         # Cross-attention
         if encoder_hidden_states is not None:
@@ -838,7 +833,7 @@ class CLIPEncoderLayer(nn.Module):
                     bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                     name="pre_cross_attention_norm",
                 )(hidden_states)
-                hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+                hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
             hidden_states = MultiHeadDotProductAttention(
                 num_heads=self.num_heads,
                 dtype=self.dtype,
@@ -855,7 +850,7 @@ class CLIPEncoderLayer(nn.Module):
                 inputs_kv=encoder_hidden_states,
                 deterministic=deterministic,
             )
-            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+            hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
             if self.ln_type == "normformer":
                 hidden_states = norm(self.use_rmsnorm)(
                     dtype=self.dtype,
@@ -865,9 +860,9 @@ class CLIPEncoderLayer(nn.Module):
                     bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
                     name="post_cross_attention_norm",
                 )(hidden_states)
-            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+            hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
             hidden_states = residual + hidden_states
-            hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+            hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
 
         # MLP
         residual = hidden_states
@@ -882,9 +877,9 @@ class CLIPEncoderLayer(nn.Module):
             dtype=self.dtype,
             name="mlp",
         )(hidden_states)
-        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         hidden_states = residual + hidden_states
-        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         return hidden_states, None
 
 
@@ -1100,7 +1095,7 @@ class CLIPTextTransformer(nn.Module):
             deterministic=deterministic,
         )
         last_hidden_state = encoder_outputs["last_hidden_state"]
-        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+        last_hidden_state = with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         last_hidden_state = norm(self.use_rmsnorm)(
             dtype=dtype,
@@ -1110,7 +1105,7 @@ class CLIPTextTransformer(nn.Module):
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
             name="final_norm",
         )(last_hidden_state)
-        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+        last_hidden_state = with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         # text_embeds.shape = [batch_size, sequence_length, transformer.width]
         if self.is_decoder:
@@ -1123,7 +1118,7 @@ class CLIPTextTransformer(nn.Module):
                 bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("vocab",)),
                 name="logits",
             )(last_hidden_state)
-            last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "vocab"))
+            last_hidden_state = with_logical_constraint(last_hidden_state, ("batch", "length", "vocab"))
             pooled_output = None
 
         else:
@@ -1164,7 +1159,7 @@ class CLIPTextTransformer(nn.Module):
             else:
                 pooled_output = None
             if pooled_output is not None:
-                pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+                pooled_output = with_logical_constraint(pooled_output, ("batch", "embed"))
 
         return dict(
             last_hidden_state=last_hidden_state,
@@ -1224,7 +1219,7 @@ class CLIPVisionTransformer(nn.Module):
             dtype=dtype,
             name="embeddings",
         )(pixel_values)
-        hidden_states = nn.with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+        hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
         encoder_outputs = CLIPEncoder(
             num_layers=self.num_layers,
             use_rmsnorm=self.use_rmsnorm,
@@ -1251,14 +1246,14 @@ class CLIPVisionTransformer(nn.Module):
 
         # get last hidden state
         last_hidden_state = encoder_outputs["last_hidden_state"]
-        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+        last_hidden_state = with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         # remove registers
         if self.registers and not self.keep_registers:
             if self.pool_type is None or self.pool_type == "tok":
                 print(f"Warning: removing registers with pool_type = {self.pool_type} does not seem necessary.")
             last_hidden_state = last_hidden_state[:, : -self.registers]
-            last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+            last_hidden_state = with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         # layernorm
         last_hidden_state = norm(self.use_rmsnorm)(
@@ -1269,7 +1264,7 @@ class CLIPVisionTransformer(nn.Module):
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
             name="final_norm",
         )(last_hidden_state)
-        last_hidden_state = nn.with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
+        last_hidden_state = with_logical_constraint(last_hidden_state, ("batch", "length", "embed"))
 
         if self.pool_type == "tok":
             pooled_output = last_hidden_state[:, 0, :]
@@ -1305,7 +1300,7 @@ class CLIPVisionTransformer(nn.Module):
             raise ValueError(f"pool_type {self.pool_type} not supported.")
 
         if pooled_output is not None:
-            pooled_output = nn.with_logical_constraint(pooled_output, ("batch", "embed"))
+            pooled_output = with_logical_constraint(pooled_output, ("batch", "embed"))
 
         return dict(
             last_hidden_state=last_hidden_state,

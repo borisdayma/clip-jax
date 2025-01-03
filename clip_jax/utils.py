@@ -4,8 +4,16 @@ from dataclasses import fields
 import flax
 import fsspec
 import jax
+from flax import linen as nn
 
 from .wandb_utils import maybe_use_artifact
+
+
+def with_logical_constraint(x, c, use_constraint=False):
+    if use_constraint:
+        return nn.with_logical_constraint(x, c)
+    else:
+        return x
 
 
 def load_config(config_path):
