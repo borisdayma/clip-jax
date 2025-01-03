@@ -1,18 +1,22 @@
 import hashlib
 import pickle
 from dataclasses import dataclass, field
+from functools import cache
 
 import jax
 import numpy as np
+import requests
 import tensorflow as tf
 import tensorflow_io as tfio
 from jaxfusion.text import TextNormalizer
 
-DEBUG = True
+try:
+    from google.cloud import storage
+except:
+    storage = None
+
+
 tn = TextNormalizer()
-if DEBUG:
-    print("DEBUG: using debug TextNormalizer")
-    tn = lambda x: x
 
 
 class DatasetWrapper:
@@ -209,6 +213,7 @@ class Dataset:
     key_class: str = None  # used for classification
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
+    assert_data_in_VM_region: bool = False  # assert that all files are in the same region as VM
     _train: tf.data.Dataset = field(init=False)
     _valid: tf.data.Dataset = field(init=False)
     rng: tf.random.Generator = field(init=False)
@@ -393,6 +398,17 @@ class Dataset:
 
                 # sort files
                 files = sorted(files)
+
+                # check correct region
+                instance_region = get_current_instance_region()
+                if self.assert_data_in_VM_region:
+                    for file in files:
+                        if "gs://" in file:
+                            bucket_name = file.split("/")[2]
+                            bucket_region = get_bucket_region(bucket_name)
+                            assert (
+                                bucket_region.lower() == instance_region.lower()
+                            ), f"File {file} is not in the correct region {bucket_region} != {instance_region}"
 
                 # shuffle files and select subset
                 if augment:
@@ -623,3 +639,25 @@ class ChoiceDataset:
 
 
 choiceDataset = ChoiceDataset()
+
+
+@cache
+def get_bucket_region(bucket_name):
+    storage_client = storage.Client()
+    bucket = storage_client.get_bucket(bucket_name)
+    return bucket.location
+
+
+@cache
+def get_current_instance_region() -> str:
+    metadata_server = "http://metadata.google.internal"
+    metadata_flavor = {"Metadata-Flavor": "Google"}
+
+    # Get zone from metadata server
+    zone_path = requests.get(f"{metadata_server}/computeMetadata/v1/instance/zone", headers=metadata_flavor).text
+
+    # Extract region from zone
+    zone = zone_path.split("/")[-1]  # gets 'us-central1-a'
+    region = "-".join(zone.split("-")[:-1])  # removes the last part ('a')
+
+    return region

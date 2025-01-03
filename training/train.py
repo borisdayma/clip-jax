@@ -35,9 +35,9 @@ from jax.experimental.pjit import pjit
 from jax.experimental.shard_map import shard_map
 from jax.lax import with_sharding_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from kron import get_opt_state_partition_specs, precond_update_prob_schedule, scale_by_kron
+from .kron import get_opt_state_partition_specs, precond_update_prob_schedule, scale_by_kron
 from PIL import Image
-from precondition_local.distributed_shampoo import GraftingType, distributed_shampoo
+from .precondition_local.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
@@ -558,6 +558,10 @@ class DataTrainingArguments:
     key_assistant_2: Optional[str] = field(
         default=None,
         metadata={"help": "Name of a 2nd key containing elements for assistant when using chat template."},
+    )
+    assert_data_in_VM_region: bool = field(
+        default=False,
+        metadata={"help": "Assert that all files are in the same region as VM."},
     )
     mean: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The mean of the dataset."})
     std: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The std of the dataset."})
