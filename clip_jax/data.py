@@ -8,7 +8,11 @@ import tensorflow as tf
 import tensorflow_io as tfio
 from jaxfusion.text import TextNormalizer
 
+DEBUG = True
 tn = TextNormalizer()
+if DEBUG:
+    print("DEBUG: using debug TextNormalizer")
+    tn = lambda x: x
 
 
 class DatasetWrapper:
