@@ -2058,7 +2058,6 @@ def main():
                 position=1,
                 leave=False,
             ):
-                continue
                 # reset control variables
                 evaluation_ran, save_model_ran, metrics_logged = False, False, False
 

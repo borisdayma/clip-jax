@@ -10,8 +10,6 @@ from jaxfusion.text import TextNormalizer
 
 tn = TextNormalizer()
 
-DEBUG = False
-
 
 class DatasetWrapper:
     def __init__(
@@ -159,9 +157,6 @@ class DatasetWrapper:
             ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
         else:
             dataset_iterators = [dataset._train for dataset in self.datasets]
-            if DEBUG:
-                print("***")
-                print(f"ds_names: {[dataset.ds_name for dataset in self.datasets]}, weights: {self.weights}")
             if self.n_batch > 1:
                 dataset_iterators = [ds.batch(self.n_batch) for ds in dataset_iterators]
             weights = self.weights
@@ -172,10 +167,6 @@ class DatasetWrapper:
         for item in ds.as_numpy_iterator():
             ds_idx = item.pop("ds_idx")
             ds_name = item.pop("ds_name").decode("utf-8")
-            if DEBUG:
-                print(f"Tensorflow version: {tf.__version__}, ds_name: {ds_name}, ds_idx: {ds_idx}")
-                print("***")
-                exit()
             yield item, ds_idx, ds_name
 
     @property
