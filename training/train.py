@@ -52,7 +52,6 @@ try:
 except:
     storage = None
 
-DEBUG = True
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +292,10 @@ class TrainingArguments:
     do_test_steps: int = field(
         default=False,
         metadata={"help": "Run script for only a few steps."},
+    )
+    debug_repeat_batch: bool = field(
+        default=False,
+        metadata={"help": "Repeat the same batch for debugging."},
     )
 
     dp_devices: int = field(init=False)
@@ -2042,7 +2045,7 @@ def main():
 
         # train
         if training_args.do_train:
-            if DEBUG or not training_args.do_profile:
+            if not training_args.debug_repeat_batch and not training_args.do_profile:
                 batch_iterator = dataset.train
             else:
                 # we don't want tensorflow loading in the profile
