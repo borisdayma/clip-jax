@@ -2048,6 +2048,7 @@ def main():
             if not training_args.debug_repeat_batch and not training_args.do_profile:
                 batch_iterator = dataset.train
             else:
+                print("DEBUG: repeating batch")
                 # we don't want tensorflow loading in the profile
                 sample, ds_idx, ds_name = next(iter(dataset.train))
                 batch_iterator = itertools.repeat((sample, ds_idx, ds_name))
