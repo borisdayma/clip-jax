@@ -52,6 +52,7 @@ try:
 except:
     storage = None
 
+DEBUG = True
 
 logger = logging.getLogger(__name__)
 
@@ -2041,7 +2042,7 @@ def main():
 
         # train
         if training_args.do_train:
-            if not training_args.do_profile:
+            if DEBUG or not training_args.do_profile:
                 batch_iterator = dataset.train
             else:
                 # we don't want tensorflow loading in the profile
