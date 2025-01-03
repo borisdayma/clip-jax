@@ -297,6 +297,10 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Repeat the same batch for debugging."},
     )
+    debug_dataloader: bool = field(
+        default=False,
+        metadata={"help": "Do not perform a real training step."},
+    )
 
     dp_devices: int = field(init=False)
     batch_size_per_step: int = field(init=False)
@@ -1611,6 +1615,11 @@ def main():
         static_argnames=("gradient_accumulation_steps",),
     )
     def train_step(rng, params, opt_state, batch, gradient_accumulation_steps):
+        if training_args.debug_dataloader:
+            metrics = {"train/loss": 1.0, "train/learning_rate": 1.0}
+            opt_state_step = 1
+            return metrics, params, opt_state, opt_state_step
+
         # get a minibatch (one gradient accumulation slice)
         def get_minibatch(batch, grad_idx):
             batch = jax.tree.map(lambda x: einshape("(bg)...->gb...", x, g=gradient_accumulation_steps), batch)
