@@ -71,10 +71,6 @@ class TrainingArguments:
         },
     )
     no_cache: bool = field(default=False, metadata={"help": "Uses jax cache."})
-    cache_dir: str = field(
-        default="jax_cache",
-        metadata={"help": ("Location for jax cache.")},
-    )
     do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
     max_length: Optional[int] = field(default=None, metadata={"help": "max length used by tokenizer"})
@@ -783,7 +779,9 @@ def main():
 
     # Use jax cache
     if not training_args.no_cache:
-        cc.initialize_cache(training_args.cache_dir)
+        # use parent of output_dir + jax_cache
+        output_cache = os.path.join(os.path.dirname(training_args.output_dir), "jax_cache")
+        jax.config.update("jax_compilation_cache_dir", output_cache)
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
