@@ -868,6 +868,8 @@ def main():
     if model_args.position_embedding_shape is not None:
         clipConfig["vision_config"]["position_embedding_shape"] = model_args.position_embedding_shape
 
+    # TODO: remove legacy
+    clipConfig["vision_config"]["position_embedding_shape"] = (16, 16)
     try:
         del clipConfig["vision_config"]["gradient_checkpointing"]
         del clipConfig["text_config"]["gradient_checkpointing"]

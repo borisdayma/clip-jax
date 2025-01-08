@@ -212,7 +212,7 @@ class CLIPVisionEmbeddings(nn.Module):
     use_bias: bool
     patch_size: int
     position_embedding_type: str  # "learnt" or "sincos2d"
-    position_embedding_shape: Optional[Tuple[int, int, int]]
+    position_embedding_shape: Optional[Tuple[int, int]]
     position_embedding_factorized: bool
     pool_type: str  # "tok", "gap", "map" per google-research/big_vision
     registers: int
@@ -225,7 +225,9 @@ class CLIPVisionEmbeddings(nn.Module):
             "sincos2d",
         ], f"Unknown position embedding type {self.position_embedding_type}"
         if self.position_embedding_shape is not None or self.position_embedding_factorized:
-            assert self.position_embedding_type == "learnt", f"Position embedding must be learnt."
+            assert self.position_embedding_type == "learnt", "Position embedding must be learnt."
+        if self.positiion_embedding_type == "learnt":
+            assert self.position_embedding_shape is not None, "Position embedding shape must be provided."
         patch_embeds = nn.Conv(
             self.hidden_size,
             kernel_size=(self.patch_size, self.patch_size),
@@ -246,14 +248,11 @@ class CLIPVisionEmbeddings(nn.Module):
         patch_embeds = jnp.reshape(patch_embeds, (batch_size, num_patches, channels))
         patch_embeds = with_logical_constraint(patch_embeds, ("batch", "length", "embed"))
         if self.position_embedding_type == "learnt":
-            num_positions = num_patches
-            position_height, position_width = height, width
-            if self.position_embedding_shape is not None:
-                num_positions = self.position_embedding_shape[0] * self.position_embedding_shape[1]
-                position_height, position_width = (
-                    self.position_embedding_shape[0],
-                    self.position_embedding_shape[1],
-                )
+            num_positions = self.position_embedding_shape[0] * self.position_embedding_shape[1]
+            position_height, position_width = (
+                self.position_embedding_shape[0],
+                self.position_embedding_shape[1],
+            )
             if self.position_embedding_factorized:
                 position_embeds_height = self.param(
                     "position_embeds_height",
@@ -1179,7 +1178,7 @@ class CLIPVisionTransformer(nn.Module):
     mlp_dim: int
     float32_logits: bool = False
     position_embedding_type: str = "sincos2d"  # "learnt" or "sincos2d"
-    position_embedding_shape: Optional[Tuple[int, int]] = None  # e.g. (16, 16) for 256x256 images with patch 16
+    position_embedding_shape: Optional[Tuple[int, int]] = (16, 16)  # e.g. (16, 16) for 256x256 images with patch 16
     position_embedding_factorized: bool = False
     dtype: str = "float32"
     activations: Sequence[Union[str, Callable]] = ("relu",)
