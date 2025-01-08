@@ -226,7 +226,7 @@ class CLIPVisionEmbeddings(nn.Module):
         ], f"Unknown position embedding type {self.position_embedding_type}"
         if self.position_embedding_shape is not None or self.position_embedding_factorized:
             assert self.position_embedding_type == "learnt", "Position embedding must be learnt."
-        if self.positiion_embedding_type == "learnt":
+        if self.position_embedding_type == "learnt":
             assert self.position_embedding_shape is not None, "Position embedding shape must be provided."
         patch_embeds = nn.Conv(
             self.hidden_size,
