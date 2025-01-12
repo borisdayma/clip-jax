@@ -35,7 +35,7 @@ class DatasetWrapper:
         # define rng
         global_seed = seed_dataset or np.random.randint(0, 2**32 - 1)
         np.random.seed(global_seed)
-        if jax.process_count() == 1:
+        if False and jax.process_count() == 1:
             # this creates issues with multi-host and should not be needed anyway
             tf.random.set_seed(global_seed)
 
@@ -169,6 +169,11 @@ class DatasetWrapper:
                 dataset_iterators = [ds.batch(self.n_batch) for ds in dataset_iterators]
             weights = self.weights
             ds = tf.data.Dataset.sample_from_datasets(dataset_iterators, weights=weights, seed=0)
+            # Add deterministic options - TODO: is it needed?
+            options = tf.data.Options()
+            options.deterministic = True
+            options.experimental_optimization.map_parallelization = False  # Disable parallel mapping
+            ds = ds.with_options(options)
             ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
             if self.n_batch > 1:
                 ds = ds.unbatch()
