@@ -854,6 +854,14 @@ def main():
     is_classification = dataset.key_class is not None
     assert not (isMaxtext and is_classification), "Cannot be both MaxText and classification."
 
+    # TODO: remove legacy
+    clipConfig["vision_config"]["position_embedding_shape"] = (16, 16)
+    try:
+        del clipConfig["vision_config"]["gradient_checkpointing"]
+        del clipConfig["text_config"]["gradient_checkpointing"]
+    except KeyError:
+        pass
+    
     # Update config
     maxtext_args = None
     maxtext_mesh = None
@@ -867,14 +875,6 @@ def main():
         clipConfig["vision_config"]["position_embedding_factorized"] = model_args.position_embedding_factorized
     if model_args.position_embedding_shape is not None:
         clipConfig["vision_config"]["position_embedding_shape"] = model_args.position_embedding_shape
-
-    # TODO: remove legacy
-    clipConfig["vision_config"]["position_embedding_shape"] = (16, 16)
-    try:
-        del clipConfig["vision_config"]["gradient_checkpointing"]
-        del clipConfig["text_config"]["gradient_checkpointing"]
-    except KeyError:
-        pass
 
     # prediction length
     max_target_length = (
