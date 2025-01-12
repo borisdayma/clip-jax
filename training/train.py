@@ -555,10 +555,6 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "Name of a 2nd key containing elements for assistant when using chat template."},
     )
-    assert_data_in_VM_region: bool = field(
-        default=False,
-        metadata={"help": "Assert that all files are in the same region as VM."},
-    )
     mean: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The mean of the dataset."})
     std: Optional[List[float]] = field(default=(0.5, 0.5, 0.5), metadata={"help": "The std of the dataset."})
 
@@ -861,7 +857,7 @@ def main():
         del clipConfig["text_config"]["gradient_checkpointing"]
     except KeyError:
         pass
-    
+
     # Update config
     maxtext_args = None
     maxtext_mesh = None
