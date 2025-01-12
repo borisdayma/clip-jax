@@ -33,8 +33,8 @@ class DatasetWrapper:
         **kwargs,
     ):
         # define rng
-        global_seed = seed_dataset or np.random.randint(0, 2**32 - 1)
-        np.random.seed(global_seed)
+        # global_seed = seed_dataset or np.random.randint(0, 2**32 - 1)
+        # np.random.seed(global_seed)
         if False and jax.process_count() == 1:
             # this creates issues with multi-host and should not be needed anyway
             tf.random.set_seed(global_seed)
