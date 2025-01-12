@@ -1,16 +1,22 @@
 import hashlib
 import pickle
 from dataclasses import dataclass, field
+from functools import cache
 
 import jax
 import numpy as np
+import requests
 import tensorflow as tf
 import tensorflow_io as tfio
 from jaxfusion.text import TextNormalizer
 
-tn = TextNormalizer()
+try:
+    from google.cloud import storage
+except:
+    storage = None
 
-DEBUG = False
+
+tn = TextNormalizer()
 
 
 class DatasetWrapper:
@@ -23,8 +29,16 @@ class DatasetWrapper:
         gradient_accumulation_steps_splits=None,
         prefetch_buffer_size=None,
         key_class=None,
+        seed_dataset=None,
         **kwargs,
     ):
+        # define rng
+        global_seed = seed_dataset or np.random.randint(0, 2**32 - 1)
+        np.random.seed(global_seed)
+        if False and jax.process_count() == 1:
+            # this creates issues with multi-host and should not be needed anyway
+            tf.random.set_seed(global_seed)
+
         self.n_batch = n_batch
         self.key_class = key_class
         self.ds_splits = ds_splits
@@ -35,9 +49,11 @@ class DatasetWrapper:
                     ds_idx=0,
                     ds_name="default",
                     prefetch_buffer_size=prefetch_buffer_size,
+                    seed_dataset=seed_dataset,
                     **kwargs,
                 )
             ]
+            self.weights = [1.0]
         else:
             self.datasets = []
             self.gradient_accumulation_steps = []
@@ -102,6 +118,7 @@ class DatasetWrapper:
                     "valid_folder": valid_folder,
                     "train_batch_size": train_batch_size,
                     "valid_batch_size": valid_batch_size,
+                    "seed_dataset": seed_dataset,
                 }
                 ds_idx += 1
                 self.datasets.append(Dataset(**dataset_kwargs))
@@ -115,6 +132,13 @@ class DatasetWrapper:
             weights = np.asarray(counts, dtype=np.float32)
             weights = weights / weights.sum()
             self.weights = weights
+        # global info
+        ds_names = [dataset.ds_name for dataset in self.datasets]
+        weights = self.weights
+        self.ds_names = ds_names
+        self.weights = weights
+        for ds_name, weight in zip(ds_names, weights):
+            print(f"ds_name: {ds_name}, weight: {weight}")
 
     @property
     def training_config(self):
@@ -128,6 +152,8 @@ class DatasetWrapper:
                 "valid_batch_size",
                 "batch_size_per_step",
                 "batch_size_per_node",
+                "ds_names",
+                "weights",
             ]
         }
 
@@ -139,16 +165,11 @@ class DatasetWrapper:
             ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
         else:
             dataset_iterators = [dataset._train for dataset in self.datasets]
-            if DEBUG:
-                print("***")
-                print(f"ds_names: {[dataset.ds_name for dataset in self.datasets]}, weights: {self.weights}")
             if self.n_batch > 1:
                 dataset_iterators = [ds.batch(self.n_batch) for ds in dataset_iterators]
             weights = self.weights
-            ds = tf.data.Dataset.sample_from_datasets(
-                dataset_iterators, weights=weights, seed=0, stop_on_empty_dataset=True
-            )
-            # Add deterministic options
+            ds = tf.data.Dataset.sample_from_datasets(dataset_iterators, weights=weights, seed=0)
+            # Add deterministic options - TODO: is it needed?
             options = tf.data.Options()
             options.deterministic = True
             options.experimental_optimization.map_parallelization = False  # Disable parallel mapping
@@ -159,10 +180,6 @@ class DatasetWrapper:
         for item in ds.as_numpy_iterator():
             ds_idx = item.pop("ds_idx")
             ds_name = item.pop("ds_name").decode("utf-8")
-            if DEBUG:
-                print(f"Tensorflow version: {tf.__version__}, ds_name: {ds_name}, ds_idx: {ds_idx}")
-                print("***")
-                exit()
             yield item, ds_idx, ds_name
 
     @property
@@ -201,6 +218,7 @@ class Dataset:
     key_class: str = None  # used for classification
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
+    assert_data_in_VM_region: bool = False  # assert that all files are in the same region as VM
     _train: tf.data.Dataset = field(init=False)
     _valid: tf.data.Dataset = field(init=False)
     rng: tf.random.Generator = field(init=False)
@@ -218,7 +236,6 @@ class Dataset:
             self.deterministic = False
             self.seed_dataset = np.random.randint(0, 2**32 - 1)
         self.rng = tf.random.Generator.from_seed(self.seed_dataset)
-        np.random.seed(self.seed_dataset)
 
         # check if we are on multi-hosts
         self.multi_hosts = jax.process_count() > 1
@@ -386,6 +403,17 @@ class Dataset:
 
                 # sort files
                 files = sorted(files)
+
+                # check correct region
+                instance_region = get_current_instance_region()
+                if self.assert_data_in_VM_region:
+                    for file in files:
+                        if "gs://" in file:
+                            bucket_name = file.split("/")[2]
+                            bucket_region = get_bucket_region(bucket_name)
+                            assert (
+                                bucket_region.lower() == instance_region.lower()
+                            ), f"File {file} is not in the correct region {bucket_region} != {instance_region}"
 
                 # shuffle files and select subset
                 if augment:
@@ -616,3 +644,25 @@ class ChoiceDataset:
 
 
 choiceDataset = ChoiceDataset()
+
+
+@cache
+def get_bucket_region(bucket_name):
+    storage_client = storage.Client()
+    bucket = storage_client.get_bucket(bucket_name)
+    return bucket.location
+
+
+@cache
+def get_current_instance_region() -> str:
+    metadata_server = "http://metadata.google.internal"
+    metadata_flavor = {"Metadata-Flavor": "Google"}
+
+    # Get zone from metadata server
+    zone_path = requests.get(f"{metadata_server}/computeMetadata/v1/instance/zone", headers=metadata_flavor).text
+
+    # Extract region from zone
+    zone = zone_path.split("/")[-1]  # gets 'us-central1-a'
+    region = "-".join(zone.split("-")[:-1])  # removes the last part ('a')
+
+    return region
