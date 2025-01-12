@@ -861,7 +861,7 @@ def main():
         del clipConfig["text_config"]["gradient_checkpointing"]
     except KeyError:
         pass
-    
+
     # Update config
     maxtext_args = None
     maxtext_mesh = None
@@ -1073,6 +1073,8 @@ def main():
 
     # Restore checkpoint
     def _restore_checkpoint(ckpt, dir, step):
+        if training_args.do_test_steps:
+            return ckpt
         logger.info(f"Restoring checkpoint from {dir} at step {step}")
         restore_args = orbax_utils.restore_args_from_target(ckpt, mesh)
         orbax_options = orbax.checkpoint.CheckpointManagerOptions(enable_async_checkpointing=False)
