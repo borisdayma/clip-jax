@@ -2171,7 +2171,7 @@ def main():
                         metrics[f"train/loss_{ds_name}"] = metrics["train/loss"]
                         state.log(metrics)
                     metrics_logged = True
-                    stop_training = should_stop_training(metrics)
+                    stop_training = should_stop_training(metrics) and not training_args.do_test_steps
 
                 # evaluation
                 if training_args.do_eval and step % training_args.eval_steps == 0:
