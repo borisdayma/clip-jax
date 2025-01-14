@@ -293,9 +293,9 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Repeat the same batch for debugging."},
     )
-    debug_dataloader: bool = field(
+    force_merge_compile: bool = field(
         default=False,
-        metadata={"help": "Do not perform a real training step."},
+        metadata={"help": "Force merge/compile of full train step."},
     )
 
     dp_devices: int = field(init=False)
@@ -1612,20 +1612,15 @@ def main():
                 raise NotImplementedError
             return loss
 
-    # Define gradient update step fn
+    # Train step
     @partial(
         pjit,
-        in_shardings=(None, params_spec, opt_state_spec, data_spec),
-        out_shardings=(None, params_spec, opt_state_spec, None),
-        donate_argnames=("params", "opt_state", "batch"),
+        in_shardings=(None, params_spec, data_spec),
+        out_shardings=(None, params_spec),
+        donate_argnames=("batch"),
         static_argnames=("gradient_accumulation_steps",),
     )
-    def train_step(rng, params, opt_state, batch, gradient_accumulation_steps):
-        if training_args.debug_dataloader:
-            metrics = {"train/loss": 1.0, "train/learning_rate": 1.0}
-            opt_state_step = 1
-            return metrics, params, opt_state, opt_state_step
-
+    def compute_grads(rng, params, batch, gradient_accumulation_steps):
         # get a minibatch (one gradient accumulation slice)
         def get_minibatch(batch, grad_idx):
             batch = jax.tree.map(lambda x: einshape("(bg)...->gb...", x, g=gradient_accumulation_steps), batch)
@@ -1698,25 +1693,6 @@ def main():
         # enforce sharding
         grads = with_sharding_constraint(grads, params_spec)
 
-        # update params
-        new_params, new_opt_state = update_params(params, opt_state, grads)
-
-        # get opt_state_step
-        if training_args.optim == "distributed_shampoo":
-            opt_state_step = new_opt_state["text"][0] if "text" in new_opt_state else new_opt_state["vision"][0]
-        elif training_args.optim in ["adam", "adafactor"]:
-            opt_state_step = new_opt_state["text"][2].count
-        elif training_args.optim == "kron":
-            psgd_idx = 0
-            for part in new_opt_state:
-                if isinstance(part, dict):  # kron state is a dict
-                    if "Qs_preconditioners" in part:
-                        break
-                psgd_idx += 1
-            opt_state_step = new_opt_state[psgd_idx]["count"]
-        else:
-            raise NotImplementedError
-
         # get global norm
         gradients_norm = jnp.sqrt(
             jnp.sum(jnp.asarray([jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grads)]))
@@ -1770,7 +1746,58 @@ def main():
                 }
             )
 
+        return metrics, grads
+
+    @partial(
+        pjit,
+        in_shardings=(params_spec, params_spec, opt_state_spec),
+        out_shardings=(None, params_spec, opt_state_spec, None),
+        donate_argnames=("params", "grads", "opt_state"),
+    )
+    def apply_grads(params, grads, opt_state):
+        # update params
+        new_params, new_opt_state = update_params(params, opt_state, grads)
+
+        # get opt_state_step
+        if training_args.optim == "distributed_shampoo":
+            opt_state_step = new_opt_state["text"][0] if "text" in new_opt_state else new_opt_state["vision"][0]
+        elif training_args.optim in ["adam", "adafactor"]:
+            opt_state_step = new_opt_state["text"][2].count
+        elif training_args.optim == "kron":
+            psgd_idx = 0
+            for part in new_opt_state:
+                if isinstance(part, dict):  # kron state is a dict
+                    if "Qs_preconditioners" in part:
+                        break
+                psgd_idx += 1
+            opt_state_step = new_opt_state[psgd_idx]["count"]
+        else:
+            raise NotImplementedError
+
+        # get metrics
+        metrics = {"train/learning_rate": learning_rate_fn(opt_state_step)}
+
         return metrics, new_params, new_opt_state, opt_state_step
+
+    # Define full train step
+    def train_step(rng, params, opt_state, batch, gradient_accumulation_steps):
+        metrics_1, grads = compute_grads(rng, params, batch, gradient_accumulation_steps)
+        metrics_2, new_params, new_opt_state, opt_state_step = apply_grads(params, grads, opt_state)
+        metrics = {**metrics_1, **metrics_2}
+        return metrics, new_params, new_opt_state, opt_state_step
+
+    # combine train_step
+    combine_train_step = (
+        training_args.optim in ["adam", "adafactor"] or len(dataset.datasets) == 1 or training_args.force_merge_compile
+    )
+    if combine_train_step:
+        train_step = pjit(
+            train_step,
+            in_shardings=(None, params_spec, opt_state_spec, data_spec),
+            out_shardings=(None, params_spec, opt_state_spec, None),
+            donate_argnames=("params", "opt_state", "batch"),
+            static_argnames=("gradient_accumulation_steps",),
+        )
 
     # Evaluation step
     @partial(
