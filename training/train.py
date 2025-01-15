@@ -1059,8 +1059,8 @@ def main():
             model_args.model_name_or_path is None
             or training_args.reinit_text
             or training_args.reinit_vision_projection
-            or training_args.position_embedding_factorized is not None
-            or training_args.position_embedding_shape is not None
+            or model_args.position_embedding_factorized is not None
+            or model_args.position_embedding_shape is not None
         ):
             params = model.init_weights(rng)["params"]
         else:
@@ -1088,8 +1088,8 @@ def main():
             }
         elif training_args.reinit_vision_projection:
             transforms = {r"(.*)(vision_projection)(.*)": orbax.checkpoint.Transform(use_fallback=True)}
-        elif (training_args.position_embedding_factorized is not None) or (
-            training_args.position_embedding_shape is not None
+        elif (model_args.position_embedding_factorized is not None) or (
+            model_args.position_embedding_shape is not None
         ):
             transforms = {r"(.*)(_embeds_)(.*)": orbax.checkpoint.Transform(use_fallback=True)}
         else:
