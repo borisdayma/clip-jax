@@ -854,7 +854,8 @@ def main():
     assert not (isMaxtext and is_classification), "Cannot be both MaxText and classification."
 
     # TODO: remove legacy
-    clipConfig["vision_config"]["position_embedding_shape"] = (16, 16)
+    if not clipConfig["vision_config"]["position_embedding_shape"]:
+        clipConfig["vision_config"]["position_embedding_shape"] = (16, 16)
     try:
         del clipConfig["vision_config"]["gradient_checkpointing"]
         del clipConfig["text_config"]["gradient_checkpointing"]
