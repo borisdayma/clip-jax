@@ -26,7 +26,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax.linen import partitioning as nn_partitioning
-from flax.linen.linear import DotGeneralT, PrecisionLike
+from flax.linen.linear import DotGeneralT, PrecisionLike, _canonicalize_tuple, _normalize_axes
 from flax.linen.module import merge_param
 from flax.linen.partitioning import ScanIn
 from jax.ad_checkpoint import checkpoint_name
@@ -137,6 +137,59 @@ def posemb_sincos_2d(h, w, width, temperature=10_000.0, dtype=jnp.float32):
     x = jnp.einsum("m,d->md", x.flatten(), omega)
     pe = jnp.concatenate([jnp.sin(x), jnp.cos(x), jnp.sin(y), jnp.cos(y)], axis=1)
     return jnp.asarray(pe, dtype)[None, :, :]
+
+
+# DenseGeneral without param reshape
+
+
+class DenseGeneral(nn.Module):
+    features: Union[Iterable[int], int]
+    axis: Union[Iterable[int], int] = -1
+    use_bias: bool = False
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
+    kernel_init: Optional[Callable[[PRNGKey, Shape, Dtype], Array]] = default_kernel_init
+    bias_init: Optional[Callable[[PRNGKey, Shape, Dtype], Array]] = nn.initializers.zeros_init()
+    precision: Optional[str] = None
+
+    @nn.compact
+    def __call__(self, inputs: Array) -> Array:
+        """Applies a linear transformation to the inputs along multiple dimensions.
+
+        Args:
+          inputs: The nd-array to be transformed.
+
+        Returns:
+          The transformed input.
+        """
+
+        def compute_dot_general(inputs, kernel, axis, contract_ind):
+            """Computes a dot_general operation that may be quantized."""
+            return jax.lax.dot_general(
+                inputs,
+                kernel,
+                ((axis, contract_ind), ((), ())),
+                precision=self.precision,
+            )
+
+        features = _canonicalize_tuple(self.features)
+        axis = _canonicalize_tuple(self.axis)
+
+        inputs = jnp.asarray(inputs, self.dtype)
+        axis = _normalize_axes(axis, inputs.ndim)
+
+        kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
+        kernel = self.param("kernel", self.kernel_init, kernel_shape, self.param_dtype)
+        kernel = jnp.asarray(kernel, self.dtype)
+
+        contract_ind = tuple(range(0, len(axis)))
+        output = compute_dot_general(inputs, kernel, axis, contract_ind)
+
+        if self.use_bias:
+            bias = self.param("bias", self.bias_init, kernel_shape[-len(features) :], self.param_dtype)
+            bias = jnp.asarray(bias, self.dtype)
+            output += bias
+        return output
 
 
 # Rotary Embeddings - Source: https://github.com/google/maxtext
@@ -450,7 +503,7 @@ class MultiHeadDotProductAttention(nn.Module):
 
         with jax.profiler.TraceAnnotation("Attention_Block"):
             dense = functools.partial(
-                nn.DenseGeneral,
+                DenseGeneral,
                 axis=-1,
                 dtype=self.dtype,
                 param_dtype=self.param_dtype,
@@ -459,7 +512,6 @@ class MultiHeadDotProductAttention(nn.Module):
                 bias_init=nn.with_logical_partitioning(self.bias_init, ("kv",)),
                 use_bias=self.use_bias,
                 precision=self.precision,
-                dot_general=self.qkv_dot_general,
             )
             # project inputs_q to multi-headed q/k/v
             # dimensions are then [batch..., length, n_heads, n_features_per_head]
@@ -582,7 +634,7 @@ class MultiHeadDotProductAttention(nn.Module):
             )  # pytype: disable=wrong-keyword-args
             # back to the original inputs dimensions
             kernel_init_out = self.kernel_init_out if self.kernel_init_out is not None else self.kernel_init
-            out = nn.DenseGeneral(
+            out = DenseGeneral(
                 features=features,
                 axis=(-2, -1),
                 kernel_init=nn.with_logical_partitioning(kernel_init_out, ("heads", "kv", self.embed_dim_name)),
@@ -591,7 +643,6 @@ class MultiHeadDotProductAttention(nn.Module):
                 dtype=self.dtype,
                 param_dtype=self.param_dtype,
                 precision=self.precision,
-                dot_general=self.out_dot_general,
                 name="out",  # type: ignore[call-arg]
             )(x)
             return out
@@ -695,7 +746,7 @@ class CLIPMLP(nn.Module):
             activations = []
             for idx, act_fn in enumerate(self.activations):
                 dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
-                x = nn.DenseGeneral(
+                x = DenseGeneral(
                     self.mlp_dim,
                     dtype=self.dtype,
                     use_bias=self.use_bias,
@@ -727,7 +778,7 @@ class CLIPMLP(nn.Module):
                 x, deterministic=deterministic
             )  # Broadcast along length.
             x = with_logical_constraint(x, ("batch", "length", "mlp"))
-            output = nn.DenseGeneral(
+            output = DenseGeneral(
                 embed_dim,
                 dtype=self.dtype,
                 use_bias=self.use_bias,
