@@ -168,11 +168,6 @@ class DatasetWrapper:
                 dataset_iterators = [ds.batch(self.n_batch) for ds in dataset_iterators]
             weights = self.weights
             ds = tf.data.Dataset.sample_from_datasets(dataset_iterators, weights=weights, seed=0)
-            # Add deterministic options - TODO: is it needed?
-            options = tf.data.Options()
-            options.deterministic = True
-            options.experimental_optimization.map_parallelization = False  # Disable parallel mapping
-            ds = ds.with_options(options)
             ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
             if self.n_batch > 1:
                 ds = ds.unbatch()
@@ -230,9 +225,7 @@ class Dataset:
         assert self.format in ["rgb", "lab"], f"Invalid format: {self.format}"
 
         # define rng
-        self.deterministic = True
         if self.seed_dataset is None:
-            self.deterministic = False
             self.seed_dataset = np.random.randint(0, 2**32 - 1)
         self.rng = tf.random.Generator.from_seed(self.seed_dataset)
 
@@ -428,7 +421,7 @@ class Dataset:
                 # non deterministic read (faster)
                 if augment:
                     ignore_order = tf.data.Options()
-                    ignore_order.deterministic = self.deterministic
+                    ignore_order.deterministic = False
                     ds = ds.with_options(ignore_order)
 
                     if self.multi_hosts:
