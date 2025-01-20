@@ -8,7 +8,7 @@ import numpy as np
 import requests
 import tensorflow as tf
 import tensorflow_io as tfio
-from einshape import jax_einshape as einshape
+from einshape import tf_einshape as einshape
 from jaxfusion.text import TextNormalizer
 
 try:
@@ -29,6 +29,7 @@ class DatasetWrapper:
         valid_batch_size_per_node_splits=None,
         gradient_accumulation_steps_splits=None,
         prefetch_buffer_size=None,
+        key_class=None,
         seed_dataset=None,
         **kwargs,
     ):
@@ -40,6 +41,7 @@ class DatasetWrapper:
             tf.random.set_seed(global_seed)
 
         self.n_batch = n_batch
+        self.key_class = key_class
         self.ds_splits = ds_splits
         self.prefetch_buffer_size = prefetch_buffer_size
         if not ds_splits:
@@ -49,6 +51,7 @@ class DatasetWrapper:
                     ds_name="default",
                     prefetch_buffer_size=prefetch_buffer_size,
                     seed_dataset=seed_dataset,
+                    key_class=key_class,
                     **kwargs,
                 )
             ]
@@ -119,7 +122,7 @@ class DatasetWrapper:
                     "seed_dataset": seed_dataset,
                 }
                 ds_idx += 1
-                self.datasets.append(Dataset(**dataset_kwargs))
+                self.datasets.append(Dataset(key_class=key_class, **dataset_kwargs))
                 self.gradient_accumulation_steps.append(gradient_accumulation_steps)
                 self.train_batch_size.append(train_batch_size)
                 self.valid_batch_size.append(valid_batch_size)
@@ -386,12 +389,12 @@ class Dataset:
 
             # pad
             n_patches = image.shape[0]
-            image = np.pad(image, [(0, self.max_patches - n_patches), (0, 0), (0, 0), (0, 0)])
-            pos_ids = np.pad(pos_ids, [(0, self.max_patches - n_patches), (0, 0)])
+            image = tf.pad(image, [(0, self.max_patches - n_patches), (0, 0), (0, 0), (0, 0)])
+            pos_ids = tf.pad(pos_ids, [(0, self.max_patches - n_patches), (0, 0)])
 
             # create attention mask
-            attention_mask = np.zeros((self.max_patches,), dtype=np.bool_)
-            attention_mask[:n_patches] = 1
+            indices = tf.range(self.max_patches)
+            attention_mask = tf.less(indices, n_patches)
 
             return (
                 {"images": image, "position_ids": pos_ids, "attention_mask": attention_mask},
@@ -405,9 +408,9 @@ class Dataset:
         # normalization
         def _normalize(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
             if isinstance(image, dict):
-                image = image["images"]
                 pos_ids = image["position_ids"]
                 attention_mask = image["attention_mask"]
+                image = image["images"]
             else:
                 pos_ids = None
                 attention_mask = None
