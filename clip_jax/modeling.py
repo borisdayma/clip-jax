@@ -272,7 +272,7 @@ class CLIPVisionEmbeddings(nn.Module):
     dtype: Dtype
 
     @nn.compact
-    def __call__(self, pixel_values):
+    def __call__(self, pixel_values, attention_mask=None, position_ids=None):
         assert self.position_embedding_type in [
             "learnt",
             "sincos2d",
@@ -400,7 +400,7 @@ class CLIPVisionEmbeddings(nn.Module):
             )
             embeddings = jnp.concatenate([embeddings, jnp.tile(registers, [batch_size, 1, 1])], axis=1)
             embeddings = with_logical_constraint(embeddings, ("batch", "length", "embed"))
-        return embeddings
+        return embeddings, attention_mask
 
 
 class CLIPTextEmbeddings(nn.Module):
@@ -813,6 +813,7 @@ class CLIPEncoderLayer(nn.Module):
         hidden_states,
         attention_mask,
         encoder_hidden_states,
+        encoder_attention_mask,
         position_ids: Optional[Array] = None,
         deterministic: bool = True,
     ):
@@ -898,6 +899,7 @@ class CLIPEncoderLayer(nn.Module):
             )(
                 inputs_q=hidden_states,
                 inputs_kv=encoder_hidden_states,
+                mask=encoder_attention_mask,
                 deterministic=deterministic,
             )
             hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
@@ -959,6 +961,7 @@ class CLIPEncoder(nn.Module):
         hidden_states,
         attention_mask=None,
         encoder_hidden_states=None,
+        encoder_attention_mask=None,
         position_ids=None,
         deterministic=True,
     ):
@@ -983,14 +986,14 @@ class CLIPEncoder(nn.Module):
                 layer,
                 prevent_cse=not use_scan,
                 policy=policy,
-                static_argnums=(-1, -2, -3, -4, -5),
+                static_argnums=(-1,),
             )
 
         hidden_states, _ = nn.scan(
             layer,
             variable_axes={"params": params_spec, "cache": 0, "intermediates": 0},
             split_rngs={"params": True, "dropout": True},
-            in_axes=(nn.broadcast, nn.broadcast, nn.broadcast, nn.broadcast),
+            in_axes=(nn.broadcast, nn.broadcast, nn.broadcast, nn.broadcast, nn.broadcast),
             length=self.num_layers,
             unroll=self.unroll,
             metadata_params={nn.PARTITION_NAME: "layers"},
@@ -1015,13 +1018,13 @@ class CLIPEncoder(nn.Module):
             hidden_states,
             attention_mask,
             encoder_hidden_states,
+            encoder_attention_mask,
             position_ids,
             deterministic,
         )
 
         return dict(
             last_hidden_state=hidden_states,
-            # TODO: add hidden states (for down-stream tasks)
         )
 
 
@@ -1062,6 +1065,7 @@ class CLIPTextTransformer(nn.Module):
         input_ids,
         attention_mask,
         encoder_hidden_states=None,
+        encoder_attention_mask=None,
         position_ids=None,
         decode=False,
         deterministic: bool = True,
@@ -1076,6 +1080,7 @@ class CLIPTextTransformer(nn.Module):
             assert self.eos_token_id is not None
 
         # attention mask
+        batch, seq_len = input_ids.shape
         input_attention_mask = attention_mask
         if attention_mask is not None:
             attention_mask = nn.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
@@ -1085,6 +1090,12 @@ class CLIPTextTransformer(nn.Module):
                 attention_mask = causal_mask
             else:
                 attention_mask = nn.combine_masks(attention_mask, causal_mask)
+        if encoder_attention_mask is not None:
+            encoder_attention_mask = nn.make_attention_mask(
+                input_attention_mask if input_attention_mask is not None else jnp.ones((batch, seq_len)),
+                encoder_attention_mask,
+                dtype=self.dtype,
+            )
 
         # decoder mode
         # src: adapted from google-research/big_vision
@@ -1141,6 +1152,7 @@ class CLIPTextTransformer(nn.Module):
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
             position_ids=position_ids,
             deterministic=deterministic,
         )
@@ -1249,6 +1261,8 @@ class CLIPVisionTransformer(nn.Module):
     def __call__(
         self,
         pixel_values,
+        attention_mask=None,
+        position_ids=None,
         deterministic: bool = True,
     ):
         dtype = jnp.dtype(self.dtype)
@@ -1257,7 +1271,8 @@ class CLIPVisionTransformer(nn.Module):
             print(
                 f"Warning: Input image size ({height}*{width}) doesn't match model ({self.image_size}*{self.image_size})."
             )
-        hidden_states = CLIPVisionEmbeddings(
+
+        hidden_states, attention_mask = CLIPVisionEmbeddings(
             hidden_size=self.hidden_size,
             use_bias=self.use_bias,
             patch_size=self.patch_size,
@@ -1268,8 +1283,14 @@ class CLIPVisionTransformer(nn.Module):
             registers=self.registers,
             dtype=dtype,
             name="embeddings",
-        )(pixel_values)
+        )(pixel_values, attention_mask=attention_mask, position_ids=position_ids)
         hidden_states = with_logical_constraint(hidden_states, ("batch", "length", "embed"))
+
+        input_attention_mask = attention_mask
+        if attention_mask is not None:
+            attention_mask = nn.make_attention_mask(attention_mask, attention_mask, dtype=self.dtype)
+        assert not self.use_causal_mask, "use_causal_mask should be False for vision"
+
         encoder_outputs = CLIPEncoder(
             num_layers=self.num_layers,
             use_rmsnorm=self.use_rmsnorm,
@@ -1291,6 +1312,7 @@ class CLIPVisionTransformer(nn.Module):
             name="encoder",
         )(
             hidden_states=hidden_states,
+            attention_mask=attention_mask,
             deterministic=deterministic,
         )
 
@@ -1320,7 +1342,8 @@ class CLIPVisionTransformer(nn.Module):
             pooled_output = last_hidden_state[:, 0, :]
 
         elif self.pool_type == "gap":
-            # mean pool - jnp.mean -> was leading to large memory consumption in the past
+            if input_attention_mask is not None:
+                last_hidden_state = last_hidden_state * input_attention_mask
             pooled_output = jnp.mean(last_hidden_state, axis=1)
 
         elif self.pool_type == "map":
@@ -1338,7 +1361,7 @@ class CLIPVisionTransformer(nn.Module):
                 mlp_dropout_rate=self.mlp_dropout_rate,
                 float32_logits=self.float32_logits,
                 dtype=dtype,
-            )(last_hidden_state, None, deterministic=deterministic)
+            )(last_hidden_state, input_attention_mask, deterministic=deterministic)
             if self.num_queries == 1:
                 # used for clip
                 pooled_output = pooled_output[:, 0]
@@ -1355,7 +1378,7 @@ class CLIPVisionTransformer(nn.Module):
         return dict(
             last_hidden_state=last_hidden_state,
             pooled_output=pooled_output,
-            # TODO: add hidden states (for down-stream tasks)
+            attention_mask=input_attention_mask,
         )
 
 
@@ -1607,12 +1630,19 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         pixel_values,
         attention_mask,
         position_ids: Optional[jnp.ndarray] = None,
+        image_attention_mask: Optional[jnp.ndarray] = None,
+        image_position_ids: Optional[jnp.ndarray] = None,
         decode: bool = False,
         deterministic: bool = True,
         vision_start_ids: Optional[Any] = None,
         model_mode: str = common_types.MODEL_MODE_TRAIN,
     ):
-        image_features = self.get_image_features(pixel_values, deterministic=deterministic)
+        image_features = self.get_image_features(
+            pixel_values,
+            attention_mask=image_attention_mask,
+            position_ids=image_position_ids,
+            deterministic=deterministic,
+        )
         image_embeds, vision_model_output = (
             image_features["image_embeds"],
             image_features["vision_model_output"],
@@ -1625,6 +1655,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             input_ids,
             attention_mask,
             encoder_hidden_states=vision_model_output["last_hidden_state"] if is_decoder else None,
+            encoder_attention_mask=vision_model_output["attention_mask"] if is_decoder else None,
             position_ids=position_ids,
             vision_start_ids=vision_start_ids,
             decode=decode,
@@ -1668,6 +1699,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         input_ids,
         attention_mask,
         encoder_hidden_states: Optional[jnp.ndarray] = None,
+        encoder_attention_mask: Optional[jnp.ndarray] = None,
         position_ids: Optional[jnp.ndarray] = None,
         vision_start_ids: Optional[Any] = None,
         decode: bool = False,
@@ -1679,6 +1711,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
                 position_ids=position_ids,
                 decode=decode,
                 deterministic=deterministic,
@@ -1688,6 +1721,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
             if self.text_projection is not None:
                 text_embeds = self.text_projection(text_embeds)
         else:
+            assert encoder_attention_mask is None
             text_embeds = None
             last_hidden_state = self.text_model(
                 decoder_input_tokens=input_ids,
@@ -1708,10 +1742,14 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
     def get_image_features(
         self,
         pixel_values,
+        attention_mask: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
         deterministic: bool = True,
     ):
         vision_outputs = self.vision_model(
             pixel_values=pixel_values,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
             deterministic=deterministic,
         )
         image_embeds = vision_outputs["pooled_output"]

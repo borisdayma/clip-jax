@@ -8,6 +8,7 @@ import numpy as np
 import requests
 import tensorflow as tf
 import tensorflow_io as tfio
+from einshape import jax_einshape as einshape
 from jaxfusion.text import TextNormalizer
 
 try:
@@ -28,7 +29,6 @@ class DatasetWrapper:
         valid_batch_size_per_node_splits=None,
         gradient_accumulation_steps_splits=None,
         prefetch_buffer_size=None,
-        key_class=None,
         seed_dataset=None,
         **kwargs,
     ):
@@ -40,7 +40,6 @@ class DatasetWrapper:
             tf.random.set_seed(global_seed)
 
         self.n_batch = n_batch
-        self.key_class = key_class
         self.ds_splits = ds_splits
         self.prefetch_buffer_size = prefetch_buffer_size
         if not ds_splits:
@@ -212,6 +211,8 @@ class Dataset:
     key_class: str = None  # used for classification
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
+    patch_size: int = None  # patchify dataset
+    max_image_size: str = None  # max size of images
     assert_data_in_VM_region: bool = False  # assert that all files are in the same region as VM
     _train: tf.data.Dataset = field(init=False)
     _valid: tf.data.Dataset = field(init=False)
@@ -219,10 +220,22 @@ class Dataset:
     multi_hosts: bool = field(init=False)
     process_count: int = field(init=False)  # number of groups for validation set (multi-host)
     process_index: int = field(init=False)  # group number to use for validation set (multi-host)
+    max_patches: int = field(init=False)  # max number of patches per image
 
     def __post_init__(self):
         # verify valid args
         assert self.format in ["rgb", "lab"], f"Invalid format: {self.format}"
+
+        # patchify dataset
+        if self.patch_size is not None:
+            assert self.max_image_size is not None, "max_image_size must be set when patch_size is set"
+            max_image_size = self.max_image_size.split("x")
+            max_image_size = [int(size) for size in max_image_size]
+            assert len(max_image_size) == 2, "max_image_size must be in the format HxW"
+            assert max_image_size[0] % self.patch_size == 0, "max_image_size must be divisible by patch_size"
+            assert max_image_size[1] % self.patch_size == 0, "max_image_size must be divisible by patch_size"
+            max_patches = max_image_size[0] // self.patch_size * max_image_size[1] // self.patch_size
+            self.max_patches = max_patches
 
         # define rng
         if self.seed_dataset is None:
@@ -354,8 +367,50 @@ class Dataset:
                 class_id,
             )
 
+        def _patchify(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
+            # position ids
+            n_pos_x = image.shape[1] // self.patch_size
+            n_pos_y = image.shape[0] // self.patch_size
+            pos_x = np.arange(n_pos_x) / (n_pos_x - 1)
+            pos_y = np.arange(n_pos_y) / (n_pos_y - 1)
+            pos_ids = np.stack(np.meshgrid(pos_x, pos_y, indexing="ij"), axis=-1)
+
+            # patchify image
+            image = einshape(
+                "(hm)(wn)c->(hw)mnc",
+                image,
+                m=self.patch_size,
+                n=self.patch_size,
+            )
+            pos_ids = einshape("hwc->(hw)c", pos_ids)
+
+            # pad
+            n_patches = image.shape[0]
+            image = np.pad(image, [(0, self.max_patches - n_patches), (0, 0), (0, 0), (0, 0)])
+            pos_ids = np.pad(pos_ids, [(0, self.max_patches - n_patches), (0, 0)])
+
+            # create attention mask
+            attention_mask = np.zeros((self.max_patches,), dtype=np.bool_)
+            attention_mask[:n_patches] = 1
+
+            return (
+                {"images": image, "position_ids": pos_ids, "attention_mask": attention_mask},
+                caption,
+                caption_2,
+                caption_assistant,
+                caption_assistant_2,
+                class_id,
+            )
+
         # normalization
         def _normalize(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
+            if isinstance(image, dict):
+                image = image["images"]
+                pos_ids = image["position_ids"]
+                attention_mask = image["attention_mask"]
+            else:
+                pos_ids = None
+                attention_mask = None
             if self.format == "rgb":
                 image = (
                     tf.cast(image, tf.float32) / 255.0 - tf.convert_to_tensor([self.mean], dtype=tf.float32)
@@ -374,6 +429,10 @@ class Dataset:
                 res["class_id"] = class_id
             res["ds_idx"] = self.ds_idx
             res["ds_name"] = self.ds_name
+            if pos_ids is not None:
+                res["position_ids"] = pos_ids
+            if attention_mask is not None:
+                res["image_attention_mask"] = attention_mask
             return res
 
         for folder, dataset, augment, batch_size in zip(
@@ -461,6 +520,10 @@ class Dataset:
                 # resize
                 if self.image_crop_resize:
                     ds = ds.map(_resize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+                # patchify (only for training)
+                if augment and self.patch_size:
+                    ds = ds.map(_patchify, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 # batch, normalize and prefetch
                 ds = ds.batch(batch_size, drop_remainder=True)
@@ -620,6 +683,9 @@ def preprocess_batch(
         target_id = tokenizer.unk_token_id  # TODO: configure it
         vision_start_ids = np.where(txt_inputs["input_ids"] == target_id, 1, 0).argmax(axis=-1)
         txt_inputs["vision_start_ids"] = vision_start_ids
+    if "image_attention_mask" in batch.keys():
+        txt_inputs["image_attention_mask"] = batch["image_attention_mask"]
+        txt_inputs["image_position_ids"] = batch["position_ids"]
     batch = {"pixel_values": batch["images"], **txt_inputs}
     return batch
 

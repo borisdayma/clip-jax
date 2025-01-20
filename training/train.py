@@ -554,6 +554,14 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "Name of a 2nd key containing elements for assistant when using chat template."},
     )
+    patch_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "The size of the patches to use if we patchify data."},
+    )
+    max_image_size: Optional[str] = field(
+        default=None,
+        metadata={"help": "The maximum size of the image to use if we patchify data."},
+    )
     assert_data_in_VM_region: bool = field(
         default=False,
         metadata={"help": "Assert that all files are in the same region as VM."},
@@ -569,6 +577,8 @@ class DataTrainingArguments:
             self.mean = (0.5, 0.5, 0.5)
         if self.std is None:
             self.std = (0.5, 0.5, 0.5)
+        if self.patch_size is not None:
+            assert self.max_image_size is not None
 
 
 def flat_args(model_args, data_args, training_args):
@@ -1044,6 +1054,11 @@ def main():
         in_shardings=(data_global_sharding,),
         out_shardings=data_mesh_sharding,
     )
+
+    # gather data
+    @partial(pjit, in_shardings=(data_mesh_sharding,), out_shardings=PartitionSpec(None), static_argnums=1)
+    def gather_data(x, n):
+        return x[:n]
 
     def _get_global_shape(x):
         shape = x.shape
@@ -2011,8 +2026,7 @@ def main():
                 predictions_batch = jax.device_get(predictions_batch)
                 preds = tokenizer.batch_decode(predictions_batch, skip_special_tokens=True)
                 preds = [c.strip() for c in preds]
-                pixel_values = batch["pixel_values"][:n_needed]
-                # TODO: not always addressable (can be on other hosts), extract images with pjit -> None
+                pixel_values = gather_data(batch["pixel_values"], n_needed)
                 images = jax.device_get(pixel_values)
                 images = images[:n_needed]
                 images = logits_to_image(images)
