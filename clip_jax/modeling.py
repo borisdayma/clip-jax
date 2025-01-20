@@ -25,6 +25,7 @@ import flax.struct
 import jax
 import jax.numpy as jnp
 import numpy as np
+from einshape import jax_einshape as einshape
 from flax.linen import partitioning as nn_partitioning
 from flax.linen.linear import DotGeneralT, PrecisionLike, _canonicalize_tuple, _normalize_axes
 from flax.linen.module import merge_param
@@ -273,6 +274,25 @@ class CLIPVisionEmbeddings(nn.Module):
 
     @nn.compact
     def __call__(self, pixel_values, attention_mask=None, position_ids=None):
+        if position_ids is not None:
+            # TEMP: do not unpatchify but use _interpolate
+            print(f"{pixel_values.shape=}")
+            print(f"{position_ids.shape=}")
+            print(f"{self.patch_size=}")
+            pixel_values = pixel_values[:, : self.patch_size * self.patch_size]  # remove padding
+            attention_mask = attention_mask[:, : self.patch_size * self.patch_size]  # remove padding
+            h = int(np.sqrt(pixel_values.shape[1]))
+            pixel_values = einshape(
+                "b(hw)mnc->b(hm)(wn)c",
+                pixel_values,
+                m=self.patch_size,
+                n=self.patch_size,
+                h=h,
+            )
+            if self.registers:
+                # add attention to registers
+                attention_mask = jnp.pad(attention_mask, ((0, 0), (0, self.registers)), constant_values=1)
+
         assert self.position_embedding_type in [
             "learnt",
             "sincos2d",
