@@ -1266,7 +1266,7 @@ class CLIPVisionTransformer(nn.Module):
         deterministic: bool = True,
     ):
         dtype = jnp.dtype(self.dtype)
-        batch, height, width, channels = pixel_values.shape
+        height, width, channels = pixel_values.shape[-3:]
         if not (height == self.image_size and width == self.image_size and channels == 3):
             print(
                 f"Warning: Input image size ({height}*{width}) doesn't match model ({self.image_size}*{self.image_size})."

@@ -372,11 +372,11 @@ class Dataset:
 
         def _patchify(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
             # position ids
-            n_pos_x = image.shape[1] // self.patch_size
-            n_pos_y = image.shape[0] // self.patch_size
-            pos_x = np.arange(n_pos_x) / (n_pos_x - 1)
-            pos_y = np.arange(n_pos_y) / (n_pos_y - 1)
-            pos_ids = np.stack(np.meshgrid(pos_x, pos_y, indexing="ij"), axis=-1)
+            n_pos_x = tf.shape(image)[1] // self.patch_size
+            n_pos_y = tf.shape(image)[0] // self.patch_size
+            pos_x = tf.range(n_pos_x) / (n_pos_x - 1)
+            pos_y = tf.range(n_pos_y) / (n_pos_y - 1)
+            pos_ids = tf.stack(tf.meshgrid(pos_x, pos_y, indexing="ij"), axis=-1)
 
             # patchify image
             image = einshape(
@@ -388,7 +388,7 @@ class Dataset:
             pos_ids = einshape("hwc->(hw)c", pos_ids)
 
             # pad
-            n_patches = image.shape[0]
+            n_patches = tf.shape(image)[0]
             image = tf.pad(image, [(0, self.max_patches - n_patches), (0, 0), (0, 0), (0, 0)])
             pos_ids = tf.pad(pos_ids, [(0, self.max_patches - n_patches), (0, 0)])
 
