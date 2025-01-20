@@ -1286,7 +1286,7 @@ def main():
             lax_map_batch_size=training_args.lax_map_batch_size if training_args.lax_map_batch_size is not None else 8,
             normalize_grads=training_args.kron_normalize_grads,
             params_sharding=trainable_params(params_spec, training_args),
-            preconditioner_sharding=PartitionSpec(None, None),
+            preconditioner_sharding=PartitionSpec("data", None),
         )
         _opt = [
             scale_by_kron(**kron_kwargs),
