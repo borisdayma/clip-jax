@@ -2026,7 +2026,8 @@ def main():
                 predictions_batch = jax.device_get(predictions_batch)
                 preds = tokenizer.batch_decode(predictions_batch, skip_special_tokens=True)
                 preds = [c.strip() for c in preds]
-                pixel_values = gather_data(batch["pixel_values"], n_needed)
+                with mesh:
+                    pixel_values = gather_data(batch["pixel_values"], n_needed)
                 images = jax.device_get(pixel_values)
                 images = images[:n_needed]
                 images = logits_to_image(images)
