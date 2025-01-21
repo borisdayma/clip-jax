@@ -103,7 +103,6 @@ def _convert_to_activation_function(fn_or_string: Union[str, Callable]) -> Calla
         raise ValueError("don't know how to convert %s to an activation function" % (fn_or_string,))
 
 
-# TODO: will be used for https://github.com/borisdayma/clip-jax/issues/12
 def _interpolate(idxs, values):
     """
     Interpolate values at given indices.
@@ -112,16 +111,19 @@ def _interpolate(idxs, values):
         idxs: should be fractional, between 0 and 1
         values: values to interpolate, assumed to be evenly spaced between 0 and 1
     """
-    idxs = idxs * (values.shape[0] - 1)
-    idxs_floor = jnp.floor(idxs)
-    idxs_ceil = jnp.ceil(idxs)
-    idxs_frac = idxs - idxs_floor.astype(jnp.float32)
-    idxs_floor = idxs_floor.astype(jnp.int32)
-    idxs_ceil = idxs_ceil.astype(jnp.int32)
-    values_floor = jnp.take(values, idxs_floor, axis=0)
-    values_ceil = jnp.take(values, idxs_ceil, axis=0)
-    idxs_frac = idxs_frac[..., None]
-    return (1 - idxs_frac) * values_floor + idxs_frac * values_ceil
+    max_idxs = idxs.max(-1, keepdims=True)
+    idxs = idxs * (values.shape[0] - 1) / max_idxs
+    idxs_left = jnp.floor(idxs)
+    idxs_left = jnp.clip(idxs_left, 0, values.shape[0] - 2)
+    idxs_right = idxs_left + 1
+    idxs_frac = idxs - idxs_left.astype(jnp.float64)
+    idxs_left = idxs_left.astype(jnp.int32)
+    idxs_right = idxs_right.astype(jnp.int32)
+    values_left = jnp.take(values, idxs_left, axis=0)
+    values_right = jnp.take(values, idxs_right, axis=0)
+    # broadcast idxs_frac to match values_floor and values_ceil
+    idxs_frac = jnp.reshape(idxs_frac, idxs_frac.shape + (1,) * (values.ndim - 1))
+    return (1 - idxs_frac) * values_left + idxs_frac * values_right
 
 
 # sincos2d position - Source: https://github.com/google-research/big_vision
@@ -273,26 +275,21 @@ class CLIPVisionEmbeddings(nn.Module):
     dtype: Dtype
 
     @nn.compact
-    def __call__(self, pixel_values, attention_mask=None, position_ids=None):
-        if position_ids is not None:
-            # TEMP: do not unpatchify but use _interpolate
-            print(f"{pixel_values.shape=}")
-            print(f"{position_ids.shape=}")
-            print(f"{self.patch_size=}")
-            pixel_values = pixel_values[:, : self.patch_size * self.patch_size]  # remove padding
-            attention_mask = attention_mask[:, : self.patch_size * self.patch_size]  # remove padding
-            h = int(np.sqrt(pixel_values.shape[1]))
-            pixel_values = einshape(
-                "b(hw)mnc->b(hm)(wn)c",
-                pixel_values,
-                m=self.patch_size,
-                n=self.patch_size,
-                h=h,
-            )
-            if self.registers:
-                # add attention to registers
-                attention_mask = jnp.pad(attention_mask, ((0, 0), (0, self.registers)), constant_values=1)
-
+    def __call__(
+        self,
+        pixel_values,
+        position_ids=None,
+        attention_mask=None,
+    ):
+        inputs_patchified = pixel_values.ndim == 5
+        batch_size = pixel_values.shape[0]
+        if inputs_patchified:
+            assert position_ids is not None
+            assert attention_mask is not None
+            assert self.position_embedding_factorized
+            assert self.position_embedding_type == "learnt"
+            assert self.patch_size == pixel_values.shape[-2]
+            assert self.patch_size == pixel_values.shape[-3]
         assert self.position_embedding_type in [
             "learnt",
             "sincos2d",
@@ -315,10 +312,13 @@ class CLIPVisionEmbeddings(nn.Module):
             bias_init=nn.with_logical_partitioning(nn.initializers.zeros_init(), ("embed",)),
             name="patch_embeds",
         )(pixel_values)
-        patch_embeds = with_logical_constraint(patch_embeds, ("batch", "height", "width", "embed"))
-        batch_size, height, width, channels = patch_embeds.shape
-        num_patches = height * width
-        patch_embeds = jnp.reshape(patch_embeds, (batch_size, num_patches, channels))
+        if pixel_values.ndim == 5:
+            # inputs patchified
+            patch_embeds = einshape("bs11c->bsc", patch_embeds)
+        else:
+            _, height, width, channels = patch_embeds.shape
+            num_patches = height * width
+            patch_embeds = einshape("bhwc->b(hw)c", patch_embeds)
         patch_embeds = with_logical_constraint(patch_embeds, ("batch", "length", "embed"))
         if self.position_embedding_type == "learnt":
             num_positions = self.position_embedding_shape[0] * self.position_embedding_shape[1]
@@ -343,34 +343,35 @@ class CLIPVisionEmbeddings(nn.Module):
                     ),
                     (1, position_width, self.hidden_size),
                 )
-                if position_height != height:
-                    # interpolate
-                    position_embeds_height = jax.image.resize(
-                        position_embeds_height, (1, height, self.hidden_size), method="linear"
-                    )
-                    position_embeds_height = with_logical_constraint(
-                        position_embeds_height, ("batch", "height", "embed")
-                    )
-                if position_width != width:
-                    # interpolate
-                    position_embeds_width = jax.image.resize(
-                        position_embeds_width, (1, width, self.hidden_size), method="linear"
-                    )
-                    position_embeds_width = with_logical_constraint(position_embeds_width, ("batch", "width", "embed"))
-                # make it 2d
-                position_embeds_height = position_embeds_height[:, :, None, :]
-                position_embeds_width = position_embeds_width[:, None, :, :]
-                position_embeds = position_embeds_height + position_embeds_width
-                assert (
-                    position_embeds.shape
-                    == (
-                        1,
-                        height,
-                        width,
-                        self.hidden_size,
-                    )
-                ), f"Position embeds shape: {position_embeds.shape}, expected: (1, {height}, {width}, {self.hidden_size})"
-                position_embeds = jnp.reshape(position_embeds, (1, num_patches, self.hidden_size))
+                if inputs_patchified:
+                    position_embeds_height = _interpolate(position_ids[..., 0], position_embeds_height[0])
+                    position_embeds_width = _interpolate(position_ids[..., 1], position_embeds_width[0])
+                    position_embeds = position_embeds_height + position_embeds_width
+                    position_embeds = with_logical_constraint(position_embeds, ("batch", "length", "embed"))
+                    assert position_embeds.shape == (batch_size, patch_embeds.shape[1], self.hidden_size)
+                else:
+                    if position_height != height:
+                        # interpolate
+                        position_ids_height = jnp.arange(height)
+                        position_embeds_height = _interpolate(position_ids_height, position_embeds_height[0])[None]
+                    if position_width != width:
+                        # interpolate
+                        position_ids_width = jnp.arange(width)
+                        position_embeds_width = _interpolate(position_ids_width, position_embeds_width[0])[None]
+                    # make it 2d
+                    position_embeds_height = position_embeds_height[:, :, None, :]
+                    position_embeds_width = position_embeds_width[:, None, :, :]
+                    position_embeds = position_embeds_height + position_embeds_width
+                    assert (
+                        position_embeds.shape
+                        == (
+                            1,
+                            height,
+                            width,
+                            self.hidden_size,
+                        )
+                    ), f"Position embeds shape: {position_embeds.shape}, expected: (1, {height}, {width}, {self.hidden_size})"
+                    position_embeds = einshape("bhwc->b(hw)c", position_embeds)
             else:
                 position_embeds = self.param(
                     "position_embeds",
@@ -391,14 +392,17 @@ class CLIPVisionEmbeddings(nn.Module):
                         ),
                     )
                     position_embeds = with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
-                    # interpolate
-                    position_embeds = jax.image.resize(position_embeds, (height, width), method="linear")
+                    # interpolate - NOTE: I don't like it too much when downsampling
+                    position_embeds = jax.image.resize(
+                        position_embeds, (height, width), method="linear", antialias=False
+                    )
                     position_embeds = with_logical_constraint(position_embeds, ("batch", "height", "width", "embed"))
                     position_embeds = jnp.reshape(position_embeds, (1, num_patches, self.hidden_size))
         elif self.position_embedding_type == "sincos2d":
             position_embeds = posemb_sincos_2d(height, width, self.hidden_size, dtype=self.dtype)
         else:
             raise ValueError(f"Unknown position embedding type {self.position_embedding_type}")
+
         embeddings = patch_embeds + position_embeds
         embeddings = with_logical_constraint(embeddings, ("batch", "length", "embed"))
         if self.pool_type == "tok":
@@ -420,6 +424,8 @@ class CLIPVisionEmbeddings(nn.Module):
             )
             embeddings = jnp.concatenate([embeddings, jnp.tile(registers, [batch_size, 1, 1])], axis=1)
             embeddings = with_logical_constraint(embeddings, ("batch", "length", "embed"))
+            if attention_mask is not None:
+                attention_mask = jnp.concatenate([attention_mask, jnp.ones((batch_size, self.registers))], axis=1)
         return embeddings, attention_mask
 
 
