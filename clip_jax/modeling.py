@@ -1120,7 +1120,8 @@ class CLIPTextTransformer(nn.Module):
                 attention_mask = nn.combine_masks(attention_mask, causal_mask)
         if encoder_attention_mask is not None:
             encoder_attention_mask = nn.make_attention_mask(
-                input_attention_mask if input_attention_mask is not None else jnp.ones((batch, seq_len)),
+                # we can just let all input tokens attend to encoder tokens, avoid issues with masked pred
+                jnp.ones((batch, seq_len)),
                 encoder_attention_mask,
                 dtype=self.dtype,
             )
