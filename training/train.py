@@ -973,7 +973,7 @@ def main():
     state = State.from_config_metadata(model_args.config_metadata, model_args.restore_state)
 
     # set rng
-    rng = jax.random.PRNGKey(training_args.seed_model)
+    rng = jax.random.PRNGKey(training_args.seed_model + state.step)
 
     # get PartitionSpec and shape for model params
     logical_params = jax.eval_shape(lambda rng: model.init_weights(rng), rng)["params"]

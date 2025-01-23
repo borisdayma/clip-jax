@@ -1,5 +1,6 @@
 import hashlib
 import pickle
+import random
 from dataclasses import dataclass, field
 from functools import cache
 
@@ -33,13 +34,7 @@ class DatasetWrapper:
         seed_dataset=None,
         **kwargs,
     ):
-        # define rng
-        global_seed = seed_dataset or np.random.randint(0, 2**32 - 1)
-        np.random.seed(global_seed)
-        if False and jax.process_count() == 1:
-            # this creates issues with multi-host and should not be needed anyway
-            tf.random.set_seed(global_seed)
-
+        assert seed_dataset is None  # not used at the moment
         self.n_batch = n_batch
         self.key_class = key_class
         self.ds_splits = ds_splits
@@ -50,7 +45,6 @@ class DatasetWrapper:
                     ds_idx=0,
                     ds_name="default",
                     prefetch_buffer_size=prefetch_buffer_size,
-                    seed_dataset=seed_dataset,
                     key_class=key_class,
                     **kwargs,
                 )
@@ -119,7 +113,6 @@ class DatasetWrapper:
                     "valid_folder": valid_folder,
                     "train_batch_size": train_batch_size,
                     "valid_batch_size": valid_batch_size,
-                    "seed_dataset": seed_dataset,
                 }
                 ds_idx += 1
                 self.datasets.append(Dataset(key_class=key_class, **dataset_kwargs))
@@ -204,7 +197,6 @@ class Dataset:
     image_crop_resize: int = None  # resize cropped image to a fixed size
     min_original_image_size: int = None
     max_original_aspect_ratio: float = None
-    seed_dataset: int = None
     format: str = "rgb"  # rgb or lab
     key_image: str = "webp"  # name of key containing image
     key_caption: str = "caption"  # name of key containing captions
@@ -219,7 +211,6 @@ class Dataset:
     assert_data_in_VM_region: bool = False  # assert that all files are in the same region as VM
     _train: tf.data.Dataset = field(init=False)
     _valid: tf.data.Dataset = field(init=False)
-    rng: tf.random.Generator = field(init=False)
     multi_hosts: bool = field(init=False)
     process_count: int = field(init=False)  # number of groups for validation set (multi-host)
     process_index: int = field(init=False)  # group number to use for validation set (multi-host)
@@ -239,11 +230,6 @@ class Dataset:
             assert max_image_size[1] % self.patch_size == 0, "max_image_size must be divisible by patch_size"
             max_patches = max_image_size[0] // self.patch_size * max_image_size[1] // self.patch_size
             self.max_patches = max_patches
-
-        # define rng
-        if self.seed_dataset is None:
-            self.seed_dataset = np.random.randint(0, 2**32 - 1)
-        self.rng = tf.random.Generator.from_seed(self.seed_dataset)
 
         # check if we are on multi-hosts
         self.multi_hosts = jax.process_count() > 1
@@ -322,21 +308,10 @@ class Dataset:
             # we can combine parsing functions into one
             return _parse_image(*_parse_function(example_proto))
 
-        def _augment_crop(image, seed):
-            # create a new seed
-            new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
-            # apply random crop
-            return tf.image.stateless_random_crop(
-                image,
-                size=[self.image_crop_size, self.image_crop_size, 3],
-                seed=new_seed,
-            )
-
         # augmentation wrapper
-        def _augment_crop_wrapper(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
-            seed = self.rng.make_seeds(2)[0]
+        def _augment_crop(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
             return (
-                _augment_crop(image, seed),
+                tf.image.random_crop(image, size=[self.image_crop_size, self.image_crop_size, 3]),
                 caption,
                 caption_2,
                 caption_assistant,
@@ -473,7 +448,7 @@ class Dataset:
                 # shuffle files and select subset
                 if augment:
                     files = files[self.process_index :: self.process_count]
-                    np.random.shuffle(files)
+                    random.shuffle(files)
 
                 # load dataset
                 ds = tf.data.TFRecordDataset(
@@ -514,10 +489,7 @@ class Dataset:
                 if augment:
                     ds = ds.shuffle(1000)
                     if self.image_crop_size:
-                        ds = ds.map(
-                            _augment_crop_wrapper,
-                            num_parallel_calls=tf.data.experimental.AUTOTUNE,
-                        )
+                        ds = ds.map(_augment_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 elif self.image_crop_size:
                     ds = ds.map(_center_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
@@ -700,8 +672,7 @@ class ChoiceDataset:
 
     def batch_to_choice(self, pixel_values):
         md5 = hashlib.md5(pixel_values).hexdigest()
-        rand_int = np.random.randint(0, 2)
-        self.last_choice[md5] = (self.last_choice.get(md5, rand_int) + 1) % 2
+        self.last_choice[md5] = (self.last_choice.get(md5, random.randint(0, 1)) + 1) % 2
         return self.last_choice[md5]
 
 
