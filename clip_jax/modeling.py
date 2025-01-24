@@ -876,7 +876,7 @@ class CLIPEncoderLayer(nn.Module):
             decode=self.decode,
             normalize_qk=self.normalize_qk,
             float32_logits=self.float32_logits,
-            kernel_init_out=default_kernel_init if self.ln_type == "normformer" else None,
+            kernel_init_out=default_kernel_init if self.ln_type == "normformer" else nn.initializers.zeros_init(),
             name="attention",
         )(
             inputs_q=hidden_states,
@@ -922,7 +922,7 @@ class CLIPEncoderLayer(nn.Module):
                 decode=False,
                 normalize_qk=self.normalize_qk,
                 float32_logits=self.float32_logits,
-                kernel_init_out=default_kernel_init if self.ln_type == "normformer" else None,
+                kernel_init_out=default_kernel_init if self.ln_type == "normformer" else nn.initializers.zeros_init(),
                 name="cross_attention",
             )(
                 inputs_q=hidden_states,
