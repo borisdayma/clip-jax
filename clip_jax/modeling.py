@@ -55,6 +55,8 @@ Axes = Union[int, Iterable[int]]
 
 # default initializers
 default_kernel_init = nn.initializers.lecun_normal()
+# lecun with 2 orders of magnitude smaller per Omead Pooladzandi https://x.com/HessianFree/status/1883323285720715570
+mini_kernel_init = nn.initializers.variance_scaling(1.0e-2, "fan_in", "truncated_normal")
 
 
 # Output types, for compatibility with FlaxGenerationMixin
@@ -746,7 +748,7 @@ class CLIPMLP(nn.Module):
     use_bias: bool = False
     force_scale: bool = False
     use_rmsnorm: bool = True
-    kernel_init_out: Optional[Callable[[PRNGKey, Shape, Dtype], Array]] = nn.initializers.zeros_init()
+    kernel_init_out: Optional[Callable[[PRNGKey, Shape, Dtype], Array]] = mini_kernel_init
 
     @nn.compact
     def __call__(self, inputs, deterministic: bool = False):
@@ -876,7 +878,7 @@ class CLIPEncoderLayer(nn.Module):
             decode=self.decode,
             normalize_qk=self.normalize_qk,
             float32_logits=self.float32_logits,
-            kernel_init_out=default_kernel_init if self.ln_type == "normformer" else nn.initializers.zeros_init(),
+            kernel_init_out=default_kernel_init if self.ln_type == "normformer" else mini_kernel_init,
             name="attention",
         )(
             inputs_q=hidden_states,
@@ -922,7 +924,7 @@ class CLIPEncoderLayer(nn.Module):
                 decode=False,
                 normalize_qk=self.normalize_qk,
                 float32_logits=self.float32_logits,
-                kernel_init_out=default_kernel_init if self.ln_type == "normformer" else nn.initializers.zeros_init(),
+                kernel_init_out=default_kernel_init if self.ln_type == "normformer" else mini_kernel_init,
                 name="cross_attention",
             )(
                 inputs_q=hidden_states,
