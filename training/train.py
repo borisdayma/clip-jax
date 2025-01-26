@@ -1361,7 +1361,7 @@ def main():
                 else statistics_partition_spec,
             )
 
-        for k, p in split_scanned_params(trainable_params(logical_params)).items():
+        for k, p in split_scanned_params(trainable_params(logical_params, training_args)).items():
             p_spec = split_spec[k]
             if ("scanned_text" in k) or ("scanned_vision" in k):
                 # extract 1 layer
