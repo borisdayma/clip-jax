@@ -16,7 +16,6 @@ import dataclasses
 import functools
 import operator
 from collections import OrderedDict
-from functools import partial
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
@@ -56,7 +55,7 @@ Axes = Union[int, Iterable[int]]
 # default initializers
 default_kernel_init = nn.initializers.lecun_normal()
 # lecun with 2 orders of magnitude smaller per Omead Pooladzandi https://x.com/HessianFree/status/1883323285720715570
-mini_kernel_init = nn.initializers.variance_scaling(1.0e-2, "fan_in", "truncated_normal")
+mini_kernel_init = nn.initializers.variance_scaling(1.0e-4, "fan_in", "truncated_normal")
 
 
 # Output types, for compatibility with FlaxGenerationMixin
@@ -1830,7 +1829,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
         bs = decoder_input_ids.shape[0]
         for k in ["input_ids", "attention_mask", "pixel_values"]:
             model_inputs[k] = jnp.repeat(model_inputs[k], bs, axis=0)
-        _decode = partial(CLIPModel.__call__, decode=True)
+        _decode = functools.partial(CLIPModel.__call__, decode=True)
         past_key_values = self.init(**model_inputs, method=_decode)["cache"]
         # extend attention mask
         if decoder_attention_mask is not None:
@@ -2042,7 +2041,7 @@ class CLIPModel(nn.Module, FlaxGenerationMixin):
 
             state = jax.lax.while_loop(
                 _cond_fn,
-                partial(_decode_one_step, model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE),
+                functools.partial(_decode_one_step, model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE),
                 state,
             )
             return state.sent_result
