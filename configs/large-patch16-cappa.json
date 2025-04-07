@@ -1,17 +1,18 @@
 {
   "text_config": {
     "float32_logits": true,
-    "dtype": "float32",
+    "dtype": "bfloat16",
     "activations": [
       "gelu",
       "linear"
     ],
-    "normalize_qk": false,
+    "normalize_qk": true,
     "use_bias": false,
     "force_scale": false,
     "attention_dropout": 0.0,
     "mlp_dropout_rate": 0.0,
     "unroll": 100,
+    "remat_policy": "none",
     "eos_token_id": 2,
     "mask_token_id": 4,
     "pad_token_id": 3,
@@ -19,12 +20,13 @@
     "masked_pred_prob": 0.75,
     "is_decoder": true,
     "pool_type": null,
+    "num_queries": 1,
     "vocab_size": 65536,
     "hidden_size": 1024,
     "max_length": 64,
     "num_layers": 12,
-    "use_rmsnorm": true,
-    "ln_type": "normformer",
+    "use_rmsnorm": false,
+    "ln_type": "preln",
     "num_heads": 16,
     "position_embedding_type": "rotary",
     "use_causal_mask": true,
@@ -33,14 +35,17 @@
   "vision_config": {
     "float32_logits": true,
     "position_embedding_type": "learnt",
-    "position_embedding_shape": null,
-    "position_embedding_factorized": false,
-    "dtype": "float32",
+    "position_embedding_shape": [
+      32,
+      32
+    ],
+    "position_embedding_factorized": true,
+    "dtype": "bfloat16",
     "activations": [
       "gelu",
       "linear"
     ],
-    "normalize_qk": false,
+    "normalize_qk": true,
     "use_bias": false,
     "force_scale": false,
     "attention_dropout": 0.0,
@@ -49,12 +54,14 @@
     "unroll": 100,
     "registers": 8,
     "keep_registers": true,
+    "remat_policy": "none",
+    "num_queries": 1,
     "image_size": 256,
     "hidden_size": 1024,
     "patch_size": 16,
     "num_layers": 24,
-    "use_rmsnorm": true,
-    "ln_type": "normformer",
+    "use_rmsnorm": false,
+    "ln_type": "preln",
     "num_heads": 16,
     "use_causal_mask": false,
     "mlp_dim": 3072
@@ -62,5 +69,5 @@
   "projection_dim": 1024,
   "logit_scale_init_value": 2.3,
   "logit_bias_init_value": -10.0,
-  "dtype": "float32"
+  "dtype": "bfloat16"
 }

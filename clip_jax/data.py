@@ -1,15 +1,194 @@
 import hashlib
 import pickle
+import random
 from dataclasses import dataclass, field
+from functools import cache
 
 import jax
 import numpy as np
+import requests
 import tensorflow as tf
 import tensorflow_io as tfio
+from einshape import tf_einshape as einshape
+from jaxfusion.text import TextNormalizer
+
+try:
+    from google.cloud import storage
+except:
+    storage = None
+
+
+tn = TextNormalizer()
+
+
+class DatasetWrapper:
+    def __init__(
+        self,
+        ds_splits=None,
+        n_batch=1,
+        batch_size_per_node_splits=None,
+        valid_batch_size_per_node_splits=None,
+        gradient_accumulation_steps_splits=None,
+        prefetch_buffer_size=None,
+        key_class=None,
+        seed_dataset=None,
+        **kwargs,
+    ):
+        assert seed_dataset is None  # not used at the moment
+        self.n_batch = n_batch
+        self.key_class = key_class
+        self.ds_splits = ds_splits
+        self.prefetch_buffer_size = prefetch_buffer_size
+        if not ds_splits:
+            self.datasets = [
+                Dataset(
+                    ds_idx=0,
+                    ds_name="default",
+                    prefetch_buffer_size=prefetch_buffer_size,
+                    key_class=key_class,
+                    **kwargs,
+                )
+            ]
+            self.weights = [1.0]
+        else:
+            self.datasets = []
+            self.gradient_accumulation_steps = []
+            self.train_batch_size = []
+            self.valid_batch_size = []
+            self.batch_size_per_step = []
+            self.batch_size_per_node = []
+            self.weights = []
+            counts = []
+            assert ds_splits.endswith(".pkl")
+            with open(ds_splits, "rb") as f:
+                ds_configs = pickle.load(f)
+
+            # overwrite bs and gradient accumulation
+            batch_size_per_node_splits = str(batch_size_per_node_splits).split(",")
+            gradient_accumulation_steps_splits = str(gradient_accumulation_steps_splits).split(",")
+            batch_size_per_node_splits = [int(bs) for bs in batch_size_per_node_splits]
+            gradient_accumulation_steps_splits = [int(ga) for ga in gradient_accumulation_steps_splits]
+            if len(batch_size_per_node_splits) != len(ds_configs):
+                batch_size_per_node_splits = None
+                gradient_accumulation_steps_splits = None
+                print("Using batch size per split file")
+
+            ds_idx = 0
+            for i, (ds_name, ds_config) in enumerate(ds_configs.items()):
+
+                def _folder_from_files(files, is_train):
+                    if files is None:
+                        return None
+                    assert isinstance(files, list)
+                    f_name = f'ds_{ds_name}_{"train" if is_train else "valid"}.pkl'
+                    with open(f_name, "wb") as f:
+                        pickle.dump(files, f)
+                    return f_name
+
+                train_files = ds_config.get("train_files", None)
+                valid_files = ds_config.get("valid_files", None)
+                train_folder = _folder_from_files(train_files, True)
+                valid_folder = _folder_from_files(valid_files, False)
+                batch_size_per_node = ds_config["batch_size_per_node"]
+                gradient_accumulation_steps = ds_config["gradient_accumulation_steps"]
+                if batch_size_per_node_splits:
+                    batch_size_per_node = batch_size_per_node_splits[i]
+                    gradient_accumulation_steps = gradient_accumulation_steps_splits[i]
+                batch_size_per_node_per_step = batch_size_per_node * gradient_accumulation_steps
+                if batch_size_per_node_per_step == 0:
+                    print(f"Skipping {ds_name} due to batch size per node per step being 0")
+                    continue
+                count_ds = ds_config["n"] // batch_size_per_node_per_step
+                batch_size_per_step = batch_size_per_node_per_step * jax.process_count()
+                train_batch_size = batch_size_per_node_per_step
+                valid_batch_size = batch_size_per_node
+                if valid_batch_size_per_node_splits:
+                    valid_batch_size = int(valid_batch_size_per_node_splits)
+                dataset_kwargs = {
+                    **kwargs,
+                    "ds_idx": ds_idx,
+                    "ds_name": ds_name,
+                    "prefetch_buffer_size": prefetch_buffer_size,
+                    "train_folder": train_folder,
+                    "valid_folder": valid_folder,
+                    "train_batch_size": train_batch_size,
+                    "valid_batch_size": valid_batch_size,
+                }
+                ds_idx += 1
+                self.datasets.append(Dataset(key_class=key_class, **dataset_kwargs))
+                self.gradient_accumulation_steps.append(gradient_accumulation_steps)
+                self.train_batch_size.append(train_batch_size)
+                self.valid_batch_size.append(valid_batch_size)
+                self.batch_size_per_step.append(batch_size_per_step)
+                self.batch_size_per_node.append(batch_size_per_node)
+                counts.append(count_ds)
+            # calculate weights from counts
+            weights = np.asarray(counts, dtype=np.float32)
+            weights = weights / weights.sum()
+            self.weights = weights
+        # global info
+        ds_names = [dataset.ds_name for dataset in self.datasets]
+        weights = self.weights
+        self.ds_names = ds_names
+        self.weights = weights
+        for ds_name, weight in zip(ds_names, weights):
+            print(f"ds_name: {ds_name}, weight: {weight}")
+
+    @property
+    def training_config(self):
+        if not self.ds_splits:
+            return None
+        return {
+            k: getattr(self, k)
+            for k in [
+                "gradient_accumulation_steps",
+                "train_batch_size",
+                "valid_batch_size",
+                "batch_size_per_step",
+                "batch_size_per_node",
+                "ds_names",
+                "weights",
+            ]
+        }
+
+    @property
+    def train(self):
+        if not self.ds_splits:
+            assert len(self.datasets) == 1
+            ds = self.datasets[0]._train
+            ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
+        else:
+            dataset_iterators = [dataset._train for dataset in self.datasets]
+            if self.n_batch > 1:
+                dataset_iterators = [ds.batch(self.n_batch) for ds in dataset_iterators]
+            weights = self.weights
+            ds = tf.data.Dataset.sample_from_datasets(dataset_iterators, weights=weights, seed=0)
+            ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
+            if self.n_batch > 1:
+                ds = ds.unbatch()
+        for item in ds.as_numpy_iterator():
+            ds_idx = item.pop("ds_idx")
+            ds_name = item.pop("ds_name").decode("utf-8")
+            yield item, ds_idx, ds_name
+
+    @property
+    def valid(self):
+        for dataset in self.datasets:
+            try:
+                for item in dataset.valid:
+                    ds_idx = item.pop("ds_idx")
+                    ds_name = item.pop("ds_name").decode("utf-8")
+                    yield item, ds_idx, ds_name
+            except:
+                # no valid set
+                pass
 
 
 @dataclass
 class Dataset:
+    ds_idx: int = 0
+    ds_name: str = "default"
+    prefetch_buffer_size: int = None
     train_folder: str = None
     valid_folder: str = None
     train_batch_size: int = 64
@@ -18,7 +197,6 @@ class Dataset:
     image_crop_resize: int = None  # resize cropped image to a fixed size
     min_original_image_size: int = None
     max_original_aspect_ratio: float = None
-    seed_dataset: int = None
     format: str = "rgb"  # rgb or lab
     key_image: str = "webp"  # name of key containing image
     key_caption: str = "caption"  # name of key containing captions
@@ -28,25 +206,30 @@ class Dataset:
     key_class: str = None  # used for classification
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
+    patch_size: int = None  # patchify dataset
+    max_image_size: str = None  # max size of images
+    assert_data_in_VM_region: bool = False  # assert that all files are in the same region as VM
     _train: tf.data.Dataset = field(init=False)
     _valid: tf.data.Dataset = field(init=False)
-    rng: tf.random.Generator = field(init=False)
     multi_hosts: bool = field(init=False)
     process_count: int = field(init=False)  # number of groups for validation set (multi-host)
     process_index: int = field(init=False)  # group number to use for validation set (multi-host)
+    max_patches: int = field(init=False)  # max number of patches per image
 
     def __post_init__(self):
         # verify valid args
         assert self.format in ["rgb", "lab"], f"Invalid format: {self.format}"
 
-        # define rng
-        self.deterministic = True
-        if self.seed_dataset is None:
-            self.deterministic = False
-            self.seed_dataset = np.random.randint(0, 2**32 - 1)
-        self.rng = tf.random.Generator.from_seed(self.seed_dataset)
-        np.random.seed(self.seed_dataset)
-        tf.random.set_seed(self.seed_dataset)
+        # patchify dataset
+        if self.patch_size is not None:
+            assert self.max_image_size is not None, "max_image_size must be set when patch_size is set"
+            max_image_size = self.max_image_size.split("x")
+            max_image_size = [int(size) for size in max_image_size]
+            assert len(max_image_size) == 2, "max_image_size must be in the format HxW"
+            assert max_image_size[0] % self.patch_size == 0, "max_image_size must be divisible by patch_size"
+            assert max_image_size[1] % self.patch_size == 0, "max_image_size must be divisible by patch_size"
+            max_patches = max_image_size[0] // self.patch_size * max_image_size[1] // self.patch_size
+            self.max_patches = max_patches
 
         # check if we are on multi-hosts
         self.multi_hosts = jax.process_count() > 1
@@ -125,21 +308,10 @@ class Dataset:
             # we can combine parsing functions into one
             return _parse_image(*_parse_function(example_proto))
 
-        def _augment_crop(image, seed):
-            # create a new seed
-            new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
-            # apply random crop
-            return tf.image.stateless_random_crop(
-                image,
-                size=[self.image_crop_size, self.image_crop_size, 3],
-                seed=new_seed,
-            )
-
         # augmentation wrapper
-        def _augment_crop_wrapper(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
-            seed = self.rng.make_seeds(2)[0]
+        def _augment_crop(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
             return (
-                _augment_crop(image, seed),
+                tf.image.random_crop(image, size=[self.image_crop_size, self.image_crop_size, 3]),
                 caption,
                 caption_2,
                 caption_assistant,
@@ -173,8 +345,51 @@ class Dataset:
                 class_id,
             )
 
+        def _patchify(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
+            # position ids
+            shape = tf.shape(image)
+            n_pos_x = shape[0] // self.patch_size
+            n_pos_y = shape[1] // self.patch_size
+            pos_x = tf.range(n_pos_x)
+            pos_y = tf.range(n_pos_y)
+            pos_ids = tf.stack(tf.meshgrid(pos_x, pos_y, indexing="ij"), axis=-1)
+
+            # patchify image
+            image = einshape(
+                "(hm)(wn)c->(hw)mnc",
+                image,
+                m=self.patch_size,
+                n=self.patch_size,
+            )
+            pos_ids = einshape("hwc->(hw)c", pos_ids)
+
+            # pad
+            n_patches = tf.shape(image)[0]
+            image = tf.pad(image, [(0, self.max_patches - n_patches), (0, 0), (0, 0), (0, 0)])
+            pos_ids = tf.pad(pos_ids, [(0, self.max_patches - n_patches), (0, 0)])
+
+            # create attention mask
+            indices = tf.range(self.max_patches)
+            attention_mask = tf.less(indices, n_patches)
+
+            return (
+                {"images": image, "position_ids": pos_ids, "attention_mask": attention_mask},
+                caption,
+                caption_2,
+                caption_assistant,
+                caption_assistant_2,
+                class_id,
+            )
+
         # normalization
         def _normalize(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
+            if isinstance(image, dict):
+                pos_ids = image["position_ids"]
+                attention_mask = image["attention_mask"]
+                image = image["images"]
+            else:
+                pos_ids = None
+                attention_mask = None
             if self.format == "rgb":
                 image = (
                     tf.cast(image, tf.float32) / 255.0 - tf.convert_to_tensor([self.mean], dtype=tf.float32)
@@ -191,6 +406,12 @@ class Dataset:
                 res["captions_assistant_2"] = caption_assistant_2
             if class_id is not None:
                 res["class_id"] = class_id
+            res["ds_idx"] = self.ds_idx
+            res["ds_name"] = self.ds_name
+            if pos_ids is not None:
+                res["position_ids"] = pos_ids
+            if attention_mask is not None:
+                res["image_attention_mask"] = attention_mask
             return res
 
         for folder, dataset, augment, batch_size in zip(
@@ -213,10 +434,21 @@ class Dataset:
                 # sort files
                 files = sorted(files)
 
+                # check correct region
+                instance_region = get_current_instance_region()
+                if self.assert_data_in_VM_region:
+                    for file in files:
+                        if "gs://" in file:
+                            bucket_name = file.split("/")[2]
+                            bucket_region = get_bucket_region(bucket_name)
+                            assert (
+                                bucket_region.lower() == instance_region.lower()
+                            ), f"File {file} is not in the correct region {bucket_region} != {instance_region}"
+
                 # shuffle files and select subset
                 if augment:
                     files = files[self.process_index :: self.process_count]
-                    np.random.shuffle(files)
+                    random.shuffle(files)
 
                 # load dataset
                 ds = tf.data.TFRecordDataset(
@@ -227,7 +459,7 @@ class Dataset:
                 # non deterministic read (faster)
                 if augment:
                     ignore_order = tf.data.Options()
-                    ignore_order.deterministic = self.deterministic
+                    ignore_order.deterministic = False
                     ds = ds.with_options(ignore_order)
 
                     if self.multi_hosts:
@@ -257,10 +489,7 @@ class Dataset:
                 if augment:
                     ds = ds.shuffle(1000)
                     if self.image_crop_size:
-                        ds = ds.map(
-                            _augment_crop_wrapper,
-                            num_parallel_calls=tf.data.experimental.AUTOTUNE,
-                        )
+                        ds = ds.map(_augment_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 elif self.image_crop_size:
                     ds = ds.map(_center_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
@@ -268,10 +497,16 @@ class Dataset:
                 if self.image_crop_resize:
                     ds = ds.map(_resize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
+                # patchify (only for training)
+                if augment and self.patch_size:
+                    ds = ds.map(_patchify, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
                 # batch, normalize and prefetch
                 ds = ds.batch(batch_size, drop_remainder=True)
                 ds = ds.map(_normalize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-                ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+                if not augment:
+                    # we do it in wrapper for training
+                    ds = ds.prefetch(buffer_size=self.prefetch_buffer_size or tf.data.experimental.AUTOTUNE)
                 setattr(self, dataset, ds)
 
     @property
@@ -333,7 +568,8 @@ def preprocess_batch(
         batch["pixel_values"] = batch.pop("images")
         return batch
     # preprocess batch
-    captions = [" ".join(caption.decode("utf-8").strip().split()) for caption in batch["captions"]]
+    # captions = [" ".join(caption.decode("utf-8").strip().split()) for caption in batch["captions"]]
+    captions = [tn(caption.decode("utf-8").strip()) for caption in batch["captions"]]
     captions_assistant = batch.get("captions_assistant", None)
     if captions_assistant is not None:
         captions_2 = batch.get("captions_2", None)
@@ -423,6 +659,9 @@ def preprocess_batch(
         target_id = tokenizer.unk_token_id  # TODO: configure it
         vision_start_ids = np.where(txt_inputs["input_ids"] == target_id, 1, 0).argmax(axis=-1)
         txt_inputs["vision_start_ids"] = vision_start_ids
+    if "image_attention_mask" in batch.keys():
+        txt_inputs["image_attention_mask"] = batch["image_attention_mask"]
+        txt_inputs["image_position_ids"] = batch["position_ids"]
     batch = {"pixel_values": batch["images"], **txt_inputs}
     return batch
 
@@ -433,9 +672,30 @@ class ChoiceDataset:
 
     def batch_to_choice(self, pixel_values):
         md5 = hashlib.md5(pixel_values).hexdigest()
-        rand_int = np.random.randint(0, 2)
-        self.last_choice[md5] = (self.last_choice.get(md5, rand_int) + 1) % 2
+        self.last_choice[md5] = (self.last_choice.get(md5, random.randint(0, 1)) + 1) % 2
         return self.last_choice[md5]
 
 
 choiceDataset = ChoiceDataset()
+
+
+@cache
+def get_bucket_region(bucket_name):
+    storage_client = storage.Client()
+    bucket = storage_client.get_bucket(bucket_name)
+    return bucket.location
+
+
+@cache
+def get_current_instance_region() -> str:
+    metadata_server = "http://metadata.google.internal"
+    metadata_flavor = {"Metadata-Flavor": "Google"}
+
+    # Get zone from metadata server
+    zone_path = requests.get(f"{metadata_server}/computeMetadata/v1/instance/zone", headers=metadata_flavor).text
+
+    # Extract region from zone
+    zone = zone_path.split("/")[-1]  # gets 'us-central1-a'
+    region = "-".join(zone.split("-")[:-1])  # removes the last part ('a')
+
+    return region
