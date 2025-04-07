@@ -25,7 +25,6 @@ import tensorflow_io as tfio
 import transformers
 import wandb
 from einshape import jax_einshape as einshape
-from flax.core import FrozenDict
 from flax.training import orbax_utils
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax.experimental import multihost_utils
@@ -35,9 +34,7 @@ from jax.experimental.pjit import pjit
 from jax.experimental.shard_map import shard_map
 from jax.lax import with_sharding_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from kron import get_opt_state_partition_specs, precond_update_prob_schedule, scale_by_kron
 from PIL import Image
-from precondition_local.distributed_shampoo import GraftingType, distributed_shampoo
 from tqdm import tqdm
 from transformers import HfArgumentParser
 
@@ -46,6 +43,10 @@ from clip_jax.data import DatasetWrapper, logits_to_image, preprocess_batch
 from clip_jax.partitions import logical_axis_rules
 from clip_jax.tokenizer import AutoTokenizer
 from clip_jax.utils import asdict, count_params, load_config
+
+from adafactor import adafactorw
+from kron import get_opt_state_partition_specs, precond_update_prob_schedule, scale_by_kron
+from precondition_local.distributed_shampoo import GraftingType, distributed_shampoo
 
 try:
     from google.cloud import storage
@@ -166,8 +167,8 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Use Nesterov momentum for Distributed Shampoo."},
     )
-    clip_by_scaled_gradient_norm: float = field(
-        default=None,
+    grad_clip_norm: float = field(
+        default=False,
         metadata={"help": "Clip by scaled gradient norm (only useful when using RMSProp Grafting)."},
     )
     optim_quantized: bool = field(
@@ -293,9 +294,9 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Repeat the same batch for debugging."},
     )
-    debug_dataloader: bool = field(
+    force_merge_compile: bool = field(
         default=False,
-        metadata={"help": "Do not perform a real training step."},
+        metadata={"help": "Force merge/compile of full train step."},
     )
 
     dp_devices: int = field(init=False)
@@ -352,8 +353,6 @@ class TrainingArguments:
             "adafactor",
             "kron",
         ], f"Unknown optimizer {self.optim}"
-        if self.optim == "adafactor" and self.weight_decay == 0:
-            self.weight_decay = None
         assert self.graft_type in [
             "rmsprop_normalized",
             "rmsprop",
@@ -555,6 +554,14 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "Name of a 2nd key containing elements for assistant when using chat template."},
     )
+    patch_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "The size of the patches to use if we patchify data."},
+    )
+    max_image_size: Optional[str] = field(
+        default=None,
+        metadata={"help": "The maximum size of the image to use if we patchify data."},
+    )
     assert_data_in_VM_region: bool = field(
         default=False,
         metadata={"help": "Assert that all files are in the same region as VM."},
@@ -570,6 +577,8 @@ class DataTrainingArguments:
             self.mean = (0.5, 0.5, 0.5)
         if self.std is None:
             self.std = (0.5, 0.5, 0.5)
+        if self.patch_size is not None:
+            assert self.max_image_size is not None
 
 
 def flat_args(model_args, data_args, training_args):
@@ -854,6 +863,15 @@ def main():
     is_classification = dataset.key_class is not None
     assert not (isMaxtext and is_classification), "Cannot be both MaxText and classification."
 
+    # TODO: remove legacy
+    if not clipConfig["vision_config"].get("position_embedding_shape"):
+        clipConfig["vision_config"]["position_embedding_shape"] = (16, 16)
+    try:
+        del clipConfig["vision_config"]["gradient_checkpointing"]
+        del clipConfig["text_config"]["gradient_checkpointing"]
+    except KeyError:
+        pass
+
     # Update config
     maxtext_args = None
     maxtext_mesh = None
@@ -867,12 +885,6 @@ def main():
         clipConfig["vision_config"]["position_embedding_factorized"] = model_args.position_embedding_factorized
     if model_args.position_embedding_shape is not None:
         clipConfig["vision_config"]["position_embedding_shape"] = model_args.position_embedding_shape
-
-    try:
-        del clipConfig["vision_config"]["gradient_checkpointing"]
-        del clipConfig["text_config"]["gradient_checkpointing"]
-    except KeyError:
-        pass
 
     # prediction length
     max_target_length = (
@@ -961,7 +973,7 @@ def main():
     state = State.from_config_metadata(model_args.config_metadata, model_args.restore_state)
 
     # set rng
-    rng = jax.random.PRNGKey(training_args.seed_model)
+    rng = jax.random.PRNGKey(training_args.seed_model + state.step)
 
     # get PartitionSpec and shape for model params
     logical_params = jax.eval_shape(lambda rng: model.init_weights(rng), rng)["params"]
@@ -1043,6 +1055,11 @@ def main():
         out_shardings=data_mesh_sharding,
     )
 
+    # gather data
+    @partial(pjit, in_shardings=(data_mesh_sharding,), out_shardings=PartitionSpec(None), static_argnums=1)
+    def gather_data(x, n):
+        return x[:n]
+
     def _get_global_shape(x):
         shape = x.shape
         # multiply first dimension by number of hosts
@@ -1058,6 +1075,7 @@ def main():
             model_args.model_name_or_path is None
             or training_args.reinit_text
             or training_args.reinit_vision_projection
+            # NOTE: model_args.position_embedding_factorized/position_embedding_shape should reinit to 0
         ):
             params = model.init_weights(rng)["params"]
         else:
@@ -1071,6 +1089,8 @@ def main():
 
     # Restore checkpoint
     def _restore_checkpoint(ckpt, dir, step):
+        if training_args.do_test_steps:
+            return ckpt
         logger.info(f"Restoring checkpoint from {dir} at step {step}")
         restore_args = orbax_utils.restore_args_from_target(ckpt, mesh)
         orbax_options = orbax.checkpoint.CheckpointManagerOptions(enable_async_checkpointing=False)
@@ -1083,6 +1103,10 @@ def main():
             }
         elif training_args.reinit_vision_projection:
             transforms = {r"(.*)(vision_projection)(.*)": orbax.checkpoint.Transform(use_fallback=True)}
+        elif (model_args.position_embedding_factorized is not None) or (
+            model_args.position_embedding_shape is not None
+        ):
+            transforms = {r"(.*)(_embeds_)(.*)": orbax.checkpoint.Transform(use_fallback=True)}
         else:
             transforms = {}
         return checkpoint_manager.restore(
@@ -1206,7 +1230,7 @@ def main():
             inverse_failure_threshold=0.1,
             moving_average_for_momentum=True,
             skip_preconditioning_dim_size_gt=training_args.skip_preconditioning_dim_size_gt,
-            clip_by_scaled_gradient_norm=training_args.clip_by_scaled_gradient_norm,
+            clip_by_scaled_gradient_norm=training_args.grad_clip_norm,
             precision=jax.lax.Precision.HIGHEST,
             best_effort_memory_usage_reduction=training_args.optim_quantized,
             generate_training_metrics=False,
@@ -1277,7 +1301,7 @@ def main():
             lax_map_batch_size=training_args.lax_map_batch_size if training_args.lax_map_batch_size is not None else 8,
             normalize_grads=training_args.kron_normalize_grads,
             params_sharding=trainable_params(params_spec, training_args),
-            preconditioner_sharding=PartitionSpec(None, None),
+            preconditioner_sharding=PartitionSpec("data", None),
         )
         _opt = [
             scale_by_kron(**kron_kwargs),
@@ -1291,89 +1315,51 @@ def main():
         optimizer = optax.chain(*_opt)
 
     elif training_args.optim == "adam":
-        _opt = partial(
-            optax.adamw,
-            b1=training_args.beta1,
-            b2=training_args.beta2,
-            eps=training_args.adam_epsilon,
-            weight_decay=training_args.weight_decay,
+        _opt = []
+        if training_args.grad_clip_norm > 0:
+            # we use global norm of incoming grads for adam
+            # NOTE: for Adafactor we actually use the rms norm
+            _opt.append(optax.clip_by_global_norm(training_args.grad_clip_norm))
+        _opt.append(
+            optax.adamw(
+                learning_rate=learning_rate_fn,
+                b1=training_args.beta1,
+                b2=training_args.beta2,
+                eps=training_args.adam_epsilon,
+                weight_decay=training_args.weight_decay,
+            )
         )
-        optimizer = {
-            k: _opt(learning_rate=learning_rate_fn)
-            for k in split_scanned_params(trainable_params(logical_params, training_args))
-        }
+        optimizer = optax.chain(*_opt)
 
     elif training_args.optim == "adafactor":
-        _opt = partial(
-            optax.adafactor,
-            clipping_threshold=training_args.max_grad_norm,
-            weight_decay_rate=training_args.weight_decay,
+        optimizer = adafactorw(
+            learning_rate=learning_rate_fn,
+            min_dim_size_to_factor=32,
+            decay_rate=0.8,
+            decay_offset=0,
+            beta2_cap=training_args.beta2,
+            clipping_threshold=training_args.grad_clip_norm,
+            momentum=training_args.beta1,
+            dtype_momentum=jnp.bfloat16,
+            eps=1e-30,
+            weight_decay=training_args.weight_decay,
+            mask=None,
         )
-        optimizer = {
-            k: _opt(learning_rate=learning_rate_fn)
-            for k in split_scanned_params(trainable_params(logical_params, training_args))
-        }
 
     # get PartitionSpecof optimizer state
-    def get_opt_state_spec():
-        if training_args.optim == "kron":
-            return get_opt_state_partition_specs(
-                trainable_params(logical_params, training_args), weight_decay=training_args.weight_decay, **kron_kwargs
-            )
-        # get opt_state shape without actual init
-        opt_state_shape = {}
-        for k, p in split_scanned_params(trainable_params(logical_params, training_args)).items():
-            if ("scanned_text" in k) or ("scanned_vision" in k):
-                opt_state_shape[k] = jax.eval_shape(jax.vmap(optimizer[k].init), p)
-            elif "scanned_maxtext" in k:
-                opt_state_shape[k] = jax.eval_shape(jax.vmap(optimizer[k].init, in_axes=1), p)
-            else:
-                opt_state_shape[k] = jax.eval_shape(optimizer[k].init, p)
-
-        # utility functions for Adam
-        def _adam_opt_state_spec_per_leaf(x, spec):
-            if isinstance(x, dict):
-                # variables with same structure as params
-                return spec
-            else:
-                # other variables such as count
-                return None
-
-        def _adam_pspec_fn(spec, shape):
-            return (
-                None
-                if spec is None
-                else jax.tree_util.tree_map(
-                    partial(_adam_opt_state_spec_per_leaf, spec=spec),
-                    shape,
-                    # return None spec for empty elements
-                    is_leaf=lambda x: isinstance(x, (FrozenDict, optax.EmptyState)),
-                )
-            )
-
-        # get PartitionSpec
-        split_spec = split_scanned_params(trainable_params(params_spec, training_args))
+    def get_opt_state_spec_shampoo():
+        split_spec = split_scanned_params(trainable_params(params_spec))
         opt_state_spec = {}
 
         def _get_spec(**kwargs):
             """Get optimizer spec for a certain model portion"""
-            if training_args.optim == "adafactor":
-                # we just replicate to each device
-                return None
-            elif training_args.optim == "adam":
-                return _adam_pspec_fn(kwargs["params_spec"], kwargs["opt_state_shape"])
-            elif training_args.optim == "distributed_shampoo":
-                return kwargs["opt_fn"].pspec_fn(
-                    kwargs["params_shape"],
-                    kwargs["params_spec"],
-                    (
-                        PartitionSpec(None)
-                        if (kwargs["key"] == "vision" and training_args.set_opt_spec_vision_to_none)
-                        else statistics_partition_spec
-                    ),
-                )
-            else:
-                raise NotImplementedError
+            return kwargs["opt_fn"].pspec_fn(
+                kwargs["params_shape"],
+                kwargs["params_spec"],
+                PartitionSpec(None)
+                if (kwargs["key"] == "vision" and training_args.set_opt_spec_vision_to_none)
+                else statistics_partition_spec,
+            )
 
         for k, p in split_scanned_params(trainable_params(logical_params, training_args)).items():
             p_spec = split_spec[k]
@@ -1385,22 +1371,81 @@ def main():
                 # extract 1 layer
                 p = jax.eval_shape(lambda x: jax.tree_util.tree_map(lambda y: y[:, 0], x), p)
                 p_spec = jax.tree_util.tree_map(lambda y: PartitionSpec(y[0], *y[2:]), p_spec)
-            _opt_fn = opt_fn[k] if training_args.optim == "distributed_shampoo" else None
+            _opt_fn = opt_fn[k]
             opt_state_spec[k] = _get_spec(
                 params_spec=p_spec,
-                opt_state_shape=opt_state_shape[k],
                 opt_fn=_opt_fn,
                 params_shape=p,
-                key=k,
             )
-            if "scanned" in k and training_args.optim != "adafactor":
-                # add scan dimension (not for adafactor which is replicated)
-                opt_state_spec[k] = jax.tree_util.tree_map(
+            if "scanned" in k:
+                # add scan dimension
+                opt_state_spec[k] = jax.tree.map(
                     lambda x: PartitionSpec(*scan_spec + x),
                     opt_state_spec[k],
                     is_leaf=lambda x: isinstance(x, PartitionSpec),
                 )
+
         return opt_state_spec
+
+    def get_opt_state_spec_adamlike():
+        # utility functions for Adam and Adafactor
+        def _adam_opt_state_spec_per_leaf(x, spec):
+            if isinstance(x, dict):
+                # return params specs for dictionaries
+                return spec
+            else:
+                # other variables such as count
+                return None
+
+        def _adam_pspec_fn(spec, shape):
+            return (
+                None
+                if spec is None
+                else jax.tree.map(
+                    partial(_adam_opt_state_spec_per_leaf, spec=spec),
+                    shape,
+                    # return None spec for empty elements
+                    is_leaf=lambda x: isinstance(x, (dict, optax.EmptyState)),
+                )
+            )
+
+        adamlike_params = trainable_params(logical_params, training_args)
+        adamlike_params_spec = trainable_params(params_spec, training_args)
+        opt_state_shapes = jax.eval_shape(optimizer.init, adamlike_params)
+
+        out_specs = _adam_pspec_fn(adamlike_params_spec, opt_state_shapes)
+
+        if training_args.optim == "adafactor":
+            # kinda hacky but probably ok, we explicitly set adafactor second moment to replicated
+            # at opt_state[0][0].v, opt_state[0][0].v_row, and opt_state[0][0].v_col
+            out_specs = (
+                (
+                    out_specs[0][0]._replace(
+                        **{
+                            field: jax.tree.map(
+                                lambda x: PartitionSpec(None) if x.size > 0 else PartitionSpec(),
+                                getattr(opt_state_shapes[0][0], field),
+                                is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+                            )
+                            for field in ["v", "v_row", "v_col"]
+                        }
+                    ),
+                    *out_specs[0][1:],
+                ),
+                *out_specs[1:],
+            )
+
+        return out_specs
+
+    def get_opt_state_spec():
+        if training_args.optim == "kron":
+            return get_opt_state_partition_specs(
+                trainable_params(logical_params, training_args), weight_decay=training_args.weight_decay, **kron_kwargs
+            )
+        elif training_args.optim in ["adam", "adafactor"]:
+            return get_opt_state_spec_adamlike()
+        elif training_args.optim == "distributed_shampoo":
+            return get_opt_state_spec_shampoo()
 
     opt_state_spec = get_opt_state_spec()
 
@@ -1414,7 +1459,7 @@ def main():
 
     @partial(pjit, in_shardings=(params_spec,), out_shardings=opt_state_spec)
     def init_opt_state(params):
-        if training_args.optim == "kron":
+        if training_args.optim in ["kron", "adafactor", "adam"]:
             return optimizer.init(trainable_params(params, training_args))
         opt_state = {}
         for k, p in split_scanned_params(trainable_params(params, training_args)).items():
@@ -1443,7 +1488,7 @@ def main():
 
     # Define update function
     def update_params(params, opt_state, grads):
-        if training_args.optim == "kron":
+        if training_args.optim in ["kron", "adafactor", "adam"]:
             grads = trainable_params(grads, training_args)
             new_params = trainable_params(params, training_args)
             updates, new_opt_state = optimizer.update(grads, opt_state, new_params)
@@ -1608,20 +1653,15 @@ def main():
                 raise NotImplementedError
             return loss
 
-    # Define gradient update step fn
+    # Train step
     @partial(
         pjit,
-        in_shardings=(None, params_spec, opt_state_spec, data_spec),
-        out_shardings=(None, params_spec, opt_state_spec, None),
-        donate_argnames=("params", "opt_state", "batch"),
+        in_shardings=(None, params_spec, data_spec),
+        out_shardings=(None, params_spec),
+        donate_argnames=("batch"),
         static_argnames=("gradient_accumulation_steps",),
     )
-    def train_step(rng, params, opt_state, batch, gradient_accumulation_steps):
-        if training_args.debug_dataloader:
-            metrics = {"train/loss": 1.0, "train/learning_rate": 1.0}
-            opt_state_step = 1
-            return metrics, params, opt_state, opt_state_step
-
+    def compute_grads(rng, params, batch, gradient_accumulation_steps):
         # get a minibatch (one gradient accumulation slice)
         def get_minibatch(batch, grad_idx):
             batch = jax.tree.map(lambda x: einshape("(bg)...->gb...", x, g=gradient_accumulation_steps), batch)
@@ -1694,25 +1734,6 @@ def main():
         # enforce sharding
         grads = with_sharding_constraint(grads, params_spec)
 
-        # update params
-        new_params, new_opt_state = update_params(params, opt_state, grads)
-
-        # get opt_state_step
-        if training_args.optim == "distributed_shampoo":
-            opt_state_step = new_opt_state["text"][0] if "text" in new_opt_state else new_opt_state["vision"][0]
-        elif training_args.optim in ["adam", "adafactor"]:
-            opt_state_step = new_opt_state["text"][2].count
-        elif training_args.optim == "kron":
-            psgd_idx = 0
-            for part in new_opt_state:
-                if isinstance(part, dict):  # kron state is a dict
-                    if "Qs_preconditioners" in part:
-                        break
-                psgd_idx += 1
-            opt_state_step = new_opt_state[psgd_idx]["count"]
-        else:
-            raise NotImplementedError
-
         # get global norm
         gradients_norm = jnp.sqrt(
             jnp.sum(jnp.asarray([jnp.sum(jnp.square(x)) for x in jax.tree_util.tree_leaves(grads)]))
@@ -1766,7 +1787,60 @@ def main():
                 }
             )
 
+        return metrics, grads
+
+    @partial(
+        pjit,
+        in_shardings=(params_spec, params_spec, opt_state_spec),
+        out_shardings=(None, params_spec, opt_state_spec, None),
+        donate_argnames=("params", "grads", "opt_state"),
+    )
+    def apply_grads(params, grads, opt_state):
+        # update params
+        new_params, new_opt_state = update_params(params, opt_state, grads)
+
+        # get opt_state_step
+        if training_args.optim == "distributed_shampoo":
+            opt_state_step = new_opt_state["text"][0] if "text" in new_opt_state else new_opt_state["vision"][0]
+        elif training_args.optim == "adam":
+            opt_state_step = new_opt_state[0].count
+        elif training_args.optim == "adafactor":
+            opt_state_step = new_opt_state[0][0].count
+        elif training_args.optim == "kron":
+            psgd_idx = 0
+            for part in new_opt_state:
+                if isinstance(part, dict):  # kron state is a dict
+                    if "Qs_preconditioners" in part:
+                        break
+                psgd_idx += 1
+            opt_state_step = new_opt_state[psgd_idx]["count"]
+        else:
+            raise NotImplementedError
+
+        # get metrics
+        metrics = {"train/learning_rate": learning_rate_fn(opt_state_step)}
+
         return metrics, new_params, new_opt_state, opt_state_step
+
+    # Define full train step
+    def train_step(rng, params, opt_state, batch, gradient_accumulation_steps):
+        metrics_1, grads = compute_grads(rng, params, batch, gradient_accumulation_steps)
+        metrics_2, new_params, new_opt_state, opt_state_step = apply_grads(params, grads, opt_state)
+        metrics = {**metrics_1, **metrics_2}
+        return metrics, new_params, new_opt_state, opt_state_step
+
+    # combine train_step
+    combine_train_step = (
+        training_args.optim in ["adam", "adafactor"] or len(dataset.datasets) == 1 or training_args.force_merge_compile
+    )
+    if combine_train_step:
+        train_step = pjit(
+            train_step,
+            in_shardings=(None, params_spec, opt_state_spec, data_spec),
+            out_shardings=(None, params_spec, opt_state_spec, None),
+            donate_argnames=("params", "opt_state", "batch"),
+            static_argnames=("gradient_accumulation_steps",),
+        )
 
     # Evaluation step
     @partial(
@@ -1952,8 +2026,8 @@ def main():
                 predictions_batch = jax.device_get(predictions_batch)
                 preds = tokenizer.batch_decode(predictions_batch, skip_special_tokens=True)
                 preds = [c.strip() for c in preds]
-                pixel_values = batch["pixel_values"][:n_needed]
-                # TODO: not always addressable (can be on other hosts), extract images with pjit -> None
+                with mesh:
+                    pixel_values = gather_data(batch["pixel_values"], n_needed)
                 images = jax.device_get(pixel_values)
                 images = images[:n_needed]
                 images = logits_to_image(images)
@@ -2140,7 +2214,7 @@ def main():
                         metrics[f"train/loss_{ds_name}"] = metrics["train/loss"]
                         state.log(metrics)
                     metrics_logged = True
-                    stop_training = should_stop_training(metrics)
+                    stop_training = should_stop_training(metrics) and not training_args.do_test_steps
 
                 # evaluation
                 if training_args.do_eval and step % training_args.eval_steps == 0:

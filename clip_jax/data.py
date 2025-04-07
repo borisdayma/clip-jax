@@ -1,5 +1,6 @@
 import hashlib
 import pickle
+import random
 from dataclasses import dataclass, field
 from functools import cache
 
@@ -8,6 +9,7 @@ import numpy as np
 import requests
 import tensorflow as tf
 import tensorflow_io as tfio
+from einshape import tf_einshape as einshape
 from jaxfusion.text import TextNormalizer
 
 try:
@@ -32,13 +34,7 @@ class DatasetWrapper:
         seed_dataset=None,
         **kwargs,
     ):
-        # define rng
-        global_seed = seed_dataset or np.random.randint(0, 2**32 - 1)
-        np.random.seed(global_seed)
-        if jax.process_count() == 1:
-            # this creates issues with multi-host and should not be needed anyway
-            tf.random.set_seed(global_seed)
-
+        assert seed_dataset is None  # not used at the moment
         self.n_batch = n_batch
         self.key_class = key_class
         self.ds_splits = ds_splits
@@ -49,7 +45,7 @@ class DatasetWrapper:
                     ds_idx=0,
                     ds_name="default",
                     prefetch_buffer_size=prefetch_buffer_size,
-                    seed_dataset=seed_dataset,
+                    key_class=key_class,
                     **kwargs,
                 )
             ]
@@ -66,7 +62,6 @@ class DatasetWrapper:
             assert ds_splits.endswith(".pkl")
             with open(ds_splits, "rb") as f:
                 ds_configs = pickle.load(f)
-                ds_configs = dict(sorted(ds_configs.items(), key=lambda x: x[0]))
 
             # overwrite bs and gradient accumulation
             batch_size_per_node_splits = str(batch_size_per_node_splits).split(",")
@@ -118,10 +113,9 @@ class DatasetWrapper:
                     "valid_folder": valid_folder,
                     "train_batch_size": train_batch_size,
                     "valid_batch_size": valid_batch_size,
-                    "seed_dataset": seed_dataset,
                 }
                 ds_idx += 1
-                self.datasets.append(Dataset(**dataset_kwargs))
+                self.datasets.append(Dataset(key_class=key_class, **dataset_kwargs))
                 self.gradient_accumulation_steps.append(gradient_accumulation_steps)
                 self.train_batch_size.append(train_batch_size)
                 self.valid_batch_size.append(valid_batch_size)
@@ -203,7 +197,6 @@ class Dataset:
     image_crop_resize: int = None  # resize cropped image to a fixed size
     min_original_image_size: int = None
     max_original_aspect_ratio: float = None
-    seed_dataset: int = None
     format: str = "rgb"  # rgb or lab
     key_image: str = "webp"  # name of key containing image
     key_caption: str = "caption"  # name of key containing captions
@@ -213,24 +206,30 @@ class Dataset:
     key_class: str = None  # used for classification
     mean: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
     std: list[float] = (0.5, 0.5, 0.5)  # rescale between -1 and 1 by default
+    patch_size: int = None  # patchify dataset
+    max_image_size: str = None  # max size of images
     assert_data_in_VM_region: bool = False  # assert that all files are in the same region as VM
     _train: tf.data.Dataset = field(init=False)
     _valid: tf.data.Dataset = field(init=False)
-    rng: tf.random.Generator = field(init=False)
     multi_hosts: bool = field(init=False)
     process_count: int = field(init=False)  # number of groups for validation set (multi-host)
     process_index: int = field(init=False)  # group number to use for validation set (multi-host)
+    max_patches: int = field(init=False)  # max number of patches per image
 
     def __post_init__(self):
         # verify valid args
         assert self.format in ["rgb", "lab"], f"Invalid format: {self.format}"
 
-        # define rng
-        self.deterministic = True
-        if self.seed_dataset is None:
-            self.deterministic = False
-            self.seed_dataset = np.random.randint(0, 2**32 - 1)
-        self.rng = tf.random.Generator.from_seed(self.seed_dataset)
+        # patchify dataset
+        if self.patch_size is not None:
+            assert self.max_image_size is not None, "max_image_size must be set when patch_size is set"
+            max_image_size = self.max_image_size.split("x")
+            max_image_size = [int(size) for size in max_image_size]
+            assert len(max_image_size) == 2, "max_image_size must be in the format HxW"
+            assert max_image_size[0] % self.patch_size == 0, "max_image_size must be divisible by patch_size"
+            assert max_image_size[1] % self.patch_size == 0, "max_image_size must be divisible by patch_size"
+            max_patches = max_image_size[0] // self.patch_size * max_image_size[1] // self.patch_size
+            self.max_patches = max_patches
 
         # check if we are on multi-hosts
         self.multi_hosts = jax.process_count() > 1
@@ -309,21 +308,10 @@ class Dataset:
             # we can combine parsing functions into one
             return _parse_image(*_parse_function(example_proto))
 
-        def _augment_crop(image, seed):
-            # create a new seed
-            new_seed = tf.random.experimental.stateless_split(seed, num=1)[0, :]
-            # apply random crop
-            return tf.image.stateless_random_crop(
-                image,
-                size=[self.image_crop_size, self.image_crop_size, 3],
-                seed=new_seed,
-            )
-
         # augmentation wrapper
-        def _augment_crop_wrapper(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
-            seed = self.rng.make_seeds(2)[0]
+        def _augment_crop(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
             return (
-                _augment_crop(image, seed),
+                tf.image.random_crop(image, size=[self.image_crop_size, self.image_crop_size, 3]),
                 caption,
                 caption_2,
                 caption_assistant,
@@ -357,8 +345,51 @@ class Dataset:
                 class_id,
             )
 
+        def _patchify(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
+            # position ids
+            shape = tf.shape(image)
+            n_pos_x = shape[0] // self.patch_size
+            n_pos_y = shape[1] // self.patch_size
+            pos_x = tf.range(n_pos_x)
+            pos_y = tf.range(n_pos_y)
+            pos_ids = tf.stack(tf.meshgrid(pos_x, pos_y, indexing="ij"), axis=-1)
+
+            # patchify image
+            image = einshape(
+                "(hm)(wn)c->(hw)mnc",
+                image,
+                m=self.patch_size,
+                n=self.patch_size,
+            )
+            pos_ids = einshape("hwc->(hw)c", pos_ids)
+
+            # pad
+            n_patches = tf.shape(image)[0]
+            image = tf.pad(image, [(0, self.max_patches - n_patches), (0, 0), (0, 0), (0, 0)])
+            pos_ids = tf.pad(pos_ids, [(0, self.max_patches - n_patches), (0, 0)])
+
+            # create attention mask
+            indices = tf.range(self.max_patches)
+            attention_mask = tf.less(indices, n_patches)
+
+            return (
+                {"images": image, "position_ids": pos_ids, "attention_mask": attention_mask},
+                caption,
+                caption_2,
+                caption_assistant,
+                caption_assistant_2,
+                class_id,
+            )
+
         # normalization
         def _normalize(image, caption, caption_2, caption_assistant, caption_assistant_2, class_id):
+            if isinstance(image, dict):
+                pos_ids = image["position_ids"]
+                attention_mask = image["attention_mask"]
+                image = image["images"]
+            else:
+                pos_ids = None
+                attention_mask = None
             if self.format == "rgb":
                 image = (
                     tf.cast(image, tf.float32) / 255.0 - tf.convert_to_tensor([self.mean], dtype=tf.float32)
@@ -377,6 +408,10 @@ class Dataset:
                 res["class_id"] = class_id
             res["ds_idx"] = self.ds_idx
             res["ds_name"] = self.ds_name
+            if pos_ids is not None:
+                res["position_ids"] = pos_ids
+            if attention_mask is not None:
+                res["image_attention_mask"] = attention_mask
             return res
 
         for folder, dataset, augment, batch_size in zip(
@@ -413,7 +448,7 @@ class Dataset:
                 # shuffle files and select subset
                 if augment:
                     files = files[self.process_index :: self.process_count]
-                    np.random.shuffle(files)
+                    random.shuffle(files)
 
                 # load dataset
                 ds = tf.data.TFRecordDataset(
@@ -424,7 +459,7 @@ class Dataset:
                 # non deterministic read (faster)
                 if augment:
                     ignore_order = tf.data.Options()
-                    ignore_order.deterministic = self.deterministic
+                    ignore_order.deterministic = False
                     ds = ds.with_options(ignore_order)
 
                     if self.multi_hosts:
@@ -454,16 +489,17 @@ class Dataset:
                 if augment:
                     ds = ds.shuffle(1000)
                     if self.image_crop_size:
-                        ds = ds.map(
-                            _augment_crop_wrapper,
-                            num_parallel_calls=tf.data.experimental.AUTOTUNE,
-                        )
+                        ds = ds.map(_augment_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE)
                 elif self.image_crop_size:
                     ds = ds.map(_center_crop, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 # resize
                 if self.image_crop_resize:
                     ds = ds.map(_resize, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+                # patchify (only for training)
+                if augment and self.patch_size:
+                    ds = ds.map(_patchify, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
                 # batch, normalize and prefetch
                 ds = ds.batch(batch_size, drop_remainder=True)
@@ -623,6 +659,9 @@ def preprocess_batch(
         target_id = tokenizer.unk_token_id  # TODO: configure it
         vision_start_ids = np.where(txt_inputs["input_ids"] == target_id, 1, 0).argmax(axis=-1)
         txt_inputs["vision_start_ids"] = vision_start_ids
+    if "image_attention_mask" in batch.keys():
+        txt_inputs["image_attention_mask"] = batch["image_attention_mask"]
+        txt_inputs["image_position_ids"] = batch["position_ids"]
     batch = {"pixel_values": batch["images"], **txt_inputs}
     return batch
 
@@ -633,8 +672,7 @@ class ChoiceDataset:
 
     def batch_to_choice(self, pixel_values):
         md5 = hashlib.md5(pixel_values).hexdigest()
-        rand_int = np.random.randint(0, 2)
-        self.last_choice[md5] = (self.last_choice.get(md5, rand_int) + 1) % 2
+        self.last_choice[md5] = (self.last_choice.get(md5, random.randint(0, 1)) + 1) % 2
         return self.last_choice[md5]
 
 
