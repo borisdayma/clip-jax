@@ -1382,7 +1382,7 @@ def main():
             out = {}
             for (k_ps, v_ps), (k_tree, v_tree) in zip(flat_ps.items(), flat_tree.items()):
                 shape = v_ps.value.shape
-                if "blocks" in k_ps:
+                if "layers" in k_ps:
                     # scanned layer
                     shape = shape[1:]
                 if muon_rule(shape) and not isinstance(v_tree, optax.MaskedNode):
