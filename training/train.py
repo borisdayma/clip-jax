@@ -1530,8 +1530,8 @@ def main():
                 return PartitionSpec(None)
 
         mn = optax.MaskedNode
-        muon_t_params = trainable_params(params)
-        muon_params_spec = trainable_params(params_spec)
+        muon_t_params = trainable_params(params, training_args)
+        muon_params_spec = trainable_params(params_spec, training_args)
         muon_opt_state_shapes = jax.eval_shape(optimizer.init, muon_t_params)
         adafactor_state = muon_opt_state_shapes.inner_states["adafactor"]
         muon_state = muon_opt_state_shapes.inner_states["muon"]
@@ -1595,8 +1595,6 @@ def main():
     # Set opt_state
     with mesh:
         opt_state = init_opt_state(params)
-
-    breakpoint()
 
     if model_args.restore_state:
         # Restore checkpoint
@@ -1930,12 +1928,11 @@ def main():
         if training_args.optim == "distributed_shampoo":
             opt_state_step = new_opt_state["text"][0] if "text" in new_opt_state else new_opt_state["vision"][0]
         elif training_args.optim == "adam":
-            breakpoint()
             opt_state_step = new_opt_state[0][2].count
         elif training_args.optim == "adafactor":
             opt_state_step = new_opt_state[0][0].count
         elif training_args.optim == "muon":
-            return opt_state.inner_states["muon"].inner_state[0].count
+            opt_state_step = opt_state.inner_states["muon"].inner_state[0].count
         elif training_args.optim == "kron":
             psgd_idx = 0
             for part in new_opt_state:
