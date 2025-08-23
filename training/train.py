@@ -46,6 +46,7 @@ from clip_jax.utils import asdict, count_params, load_config
 
 from adafactor import adafactorw
 from kron import get_opt_state_partition_specs, precond_update_prob_schedule, scale_by_kron
+from muon import scale_by_muon
 from precondition_local.distributed_shampoo import GraftingType, distributed_shampoo
 
 try:
@@ -118,6 +119,7 @@ class TrainingArguments:
     )
     remat_policy: str = field(default="none", metadata={"help": "Use gradient checkpointing."})
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate."})
+    muon_learning_rate: float = field(default=0.005, metadata={"help": "The initial learning rate for Muon."})
     optim: str = field(
         default="distributed_shampoo",
         metadata={
@@ -128,6 +130,10 @@ class TrainingArguments:
     beta1: float = field(
         default=0.9,
         metadata={"help": "Beta1 for Adam & Distributed Shampoo."},
+    )
+    muon_beta1: float = field(
+        default=0.95,
+        metadata={"help": "Beta1 for Muon."},
     )
     beta2: float = field(
         default=0.99,
@@ -352,6 +358,7 @@ class TrainingArguments:
             "adam",
             "adafactor",
             "kron",
+            "muon",
         ], f"Unknown optimizer {self.optim}"
         assert self.graft_type in [
             "rmsprop_normalized",
@@ -1121,7 +1128,7 @@ def main():
         ckpt["params"] = params
 
     # Create learning rate schedule
-    def create_learning_rate_fn() -> Callable[[int], jnp.array]:
+    def create_learning_rate_fn(learning_rate) -> Callable[[int], jnp.array]:
         """Create the learning rate function."""
 
         def _add_schedule(schedule, new_schedule, boundary):
@@ -1147,7 +1154,7 @@ def main():
         if training_args.warmup_steps > 0:
             new_schedule = optax.linear_schedule(
                 init_value=0.0,
-                end_value=training_args.learning_rate,
+                end_value=learning_rate,
                 transition_steps=training_args.warmup_steps,
             )
             schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
@@ -1156,14 +1163,14 @@ def main():
         # decay
         if training_args.lr_decay == "linear":
             new_schedule = optax.linear_schedule(
-                init_value=training_args.learning_rate,
+                init_value=learning_rate,
                 end_value=0,
                 transition_steps=training_args.lr_transition_steps,
             )
             schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
         elif training_args.lr_decay == "exponential":
             new_schedule = optax.exponential_decay(
-                init_value=training_args.learning_rate,
+                init_value=learning_rate,
                 transition_steps=training_args.lr_transition_steps,
                 decay_rate=training_args.lr_decay_rate,
                 staircase=training_args.lr_staircase,
@@ -1171,18 +1178,21 @@ def main():
             schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
         elif training_args.lr_decay == "cosine":
             new_schedule = optax.cosine_decay_schedule(
-                init_value=training_args.learning_rate,
+                init_value=learning_rate,
                 decay_steps=training_args.lr_transition_steps,
             )
             schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
         else:
             # constant
-            new_schedule = optax.constant_schedule(training_args.learning_rate)
+            new_schedule = optax.constant_schedule(learning_rate)
             schedule_fn = _add_schedule(schedule_fn, new_schedule, last_boundary)
 
         return schedule_fn
 
-    learning_rate_fn = create_learning_rate_fn()
+    learning_rate_fn = create_learning_rate_fn(training_args.learning_rate)
+    muon_learning_rate_fn = create_learning_rate_fn(training_args.muon_learning_rate)
+    logical_params_for_opt = trainable_params(logical_params, training_args)
+    scanned_layers_arg = scanned_params_bool(logical_params_for_opt)
 
     # create optimizer
     if training_args.optim == "distributed_shampoo":
@@ -1346,6 +1356,77 @@ def main():
             mask=None,
         )
 
+    elif training_args.optim == "muon":
+        if training_args.muon_beta1 != 0.95:
+            print(f"WARNING: muon is best used with beta1=0.95, using {training_args.muon_beta1} instead")
+
+        # not used for embeddings
+        muon_rule = lambda shape: len(shape) > 1 and max(shape) < 16384
+
+        # which params do we want to use muon for, and which adafactor?
+        def muon_or_adafactor(ps):
+            flat = flatten_dict(ps, sep=":")
+            out = {}
+            for k, v in flat.items():
+                shape = v.value.shape
+                if "layers" in k:
+                    # scanned layer
+                    shape = shape[1:]
+                if muon_rule(shape):
+                    out[k] = "muon"
+                else:
+                    out[k] = "adafactor"
+            return unflatten_dict(out, sep=":")
+
+        # a tool for later to work with optax multi_transform
+        def filter_for_muon(ps, tree):
+            flat_ps = flatten_dict(ps, sep=":")
+            flat_tree = flatten_dict(tree, sep=":")
+            out = {}
+            for (k_ps, v_ps), (k_tree, v_tree) in zip(flat_ps.items(), flat_tree.items()):
+                shape = v_ps.value.shape
+                if "layers" in k_ps:
+                    # scanned layer
+                    shape = shape[1:]
+                if muon_rule(shape) and not isinstance(v_tree, optax.MaskedNode):
+                    out[k_tree] = v_tree
+                else:
+                    out[k_tree] = None
+            return unflatten_dict(out, sep=":")
+
+        muon_chain = [
+            scale_by_muon(
+                beta=training_args.muon_beta1,
+                scanned_layers=scanned_layers_arg,
+                lax_map_scanned_layers=True if training_args.lax_map_batch_size is not None else False,
+                lax_map_batch_size=training_args.lax_map_batch_size
+                if training_args.lax_map_batch_size is not None
+                else 8,
+            )
+        ]
+        if training_args.weight_decay > 0:
+            muon_chain.append(optax.add_decayed_weights(training_args.weight_decay))
+        muon_chain.append(optax.scale_by_learning_rate(muon_learning_rate_fn))
+        optimizer = optax.multi_transform(
+            transforms={
+                "muon": optax.chain(*muon_chain),
+                "adafactor": adafactorw(
+                    learning_rate=learning_rate_fn,
+                    min_dim_size_to_factor=32,
+                    decay_rate=0.8,
+                    decay_offset=0,
+                    beta2_cap=training_args.beta2,
+                    clipping_threshold=training_args.grad_clip_norm,
+                    momentum=training_args.beta1,
+                    dtype_momentum=jnp.bfloat16,
+                    eps=1e-30,
+                    weight_decay=training_args.weight_decay,
+                    mask=None,
+                ),
+            },
+            param_labels=muon_or_adafactor(trainable_params(logical_params, training_args)),
+        )
+
     # get PartitionSpecof optimizer state
     def get_opt_state_spec_shampoo():
         split_spec = split_scanned_params(trainable_params(params_spec))
@@ -1437,6 +1518,46 @@ def main():
 
         return out_specs
 
+
+
+    def get_opt_state_spec_muon():
+        def set_sharding(x):
+            if isinstance(x, optax.MaskedNode):
+                return None
+            else:
+                if not hasattr(x, "shape") or len(x.shape) == 0:
+                    return PartitionSpec()
+                return PartitionSpec(None)
+
+        mn = optax.MaskedNode
+        muon_t_params = trainable_params(params)
+        muon_params_spec = trainable_params(params_spec)
+        muon_opt_state_shapes = jax.eval_shape(optimizer.init, muon_t_params)
+        adafactor_state = muon_opt_state_shapes.inner_states["adafactor"]
+        muon_state = muon_opt_state_shapes.inner_states["muon"]
+
+        muon_out_specs = optax.transforms._combining.PartitionState(
+            inner_states={
+                # replicate adafactor state
+                "adafactor": jax.tree.map(
+                    set_sharding,
+                    adafactor_state,
+                    is_leaf=lambda x: isinstance(x, (jnp.ndarray, jax.ShapeDtypeStruct, mn)),
+                ),
+                # shard muon according to params
+                "muon": optax.transforms.MaskedState(
+                    inner_state=jax.tree.map(
+                        lambda x: filter_for_muon(trainable_params(logical_params, training_args), muon_params_spec)
+                        if isinstance(x, dict)
+                        else set_sharding(x),
+                        muon_state.inner_state,
+                        is_leaf=lambda x: isinstance(x, (jnp.ndarray, jax.ShapeDtypeStruct, mn, dict)),
+                    ),
+                ),
+            },
+        )
+        return muon_out_specs
+
     def get_opt_state_spec():
         if training_args.optim == "kron":
             return get_opt_state_partition_specs(
@@ -1446,6 +1567,8 @@ def main():
             return get_opt_state_spec_adamlike()
         elif training_args.optim == "distributed_shampoo":
             return get_opt_state_spec_shampoo()
+        elif training_args.optim == "muon":
+            return get_opt_state_spec_muon()
 
     opt_state_spec = get_opt_state_spec()
 
@@ -1459,7 +1582,7 @@ def main():
 
     @partial(pjit, in_shardings=(params_spec,), out_shardings=opt_state_spec)
     def init_opt_state(params):
-        if training_args.optim in ["kron", "adafactor", "adam"]:
+        if training_args.optim in ["kron", "adafactor", "adam", "muon"]:
             return optimizer.init(trainable_params(params, training_args))
         opt_state = {}
         for k, p in split_scanned_params(trainable_params(params, training_args)).items():
@@ -1472,6 +1595,8 @@ def main():
     # Set opt_state
     with mesh:
         opt_state = init_opt_state(params)
+
+    breakpoint()
 
     if model_args.restore_state:
         # Restore checkpoint
@@ -1488,7 +1613,7 @@ def main():
 
     # Define update function
     def update_params(params, opt_state, grads):
-        if training_args.optim in ["kron", "adafactor", "adam"]:
+        if training_args.optim in ["kron", "adafactor", "adam", "muon"]:
             grads = trainable_params(grads, training_args)
             new_params = trainable_params(params, training_args)
             updates, new_opt_state = optimizer.update(grads, opt_state, new_params)
@@ -1744,6 +1869,8 @@ def main():
             "train/learning_rate": learning_rate_fn(opt_state_step),
             "train/grads_norm": gradients_norm,
         }
+        if training_args.optim == "muon":
+            metrics["train/muon_learning_rate"] = muon_learning_rate_fn(opt_state_step)
 
         # extract norms and histograms
 
@@ -1803,9 +1930,12 @@ def main():
         if training_args.optim == "distributed_shampoo":
             opt_state_step = new_opt_state["text"][0] if "text" in new_opt_state else new_opt_state["vision"][0]
         elif training_args.optim == "adam":
-            opt_state_step = new_opt_state[0].count
+            breakpoint()
+            opt_state_step = new_opt_state[0][2].count
         elif training_args.optim == "adafactor":
             opt_state_step = new_opt_state[0][0].count
+        elif training_args.optim == "muon":
+            return opt_state.inner_states["muon"].inner_state[0].count
         elif training_args.optim == "kron":
             psgd_idx = 0
             for part in new_opt_state:
