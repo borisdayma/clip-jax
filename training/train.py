@@ -1946,6 +1946,8 @@ def main():
 
         # get metrics
         metrics = {"train/learning_rate": learning_rate_fn(opt_state_step)}
+        if training_args.optim == "muon":
+            metrics["train/muon_learning_rate"] = muon_learning_rate_fn(opt_state_step)
 
         return metrics, new_params, new_opt_state, opt_state_step
 
