@@ -10,15 +10,20 @@ import requests
 import tensorflow as tf
 import tensorflow_io as tfio
 from einshape import tf_einshape as einshape
-from jaxfusion.text import TextNormalizer
+
+try:
+    # TODO: experimental
+    from jaxfusion.text import TextNormalizer
+
+    tn = TextNormalizer()
+except:
+    TextNormalizer = None
+    tn = lambda x: x
 
 try:
     from google.cloud import storage
 except:
     storage = None
-
-
-tn = TextNormalizer()
 
 
 class DatasetWrapper:
