@@ -363,7 +363,7 @@ def scale_by_kron(
 
         # normalize grads
         def norm_grads(g):
-            return g / (jnp.linalg.norm(g) + 1e-16)
+            return g / (jnp.linalg.norm(g) + 1e-6)
 
         if normalize_grads:
             updates = jax.tree.map(norm_grads, updates)

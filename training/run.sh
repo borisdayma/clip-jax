@@ -1,0 +1,58 @@
+# instance name
+instance_name=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/description)
+echo INSTANCE_NAME=$instance_name
+
+WANDB_NOTES=$instance_name python train.py \
+    --assert_TPU_available \
+    --assert_data_in_VM_region \
+    --output_dir /home/evanwalters/clip-jax/training/trained_model \
+    --overwrite_output_dir \
+    --checkpoints_to_keep 1 \
+    --config_name ../configs/mini-patch16-cappa.json \
+    --tokenizer_name boris/cappa-large-patch16-256-jax \
+    --unroll 100 \
+    --train_folder ./datacomp1b_train.pkl \
+    --valid_folder ./datacomp1b_valid.pkl \
+    --seed_model 42 \
+    --image_crop_resize 256 \
+    --key_caption caption_normalized \
+    --do_train \
+    --do_eval \
+    --n_predict 128 \
+    --n_predict_batch 8 \
+    --dtype bfloat16 \
+    --float32_logits \
+    --remat_policy none \
+    --learning_rate 3.0e-5 \
+    --muon_learning_rate 3.0e-4 \
+    --warmup_steps 0 \
+    --lr_offset 0 \
+    --batch_size_per_node 512 \
+    --gradient_accumulation_steps 1 \
+    --num_train_epochs 2 \
+    --vision_projection_only False \
+    --valid_batch_size_per_node 256 \
+    --weight_decay 0 \
+    --optim quad \
+    --beta1 0.95 \
+    --beta2 0.99 \
+    --preconditioning_compute_steps 100 \
+    --block_size_text 1024 \
+    --block_size_vision 1024 \
+    --quad_max_size_dense 16384 \
+    --quad_max_skew_dense 16384 \
+    --quad_preconditioner_lr 0.8 \
+    --quad_target_merged_dim_size 4096 \
+    --kron_merge_small_dims True \
+    --kron_partition_grads_into_blocks True \
+    --kron_normalize_grads False \
+    --nesterov \
+    --graft_type rmsprop_normalized \
+    --mp_devices 1 \
+    --shard_shampoo_across 2d \
+    --activation_partitioning_dims 1 \
+    --parameter_partitioning_dims 1 \
+    --logging_steps 50 \
+    --eval_steps 2000 \
+    --save_steps 2000 \
+    --wandb_entity optim-team
